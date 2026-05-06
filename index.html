@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.22';
+const APP_VERSION = 'v2.23';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -928,6 +928,27 @@ function statusTile(label, icon, value, ok) {
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ============================================================
+   VIEW-MODE-TOGGLE (Standard / Kompakt / Tabellarisch)
+   ============================================================ */
+function viewModeToggle(currentMode, handlerName) {
+  const modes = [
+    { id: 'standard', icon: 'layout-grid', label: 'Standard' },
+    { id: 'kompakt',  icon: 'list',        label: 'Kompakt' },
+    { id: 'tabelle',  icon: 'table-2',     label: 'Tabellarisch' }
+  ];
+  return `
+    <div class="inline-flex rounded-lg border border-ink-200 overflow-hidden">
+      ${modes.map(m => `
+        <button type="button" onclick="${handlerName}('${m.id}')" title="${m.label}"
+                class="px-2 py-1.5 ${currentMode === m.id ? 'bg-brand-500 text-white' : 'bg-white text-ink-600 hover:bg-ink-50'}">
+          <i data-lucide="${m.icon}" class="w-4 h-4"></i>
+        </button>
+      `).join('')}
+    </div>
+  `;
 }
 
 /* ============================================================
@@ -1818,7 +1839,8 @@ WICHTIG:
 /* ============================================================
    STAMMDATEN: KUNDEN
    ============================================================ */
-const _customerListState = { search: '', sort: 'name', showArchived: false };
+const _customerListState = { search: '', sort: 'name', showArchived: false, viewMode: 'standard' };
+function setCustomerViewMode(mode) { _customerListState.viewMode = mode; renderCustomers(); }
 let _customerSearchTimer = null;
 
 async function nextCustomerNo(companyId) {
@@ -1917,12 +1939,38 @@ async function renderCustomers() {
             <input type="checkbox" ${_customerListState.showArchived?'checked':''} onchange="_customerListState.showArchived=this.checked;renderCustomers()" class="w-4 h-4 rounded border-ink-300">
             <span>auch archivierte</span>
           </label>
+          <div class="ml-auto">${viewModeToggle(_customerListState.viewMode, 'setCustomerViewMode')}</div>
         </div>
-        <div class="divide-y divide-ink-100">
-          ${list.length === 0
-            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _customerListState.showArchived ? 'Keine Treffer.' : 'Noch keine Kunden für diesen Mandanten. Lege den ersten an mit „+ Neuer Kunde".'}</div>`
-            : list.map(rec => customerRow(rec, primaryByCust[rec.id])).join('')}
-        </div>
+        ${(() => {
+          const vm = _customerListState.viewMode;
+          if (list.length === 0) return `<div class="p-10 text-center text-ink-500 text-sm">${q || _customerListState.showArchived ? 'Keine Treffer.' : 'Noch keine Kunden für diesen Mandanten. Lege den ersten an mit „+ Neuer Kunde".'}</div>`;
+          if (vm === 'tabelle') {
+            return `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500">
+                    <tr>
+                      <th class="px-3 py-2 text-left">Kundennr.</th>
+                      <th class="px-3 py-2 text-left">Name</th>
+                      <th class="px-3 py-2 text-left">Ort</th>
+                      <th class="px-3 py-2 text-left">E-Mail</th>
+                      <th class="px-3 py-2 text-left">Telefon</th>
+                      <th class="px-3 py-2 text-left">Hauptansprechpartner</th>
+                      <th class="px-3 py-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-ink-100">
+                    ${list.map(rec => customerRowTabelle(rec, primaryByCust[rec.id])).join('')}
+                  </tbody>
+                </table>
+              </div>
+            `;
+          }
+          if (vm === 'kompakt') {
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => customerRowKompakt(rec, primaryByCust[rec.id])).join('') + '</div>';
+          }
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => customerRow(rec, primaryByCust[rec.id])).join('') + '</div>';
+        })()}
       </div>
     </div>
   `;
@@ -1950,6 +1998,44 @@ function onCustomerSearchInput(value) {
   _customerListState.search = value;
   clearTimeout(_customerSearchTimer);
   _customerSearchTimer = setTimeout(() => _renderWithSearchFocus(renderCustomers), 200);
+}
+
+function customerRowKompakt(rec, primary) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const cityZip = [f.zip, f.city].filter(Boolean).join(' ');
+  const sal = primary ? contactSalutation(primary) : '';
+  const contactSummary = primary ? (sal ? sal + ' ' : '') + contactDisplayName(primary) : '';
+  return `
+    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer" onclick="openCustomerModal('${rec.id}')">
+      <span class="text-xs font-mono text-ink-500 w-16 shrink-0">${escapeHtml(f.customer_no || '–')}</span>
+      <span class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'} truncate flex-1 min-w-0">${escapeHtml(f.name1 || '–')}</span>
+      <span class="text-xs text-ink-500 truncate hidden sm:inline w-32">${escapeHtml(cityZip)}</span>
+      <span class="text-xs text-ink-500 truncate hidden md:inline w-48">${escapeHtml(contactSummary)}</span>
+    </div>
+  `;
+}
+
+function customerRowTabelle(rec, primary) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const cityZip = [f.zip, f.city].filter(Boolean).join(' ');
+  const sal = primary ? contactSalutation(primary) : '';
+  const contactSummary = primary ? (sal ? sal + ' ' : '') + contactDisplayName(primary) : '';
+  return `
+    <tr class="hover:bg-ink-50 cursor-pointer" onclick="openCustomerModal('${rec.id}')">
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.customer_no || '–')}</td>
+      <td class="px-3 py-2 font-medium ${archived ? 'line-through text-ink-500' : 'text-ink-900'}">${escapeHtml(f.name1 || '–')}${f.name2 ? ` <span class="text-ink-500 text-xs">· ${escapeHtml(f.name2)}</span>` : ''}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(cityZip)}</td>
+      <td class="px-3 py-2 text-ink-700 truncate max-w-[180px]">${escapeHtml(f.email || '')}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(f.phone || '')}</td>
+      <td class="px-3 py-2 text-ink-700 truncate max-w-[180px]">${escapeHtml(contactSummary)}</td>
+      <td class="px-3 py-2 text-right whitespace-nowrap" onclick="event.stopPropagation()">
+        <button onclick="openCustomerModal('${rec.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+        <button onclick="toggleCustomerArchive('${rec.id}', ${!archived})" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded"><i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-3.5 h-3.5"></i></button>
+      </td>
+    </tr>
+  `;
 }
 
 function customerRow(rec, primary) {
@@ -2129,7 +2215,8 @@ async function toggleCustomerArchive(id, archive) {
 /* ============================================================
    STAMMDATEN: LIEFERANTEN
    ============================================================ */
-const _supplierListState = { search: '', sort: 'name', showArchived: false };
+const _supplierListState = { search: '', sort: 'name', showArchived: false, viewMode: 'standard' };
+function setSupplierViewMode(mode) { _supplierListState.viewMode = mode; renderSuppliers(); }
 let _supplierSearchTimer = null;
 
 async function nextSupplierNo(companyId) {
@@ -2219,12 +2306,29 @@ async function renderSuppliers() {
             <input type="checkbox" ${_supplierListState.showArchived?'checked':''} onchange="_supplierListState.showArchived=this.checked;renderSuppliers()" class="w-4 h-4 rounded border-ink-300">
             <span>auch archivierte</span>
           </label>
+          <div class="ml-auto">${viewModeToggle(_supplierListState.viewMode, 'setSupplierViewMode')}</div>
         </div>
-        <div class="divide-y divide-ink-100">
-          ${list.length === 0
-            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _supplierListState.showArchived ? 'Keine Treffer.' : 'Noch keine Lieferanten für diesen Mandanten. Lege den ersten an mit „+ Neuer Lieferant".'}</div>`
-            : list.map(rec => supplierRow(rec, primaryBySup[rec.id])).join('')}
-        </div>
+        ${(() => {
+          const vm = _supplierListState.viewMode;
+          if (list.length === 0) return `<div class="p-10 text-center text-ink-500 text-sm">${q || _supplierListState.showArchived ? 'Keine Treffer.' : 'Noch keine Lieferanten für diesen Mandanten. Lege den ersten an mit „+ Neuer Lieferant".'}</div>`;
+          if (vm === 'tabelle') {
+            return `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500"><tr>
+                    <th class="px-3 py-2 text-left">Lief-Nr.</th><th class="px-3 py-2 text-left">Name</th>
+                    <th class="px-3 py-2 text-left">Ort</th><th class="px-3 py-2 text-left">E-Mail</th>
+                    <th class="px-3 py-2 text-left">Telefon</th><th class="px-3 py-2"></th>
+                  </tr></thead>
+                  <tbody class="divide-y divide-ink-100">${list.map(rec => supplierRowTabelle(rec, primaryBySup[rec.id])).join('')}</tbody>
+                </table>
+              </div>`;
+          }
+          if (vm === 'kompakt') {
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => supplierRowKompakt(rec)).join('') + '</div>';
+          }
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => supplierRow(rec, primaryBySup[rec.id])).join('') + '</div>';
+        })()}
       </div>
     </div>
   `;
@@ -2235,6 +2339,39 @@ function onSupplierSearchInput(value) {
   _supplierListState.search = value;
   clearTimeout(_supplierSearchTimer);
   _supplierSearchTimer = setTimeout(() => _renderWithSearchFocus(renderSuppliers), 200);
+}
+
+function supplierRowKompakt(rec) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const cityZip = [f.zip, f.city].filter(Boolean).join(' ');
+  return `
+    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer" onclick="openSupplierModal('${rec.id}')">
+      <span class="text-xs font-mono text-ink-500 w-16 shrink-0">${escapeHtml(f.supplier_no || '–')}</span>
+      <span class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'} truncate flex-1 min-w-0">${escapeHtml(f.name1 || '–')}</span>
+      <span class="text-xs text-ink-500 truncate hidden sm:inline w-32">${escapeHtml(cityZip)}</span>
+      <span class="text-xs text-ink-500 truncate hidden md:inline w-48">${escapeHtml(f.email || '')}</span>
+    </div>
+  `;
+}
+
+function supplierRowTabelle(rec, primary) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const cityZip = [f.zip, f.city].filter(Boolean).join(' ');
+  return `
+    <tr class="hover:bg-ink-50 cursor-pointer" onclick="openSupplierModal('${rec.id}')">
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.supplier_no || '–')}</td>
+      <td class="px-3 py-2 font-medium ${archived ? 'line-through text-ink-500' : 'text-ink-900'}">${escapeHtml(f.name1 || '–')}${f.name2 ? ` <span class="text-ink-500 text-xs">· ${escapeHtml(f.name2)}</span>` : ''}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(cityZip)}</td>
+      <td class="px-3 py-2 text-ink-700 truncate max-w-[180px]">${escapeHtml(f.email || '')}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(f.phone || '')}</td>
+      <td class="px-3 py-2 text-right whitespace-nowrap" onclick="event.stopPropagation()">
+        <button onclick="openSupplierModal('${rec.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+        <button onclick="toggleSupplierArchive('${rec.id}', ${!archived})" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded"><i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-3.5 h-3.5"></i></button>
+      </td>
+    </tr>
+  `;
 }
 
 function supplierRow(rec, primary) {
@@ -2408,7 +2545,8 @@ async function toggleSupplierArchive(id, archive) {
 /* ============================================================
    STAMMDATEN: ARTIKEL
    ============================================================ */
-const _articleListState = { search: '', sort: 'name', showArchived: false };
+const _articleListState = { search: '', sort: 'name', showArchived: false, viewMode: 'standard' };
+function setArticleViewMode(mode) { _articleListState.viewMode = mode; renderArticles(); }
 let _articleSearchTimer = null;
 
 const ART_CATEGORY_DEFAULTS = ['Frequenzumrichter'];
@@ -2539,12 +2677,30 @@ async function renderArticles() {
             <input type="checkbox" ${_articleListState.showArchived?'checked':''} onchange="_articleListState.showArchived=this.checked;renderArticles()" class="w-4 h-4 rounded border-ink-300">
             <span>auch archivierte</span>
           </label>
+          <div class="ml-auto">${viewModeToggle(_articleListState.viewMode, 'setArticleViewMode')}</div>
         </div>
-        <div class="divide-y divide-ink-100">
-          ${list.length === 0
-            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _articleListState.showArchived ? 'Keine Treffer.' : 'Noch keine Artikel für diesen Mandanten. Lege den ersten an mit „+ Neuer Artikel".'}</div>`
-            : list.map(rec => articleRow(rec, catMap, manMap)).join('')}
-        </div>
+        ${(() => {
+          const vm = _articleListState.viewMode;
+          if (list.length === 0) return `<div class="p-10 text-center text-ink-500 text-sm">${q || _articleListState.showArchived ? 'Keine Treffer.' : 'Noch keine Artikel für diesen Mandanten. Lege den ersten an mit „+ Neuer Artikel".'}</div>`;
+          if (vm === 'tabelle') {
+            return `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500"><tr>
+                    <th class="px-3 py-2 text-left">Art-Nr.</th><th class="px-3 py-2 text-left">Name</th>
+                    <th class="px-3 py-2 text-left">Kategorie</th><th class="px-3 py-2 text-left">Hersteller</th>
+                    <th class="px-3 py-2 text-right">VK</th><th class="px-3 py-2 text-left">Einheit</th>
+                    <th class="px-3 py-2"></th>
+                  </tr></thead>
+                  <tbody class="divide-y divide-ink-100">${list.map(rec => articleRowTabelle(rec, catMap, manMap)).join('')}</tbody>
+                </table>
+              </div>`;
+          }
+          if (vm === 'kompakt') {
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => articleRowKompakt(rec, catMap, manMap)).join('') + '</div>';
+          }
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => articleRow(rec, catMap, manMap)).join('') + '</div>';
+        })()}
       </div>
     </div>
   `;
@@ -2555,6 +2711,49 @@ function onArticleSearchInput(value) {
   _articleListState.search = value;
   clearTimeout(_articleSearchTimer);
   _articleSearchTimer = setTimeout(() => _renderWithSearchFocus(renderArticles), 200);
+}
+
+function articleRowKompakt(rec, catMap, manMap) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const catId = (f.category_id || [])[0];
+  const manId = (f.manufacturer_id || [])[0];
+  const catName = catMap?.[catId]?.name || f.category || '';
+  const manName = manMap?.[manId]?.name || f.manufacturer || '';
+  const price = (f.sales_price !== undefined && f.sales_price !== null && f.sales_price !== '') ? formatPrice(f.sales_price) + ' €' : '';
+  return `
+    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer" onclick="openArticleModal('${rec.id}')">
+      <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.article_no || '–')}</span>
+      <span class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'} truncate flex-1 min-w-0">${escapeHtml(f.name1 || '–')}</span>
+      <span class="text-xs text-ink-500 truncate hidden sm:inline w-32">${escapeHtml(catName)}</span>
+      <span class="text-xs text-ink-500 truncate hidden md:inline w-32">${escapeHtml(manName)}</span>
+      <span class="font-mono text-sm text-ink-900 tabular-nums w-20 text-right">${escapeHtml(price)}</span>
+    </div>
+  `;
+}
+
+function articleRowTabelle(rec, catMap, manMap) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const catId = (f.category_id || [])[0];
+  const manId = (f.manufacturer_id || [])[0];
+  const catName = catMap?.[catId]?.name || f.category || '';
+  const manName = manMap?.[manId]?.name || f.manufacturer || '';
+  const price = (f.sales_price !== undefined && f.sales_price !== null && f.sales_price !== '') ? formatPrice(f.sales_price) + ' €' : '';
+  return `
+    <tr class="hover:bg-ink-50 cursor-pointer" onclick="openArticleModal('${rec.id}')">
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.article_no || '–')}</td>
+      <td class="px-3 py-2 font-medium ${archived ? 'line-through text-ink-500' : 'text-ink-900'}">${escapeHtml(f.name1 || '–')}${f.name2 ? ` <span class="text-ink-500 text-xs">· ${escapeHtml(f.name2)}</span>` : ''}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(catName)}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(manName)}</td>
+      <td class="px-3 py-2 font-mono text-ink-900 tabular-nums text-right whitespace-nowrap">${escapeHtml(price)}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(f.unit || '')}</td>
+      <td class="px-3 py-2 text-right whitespace-nowrap" onclick="event.stopPropagation()">
+        <button onclick="openArticleModal('${rec.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+        <button onclick="toggleArticleArchive('${rec.id}', ${!archived})" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded"><i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-3.5 h-3.5"></i></button>
+      </td>
+    </tr>
+  `;
 }
 
 function articleRow(rec, catMap, manMap) {
@@ -2849,7 +3048,8 @@ async function toggleArticleArchive(id, archive) {
 /* ============================================================
    VERKAUF: ANFRAGEN (Inquiry)
    ============================================================ */
-const _inquiryListState = { search: '', status: 'alle' };
+const _inquiryListState = { search: '', status: 'alle', viewMode: 'standard' };
+function setInquiryViewMode(mode) { _inquiryListState.viewMode = mode; renderInquiries(); }
 let _inquirySearchTimer = null;
 let _inquiryImages = []; // im Modal gehaltene Bilder { name, mediaType, base64 (ohne data: prefix), dataUrl (mit prefix für preview) }
 let _inquirySpeech = null; // Web-Speech-Recognition Instanz
@@ -2931,12 +3131,29 @@ async function renderInquiries() {
             <option value="abgelehnt"       ${_inquiryListState.status==='abgelehnt'?'selected':''}>abgelehnt</option>
             <option value="archiviert"      ${_inquiryListState.status==='archiviert'?'selected':''}>archiviert</option>
           </select>
+          <div class="ml-auto">${viewModeToggle(_inquiryListState.viewMode, 'setInquiryViewMode')}</div>
         </div>
-        <div class="divide-y divide-ink-100">
-          ${list.length === 0
-            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _inquiryListState.status !== 'alle' ? 'Keine Treffer.' : 'Noch keine Anfragen. Lege die erste an mit „+ Neue Anfrage".'}</div>`
-            : list.map(rec => inquiryRow(rec, custMap)).join('')}
-        </div>
+        ${(() => {
+          const vm = _inquiryListState.viewMode;
+          if (list.length === 0) return `<div class="p-10 text-center text-ink-500 text-sm">${q || _inquiryListState.status !== 'alle' ? 'Keine Treffer.' : 'Noch keine Anfragen. Lege die erste an mit „+ Neue Anfrage".'}</div>`;
+          if (vm === 'tabelle') {
+            return `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500"><tr>
+                    <th class="px-3 py-2 text-left">Nr.</th><th class="px-3 py-2 text-left">Ticket</th>
+                    <th class="px-3 py-2 text-left">Betreff</th><th class="px-3 py-2 text-left">Kunde</th>
+                    <th class="px-3 py-2 text-left">Status</th>
+                  </tr></thead>
+                  <tbody class="divide-y divide-ink-100">${list.map(rec => inquiryRowTabelle(rec, custMap)).join('')}</tbody>
+                </table>
+              </div>`;
+          }
+          if (vm === 'kompakt') {
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => inquiryRowKompakt(rec, custMap)).join('') + '</div>';
+          }
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => inquiryRow(rec, custMap)).join('') + '</div>';
+        })()}
       </div>
     </div>
   `;
@@ -2959,6 +3176,35 @@ function inquiryStatusBadge(status) {
   };
   const [cls, label] = map[status] || map['offen'];
   return `<span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded ${cls}">${label}</span>`;
+}
+
+function inquiryRowKompakt(rec, custMap) {
+  const f = rec.fields || {};
+  const cid = (f.customer_id || [])[0];
+  const cust = custMap?.[cid];
+  return `
+    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer" onclick="openInquiryModal('${rec.id}')">
+      <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.inquiry_no || '–')}</span>
+      <span class="font-medium text-ink-900 truncate flex-1 min-w-0">${escapeHtml(f.title || '— ohne Betreff —')}</span>
+      <span class="text-xs hidden sm:inline">${inquiryStatusBadge(f.status || 'offen')}</span>
+      <span class="text-xs text-ink-500 truncate hidden md:inline w-40">${escapeHtml(cust?.name1 || '')}</span>
+    </div>
+  `;
+}
+
+function inquiryRowTabelle(rec, custMap) {
+  const f = rec.fields || {};
+  const cid = (f.customer_id || [])[0];
+  const cust = custMap?.[cid];
+  return `
+    <tr class="hover:bg-ink-50 cursor-pointer" onclick="openInquiryModal('${rec.id}')">
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.inquiry_no || '–')}</td>
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${f.ticket_no ? 'FT ' + escapeHtml(f.ticket_no) : '–'}</td>
+      <td class="px-3 py-2 font-medium text-ink-900">${escapeHtml(f.title || '—')}</td>
+      <td class="px-3 py-2 text-ink-700">${escapeHtml(cust?.name1 || '')}</td>
+      <td class="px-3 py-2">${inquiryStatusBadge(f.status || 'offen')}</td>
+    </tr>
+  `;
 }
 
 function inquiryRow(rec, custMap) {
@@ -3825,7 +4071,8 @@ async function inqWizCreateQuote() {
 /* ============================================================
    VERKAUF: ANGEBOTE (Quote + QuoteItem)
    ============================================================ */
-const _quoteListState = { search: '', status: 'alle' };
+const _quoteListState = { search: '', status: 'alle', viewMode: 'standard' };
+function setQuoteViewMode(mode) { _quoteListState.viewMode = mode; renderQuotes(); }
 let _quoteSearchTimer = null;
 
 function quoteStatusBadge(status) {
@@ -4006,12 +4253,29 @@ async function renderQuotes() {
             <option value="abgelaufen"  ${_quoteListState.status==='abgelaufen'?'selected':''}>abgelaufen</option>
             <option value="archiviert"  ${_quoteListState.status==='archiviert'?'selected':''}>archiviert</option>
           </select>
+          <div class="ml-auto">${viewModeToggle(_quoteListState.viewMode, 'setQuoteViewMode')}</div>
         </div>
-        <div class="divide-y divide-ink-100">
-          ${list.length === 0
-            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _quoteListState.status !== 'alle' ? 'Keine Treffer.' : 'Noch keine Angebote. Lege das erste an mit „+ Neues Angebot".'}</div>`
-            : list.map(rec => quoteRow(rec, custMap)).join('')}
-        </div>
+        ${(() => {
+          const vm = _quoteListState.viewMode;
+          if (list.length === 0) return `<div class="p-10 text-center text-ink-500 text-sm">${q || _quoteListState.status !== 'alle' ? 'Keine Treffer.' : 'Noch keine Angebote. Lege das erste an mit „+ Neues Angebot".'}</div>`;
+          if (vm === 'tabelle') {
+            return `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500"><tr>
+                    <th class="px-3 py-2 text-left">Nr.</th><th class="px-3 py-2 text-left">Datum</th>
+                    <th class="px-3 py-2 text-left">Kunde</th><th class="px-3 py-2 text-left">Status</th>
+                    <th class="px-3 py-2 text-right">Brutto</th>
+                  </tr></thead>
+                  <tbody class="divide-y divide-ink-100">${list.map(rec => quoteRowTabelle(rec, custMap)).join('')}</tbody>
+                </table>
+              </div>`;
+          }
+          if (vm === 'kompakt') {
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRowKompakt(rec, custMap)).join('') + '</div>';
+          }
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRow(rec, custMap)).join('') + '</div>';
+        })()}
       </div>
     </div>
   `;
@@ -4022,6 +4286,38 @@ function onQuoteSearchInput(value) {
   _quoteListState.search = value;
   clearTimeout(_quoteSearchTimer);
   _quoteSearchTimer = setTimeout(() => _renderWithSearchFocus(renderQuotes), 200);
+}
+
+function quoteRowKompakt(rec, custMap) {
+  const f = rec.fields || {};
+  const cid = (f.customer_id || [])[0];
+  const cust = custMap?.[cid];
+  const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== '' ? formatPrice(f.total_gross) + ' €' : '';
+  return `
+    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer" onclick="openQuoteModal('${rec.id}')">
+      <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.quote_no || '–')}</span>
+      <span class="font-medium text-ink-900 truncate flex-1 min-w-0">${escapeHtml(cust?.name1 || '— ohne Kunde —')}</span>
+      <span class="text-xs hidden sm:inline">${quoteStatusBadge(f.status || 'Entwurf')}</span>
+      <span class="text-xs text-ink-500 hidden md:inline w-24">${escapeHtml(f.date || '')}</span>
+      <span class="font-mono text-sm text-ink-900 tabular-nums w-24 text-right">${escapeHtml(total)}</span>
+    </div>
+  `;
+}
+
+function quoteRowTabelle(rec, custMap) {
+  const f = rec.fields || {};
+  const cid = (f.customer_id || [])[0];
+  const cust = custMap?.[cid];
+  const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== '' ? formatPrice(f.total_gross) + ' €' : '';
+  return `
+    <tr class="hover:bg-ink-50 cursor-pointer" onclick="openQuoteModal('${rec.id}')">
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.quote_no || '–')}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(f.date || '')}</td>
+      <td class="px-3 py-2 font-medium text-ink-900">${escapeHtml(cust?.name1 || '— ohne Kunde —')}${cust?.customer_no ? ` <span class="text-ink-500 text-xs font-mono">${escapeHtml(cust.customer_no)}</span>` : ''}</td>
+      <td class="px-3 py-2">${quoteStatusBadge(f.status || 'Entwurf')}</td>
+      <td class="px-3 py-2 font-mono text-ink-900 tabular-nums text-right whitespace-nowrap">${escapeHtml(total)}</td>
+    </tr>
+  `;
 }
 
 function quoteRow(rec, custMap) {
@@ -5567,7 +5863,8 @@ async function deleteContactInline(entity, entityId, contactId) {
 /* ============================================================
    STAMMDATEN: ALLE KONTAKTE (mandantenweite Übersicht)
    ============================================================ */
-const _contactListState = { search: '', sort: 'last_name' };
+const _contactListState = { search: '', sort: 'last_name', viewMode: 'standard' };
+function setContactListViewMode(mode) { _contactListState.viewMode = mode; renderContactsList(); }
 let _contactSearchTimer = null;
 
 async function renderContactsList() {
@@ -5652,12 +5949,29 @@ async function renderContactsList() {
             <option value="first_name" ${sortKey==='first_name'?'selected':''}>Vorname</option>
             <option value="customer"   ${sortKey==='customer'?'selected':''}>Kunde / Lieferant</option>
           </select>
+          <div class="ml-auto">${viewModeToggle(_contactListState.viewMode, 'setContactListViewMode')}</div>
         </div>
-        <div class="divide-y divide-ink-100">
-          ${list.length === 0
-            ? `<div class="p-10 text-center text-ink-500 text-sm">${q ? 'Keine Treffer.' : 'Noch keine Kontakte. Lege sie über einen Kunden oder Lieferanten an.'}</div>`
-            : list.map(c => allContactRow(c, ownerOf(c))).join('')}
-        </div>
+        ${(() => {
+          const vm = _contactListState.viewMode;
+          if (list.length === 0) return `<div class="p-10 text-center text-ink-500 text-sm">${q ? 'Keine Treffer.' : 'Noch keine Kontakte. Lege sie über einen Kunden oder Lieferanten an.'}</div>`;
+          if (vm === 'tabelle') {
+            return `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500"><tr>
+                    <th class="px-3 py-2 text-left">Name</th><th class="px-3 py-2 text-left">Funktion</th>
+                    <th class="px-3 py-2 text-left">Kunde / Lieferant</th><th class="px-3 py-2 text-left">E-Mail</th>
+                    <th class="px-3 py-2 text-left">Telefon</th>
+                  </tr></thead>
+                  <tbody class="divide-y divide-ink-100">${list.map(c => allContactRowTabelle(c, ownerOf(c))).join('')}</tbody>
+                </table>
+              </div>`;
+          }
+          if (vm === 'kompakt') {
+            return '<div class="divide-y divide-ink-100">' + list.map(c => allContactRowKompakt(c, ownerOf(c))).join('') + '</div>';
+          }
+          return '<div class="divide-y divide-ink-100">' + list.map(c => allContactRow(c, ownerOf(c))).join('') + '</div>';
+        })()}
       </div>
     </div>
   `;
@@ -5668,6 +5982,45 @@ function onContactListSearch(value) {
   _contactListState.search = value;
   clearTimeout(_contactSearchTimer);
   _contactSearchTimer = setTimeout(() => _renderWithSearchFocus(renderContactsList), 200);
+}
+
+function allContactRowKompakt(c, owner) {
+  const f = c.fields || {};
+  const sal = contactSalutation(f);
+  const fullName = (sal ? sal + ' ' : '') + contactDisplayName(f);
+  const ownerName = owner?.rec?.name1 || '';
+  const onClick = owner?.type === 'customer' ? `openCustomerModal('${owner.id}')` : owner?.type === 'supplier' ? `openSupplierModal('${owner.id}')` : '';
+  return `
+    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 ${onClick ? 'cursor-pointer' : ''}" ${onClick ? `onclick="${onClick}"` : ''}>
+      ${f.is_primary ? '<i data-lucide="star" class="w-3 h-3 text-amber-500 shrink-0" style="fill:currentColor"></i>' : '<span class="w-3"></span>'}
+      <span class="font-medium text-ink-900 truncate flex-1 min-w-0">${escapeHtml(fullName)}</span>
+      <span class="text-xs text-ink-500 truncate hidden sm:inline w-32">${escapeHtml(f.role || '')}</span>
+      <span class="text-xs text-ink-500 truncate hidden md:inline w-40">${escapeHtml(ownerName)}</span>
+    </div>
+  `;
+}
+
+function allContactRowTabelle(c, owner) {
+  const f = c.fields || {};
+  const sal = contactSalutation(f);
+  const fullName = (sal ? sal + ' ' : '') + contactDisplayName(f);
+  const ownerNo = owner?.rec?.customer_no || owner?.rec?.supplier_no || '';
+  const ownerName = owner?.rec?.name1 || '';
+  const ownerTypeBadge = owner?.type === 'customer'
+    ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">K</span>'
+    : owner?.type === 'supplier'
+      ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">L</span>'
+      : '';
+  const onClick = owner?.type === 'customer' ? `openCustomerModal('${owner.id}')` : owner?.type === 'supplier' ? `openSupplierModal('${owner.id}')` : '';
+  return `
+    <tr class="hover:bg-ink-50 ${onClick ? 'cursor-pointer' : ''}" ${onClick ? `onclick="${onClick}"` : ''}>
+      <td class="px-3 py-2 font-medium text-ink-900">${f.is_primary ? '<i data-lucide="star" class="w-3 h-3 text-amber-500 inline" style="fill:currentColor"></i> ' : ''}${escapeHtml(fullName)}</td>
+      <td class="px-3 py-2 text-ink-700">${escapeHtml(f.role || '')}</td>
+      <td class="px-3 py-2 text-ink-700">${ownerTypeBadge} ${escapeHtml(ownerName)}${ownerNo ? ` <span class="text-xs font-mono text-ink-500">${escapeHtml(ownerNo)}</span>` : ''}</td>
+      <td class="px-3 py-2 text-ink-700 truncate max-w-[180px]">${escapeHtml(f.email || '')}</td>
+      <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(f.phone || f.mobile || '')}</td>
+    </tr>
+  `;
 }
 
 function allContactRow(c, owner) {
