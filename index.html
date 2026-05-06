@@ -247,9 +247,8 @@
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="anfragen">
               <i data-lucide="inbox" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Anfragen</span>
             </button>
-            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="angebote">
               <i data-lucide="file-text" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Angebote</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">soon</span>
             </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
               <i data-lucide="file-check-2" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Aufträge</span>
@@ -399,7 +398,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.12';
+const APP_VERSION = 'v2.13';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -525,6 +524,7 @@ function setCurrentCompany(companyId) {
   if (_currentRoute === 'artikel')     renderArticles();
   if (_currentRoute === 'kontakte')    renderContactsList();
   if (_currentRoute === 'anfragen')    renderInquiries();
+  if (_currentRoute === 'angebote')    renderQuotes();
 }
 
 function renderMandantenSwitcher() {
@@ -971,6 +971,7 @@ function dispatchRoute(route) {
     case 'artikel':         renderArticles(); break;
     case 'kontakte':        renderContactsList(); break;
     case 'anfragen':        renderInquiries(); break;
+    case 'angebote':        renderQuotes(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
     default:                renderWelcome();
@@ -3283,10 +3284,594 @@ async function inqWizCreateQuote() {
     };
     if (w.data.customer_id) quoteFields.customer_id = [w.data.customer_id];
     if (w.data.contact_id)  quoteFields.contact_id  = [w.data.contact_id];
-    await writeData('Quote', quoteFields);
+    const created = await writeData('Quote', quoteFields);
     closeModal();
-    renderInquiries();
-    toast('Angebot ' + quoteNo + ' angelegt + Anfrage ' + w.data.inquiry_no + ' gespeichert', 'success', 4500);
+    toast('Angebot ' + quoteNo + ' angelegt — öffne Editor zum Befüllen', 'success', 3500);
+    setTimeout(() => openQuoteModal(created.id), 200);
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   VERKAUF: ANGEBOTE (Quote + QuoteItem)
+   ============================================================ */
+const _quoteListState = { search: '', status: 'alle' };
+let _quoteSearchTimer = null;
+
+function quoteStatusBadge(status) {
+  const map = {
+    'Entwurf':     ['bg-ink-100 text-ink-700', 'Entwurf'],
+    'versendet':   ['bg-blue-100 text-blue-700', 'versendet'],
+    'angenommen':  ['bg-emerald-100 text-emerald-700', 'angenommen'],
+    'abgelehnt':   ['bg-red-100 text-red-700', 'abgelehnt'],
+    'abgelaufen':  ['bg-amber-100 text-amber-700', 'abgelaufen'],
+    'archiviert':  ['bg-ink-200 text-ink-600', 'archiviert']
+  };
+  const [cls, label] = map[status] || map['Entwurf'];
+  return `<span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded ${cls}">${label}</span>`;
+}
+
+function calcQuoteSums(items) {
+  let subtotal_net = 0, vat_total = 0;
+  items.forEach(it => {
+    const f = it.fields || it;
+    const qty   = +(f.qty || 0);
+    const price = +(f.unit_price_net || 0);
+    const disc  = +(f.discount_pct || 0);
+    const vat   = +(f.vat_rate || 0);
+    const lineNet = qty * price * (1 - disc / 100);
+    const lineVat = lineNet * vat / 100;
+    subtotal_net += lineNet;
+    vat_total    += lineVat;
+  });
+  return {
+    subtotal_net: Math.round(subtotal_net * 100) / 100,
+    vat_total:    Math.round(vat_total    * 100) / 100,
+    total_gross:  Math.round((subtotal_net + vat_total) * 100) / 100
+  };
+}
+
+function calcLineNet(qty, price, disc) {
+  return Math.round(((qty || 0) * (price || 0) * (1 - (disc || 0) / 100)) * 100) / 100;
+}
+
+async function renderQuotes() {
+  setPageTitle('Angebote');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt. Bitte links eine Firma wählen.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Angebote…</p>';
+
+  let all = [], allCustomers = [];
+  try {
+    [all, allCustomers] = await Promise.all([readData('Quote'), readData('Customer')]);
+  } catch (e) { toast(e.message, 'error'); }
+  const custMap = {}; allCustomers.forEach(c => { custMap[c.id] = c.fields; });
+
+  let list = all.filter(q => (q.fields.company_id || []).includes(cur.id));
+  if (_quoteListState.status !== 'alle') {
+    list = list.filter(q => (q.fields.status || 'Entwurf') === _quoteListState.status);
+  }
+  const q = _quoteListState.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter(rec => {
+      const f = rec.fields;
+      const cid = (f.customer_id || [])[0];
+      const cust = custMap[cid] || {};
+      return [f.quote_no, f.title, f.description, cust.name1, cust.customer_no]
+        .some(v => (v || '').toString().toLowerCase().includes(q));
+    });
+  }
+  // Neueste zuerst nach Quote-Nummer
+  list.sort((a, b) => {
+    const an = parseInt((a.fields.quote_no || '').replace(/\D/g, ''), 10) || 0;
+    const bn = parseInt((b.fields.quote_no || '').replace(/\D/g, ''), 10) || 0;
+    return bn - an;
+  });
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-5xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-ink-900">Angebote</h2>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
+        </div>
+        <button onclick="openQuoteModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i> Neues Angebot
+        </button>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
+        <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
+          <div class="relative flex-1 min-w-[180px]">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>
+            <input type="search" value="${escapeHtml(_quoteListState.search)}" placeholder="Suchen (Nr., Titel, Kunde…)" oninput="onQuoteSearchInput(this.value)"
+                   class="w-full pl-9 pr-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          <label class="text-xs text-ink-500">Status:</label>
+          <select onchange="_quoteListState.status=this.value;renderQuotes()" class="text-sm border border-ink-200 rounded-lg px-2 py-2">
+            <option value="alle"        ${_quoteListState.status==='alle'?'selected':''}>alle</option>
+            <option value="Entwurf"     ${_quoteListState.status==='Entwurf'?'selected':''}>Entwurf</option>
+            <option value="versendet"   ${_quoteListState.status==='versendet'?'selected':''}>versendet</option>
+            <option value="angenommen"  ${_quoteListState.status==='angenommen'?'selected':''}>angenommen</option>
+            <option value="abgelehnt"   ${_quoteListState.status==='abgelehnt'?'selected':''}>abgelehnt</option>
+            <option value="abgelaufen"  ${_quoteListState.status==='abgelaufen'?'selected':''}>abgelaufen</option>
+            <option value="archiviert"  ${_quoteListState.status==='archiviert'?'selected':''}>archiviert</option>
+          </select>
+        </div>
+        <div class="divide-y divide-ink-100">
+          ${list.length === 0
+            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _quoteListState.status !== 'alle' ? 'Keine Treffer.' : 'Noch keine Angebote. Lege das erste an mit „+ Neues Angebot".'}</div>`
+            : list.map(rec => quoteRow(rec, custMap)).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function onQuoteSearchInput(value) {
+  _quoteListState.search = value;
+  clearTimeout(_quoteSearchTimer);
+  _quoteSearchTimer = setTimeout(() => _renderWithSearchFocus(renderQuotes), 200);
+}
+
+function quoteRow(rec, custMap) {
+  const f = rec.fields || {};
+  const cid = (f.customer_id || [])[0];
+  const cust = custMap?.[cid];
+  const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== ''
+    ? formatPrice(f.total_gross) + ' €'
+    : '';
+  const lockedByOther = isLockedByOther(rec);
+  const lockInfo = getLockInfo(rec);
+  const lockedBadge = lockedByOther
+    ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Wird gerade von ${escapeHtml(userLabel(lockInfo.userId))} bearbeitet"><i data-lucide="lock" class="w-3 h-3"></i> in Bearbeitung</span>`
+    : '';
+  return `
+    <div class="flex items-start justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openQuoteModal('${rec.id}')">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="text-xs font-mono text-ink-500">${escapeHtml(f.quote_no || '–')}</span>
+          ${quoteStatusBadge(f.status || 'Entwurf')}
+          ${lockedBadge}
+        </div>
+        <p class="font-medium text-ink-900 truncate mt-0.5">${escapeHtml(f.title || '— ohne Titel —')}</p>
+        <p class="text-xs text-ink-500 mt-0.5 truncate">
+          ${cust ? escapeHtml(cust.name1 || '–') + (cust.customer_no ? ' · ' + escapeHtml(cust.customer_no) : '') : '<span class="text-ink-400">— Kunde nicht zugeordnet —</span>'}
+          ${f.date ? ' · ' + escapeHtml(f.date) : ''}
+        </p>
+      </div>
+      <div class="flex items-center gap-2 shrink-0 ml-2">
+        ${total ? `<span class="font-mono text-sm text-ink-900 tabular-nums">${escapeHtml(total)}</span>` : ''}
+        <i data-lucide="chevron-right" class="w-4 h-4 text-ink-300"></i>
+      </div>
+    </div>
+  `;
+}
+
+async function openQuoteModal(id) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  let f = {}, items = [], allCustomers = [], allContacts = [];
+  try {
+    [allCustomers, allContacts] = await Promise.all([readData('Customer'), readData('Contact')]);
+  } catch (e) { toast(e.message, 'error'); return; }
+
+  if (id) {
+    const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
+    const rec = allQ.find(r => r.id === id);
+    f = rec?.fields || {};
+    items = allItems.filter(it => (it.fields.quote_id || []).includes(id))
+      .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+    const lockRes = await acquireLock('Quote', id, rec);
+    if (!lockRes.ok) {
+      toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
+      return;
+    }
+  } else {
+    f.quote_no = await nextQuoteNo(cur.id);
+    const today = new Date();
+    const valid = new Date(today); valid.setDate(valid.getDate() + 30);
+    f.date = today.toISOString().slice(0, 10);
+    f.valid_until = valid.toISOString().slice(0, 10);
+    f.status = 'Entwurf';
+  }
+
+  const customersInCompany = allCustomers
+    .filter(c => (c.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  const currentCustomerId = (f.customer_id || [])[0] || '';
+  const currentContactId  = (f.contact_id  || [])[0] || '';
+  const sums = calcQuoteSums(items);
+
+  openModal(`
+    <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-6">
+      <div class="flex items-baseline justify-between mb-4">
+        <h3 class="text-lg font-bold text-ink-900">${id ? 'Angebot bearbeiten' : 'Neues Angebot'}</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Angebots-Nr.</label>
+          <input name="quote_no" value="${escapeHtml(f.quote_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+          <select name="status" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            ${['Entwurf','versendet','angenommen','abgelehnt','abgelaufen','archiviert'].map(s => `<option value="${s}" ${(f.status||'Entwurf')===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Titel <span class="text-red-500">*</span></label>
+          <input name="title" required value="${escapeHtml(f.title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Datum</label>
+          <input name="date" type="date" value="${escapeHtml(f.date || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Gültig bis</label>
+          <input name="valid_until" type="date" value="${escapeHtml(f.valid_until || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Kunde</label>
+          <select name="customer_id" id="quote_customer_select" onchange="onQuoteCustomerChange()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— nicht zugeordnet —</option>
+            ${customersInCompany.map(c => `<option value="${c.id}" ${currentCustomerId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name1 || '–')}${c.fields.customer_no ? ' (' + escapeHtml(c.fields.customer_no) + ')' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
+          <select name="contact_id" id="quote_contact_select" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— nicht zugeordnet —</option>
+            ${allContacts.filter(c => (c.fields.customer_id || []).includes(currentCustomerId)).map(c => `<option value="${c.id}" ${currentContactId === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
+          <input name="payment_terms" value="${escapeHtml(f.payment_terms || '')}" placeholder="z.B. 14 Tage netto" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Beschreibung / Vortext</label>
+          <textarea name="description" rows="2" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Positionen</h4>
+      <div id="quoteItemsWrap">${renderQuoteItems(id || '', items)}</div>
+
+      <div id="quoteSums" class="mt-4 bg-ink-50 rounded-xl p-4 text-sm space-y-1">
+        ${quoteSumsHtml(sums)}
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen / Nachtext</h4>
+      <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+
+      <div class="flex justify-end gap-2 flex-wrap">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="saveQuote(event, '${id || ''}', true)" class="px-3 py-2 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
+      </div>
+    </form>
+  `);
+}
+
+function quoteSumsHtml(sums) {
+  return `
+    <div class="flex items-center justify-between"><span class="text-ink-600">Summe netto</span><span class="font-mono tabular-nums">${formatPrice(sums.subtotal_net)} €</span></div>
+    <div class="flex items-center justify-between"><span class="text-ink-600">MwSt</span><span class="font-mono tabular-nums">${formatPrice(sums.vat_total)} €</span></div>
+    <div class="flex items-center justify-between border-t border-ink-200 pt-1 mt-1 font-bold text-ink-900"><span>Gesamt brutto</span><span class="font-mono tabular-nums">${formatPrice(sums.total_gross)} €</span></div>
+  `;
+}
+
+function onQuoteCustomerChange() {
+  const cid = document.getElementById('quote_customer_select')?.value;
+  const select = document.getElementById('quote_contact_select');
+  if (!select) return;
+  if (!cid) { select.innerHTML = '<option value="">— nicht zugeordnet —</option>'; return; }
+  readData('Contact').then(all => {
+    const list = all.filter(c => (c.fields.customer_id || []).includes(cid));
+    select.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
+      list.map(c => `<option value="${c.id}">${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
+  });
+}
+
+function renderQuoteItems(quoteId, items) {
+  if (!quoteId) {
+    return '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Speichere zuerst das Angebot — danach kannst du Positionen hinzufügen.</p>';
+  }
+  const sorted = [...items].sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+  const rows = sorted.length === 0
+    ? '<p class="text-xs text-ink-500 italic px-3 py-2">Noch keine Positionen.</p>'
+    : '<div id="qiList" class="space-y-2">' + sorted.map(it => `<div data-qi-row="${it.id}">${quoteItemRow(quoteId, it)}</div>`).join('') + '</div>';
+  return `
+    ${rows}
+    <div id="qiFormWrap" class="mt-2"></div>
+    <button id="addQiBtn" type="button" onclick="showQuoteItemInlineForm('${quoteId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+      <i data-lucide="plus" class="w-4 h-4"></i> Position hinzufügen
+    </button>
+  `;
+}
+
+function quoteItemRow(quoteId, it) {
+  const f = it.fields || {};
+  const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
+  const desc = (f.description || '').split('\n')[0] || '–';
+  const meta = [
+    (f.qty || 0) + (f.unit ? ' ' + f.unit : ''),
+    '× ' + formatPrice(f.unit_price_net || 0) + ' €',
+    f.discount_pct > 0 ? '−' + (f.discount_pct) + '%' : '',
+    'MwSt ' + (f.vat_rate || 0) + '%'
+  ].filter(Boolean).join(' · ');
+  return `
+    <div class="p-3 bg-ink-50 rounded-lg border border-ink-100">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-baseline gap-2">
+            <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
+            <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
+          </div>
+          <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <span class="font-mono text-sm tabular-nums text-ink-900">${formatPrice(lineNet)} €</span>
+          <button type="button" onclick="showQuoteItemInlineForm('${quoteId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
+            <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+          </button>
+          <button type="button" onclick="deleteQuoteItemInline('${quoteId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function showQuoteItemInlineForm(quoteId, itemId) {
+  if (document.querySelector('#qiFormWrap [data-qi-form]')) return;
+  const cur = getCurrentCompany();
+  let f = {};
+  try {
+    if (itemId) {
+      const all = await readData('QuoteItem');
+      f = all.find(r => r.id === itemId)?.fields || {};
+    } else {
+      // Default: nächste Position berechnen
+      const all = await readData('QuoteItem');
+      const peers = all.filter(r => (r.fields.quote_id || []).includes(quoteId));
+      const maxPos = peers.reduce((m, r) => Math.max(m, +(r.fields.pos || 0)), 0);
+      f.pos = maxPos + 1;
+      f.qty = 1;
+      f.vat_rate = 19;
+      f.discount_pct = 0;
+    }
+  } catch (e) {}
+
+  let articles = [];
+  try {
+    const allArt = await readData('Article');
+    articles = allArt
+      .filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv')
+      .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  } catch (e) {}
+  const currentArticleId = (f.article_id || [])[0] || '';
+  const fid = 'qif_' + (itemId || 'new');
+  const articlesData = JSON.stringify(articles.map(a => ({ id: a.id, name1: a.fields.name1 || '', name2: a.fields.name2 || '', desc: a.fields.description || '', price: a.fields.sales_price || 0, unit: a.fields.unit || 'Stück', vat: a.fields.vat_rate || 19 }))).replace(/'/g, '&#39;');
+
+  if (itemId) {
+    const row = document.querySelector(`[data-qi-row="${itemId}"]`);
+    if (row) row.classList.add('hidden');
+  }
+  document.getElementById('addQiBtn')?.classList.add('hidden');
+
+  document.getElementById('qiFormWrap').innerHTML = `
+    <div data-qi-form data-articles='${articlesData}' class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3">
+      <p class="text-sm font-semibold text-brand-700">${itemId ? 'Position bearbeiten' : 'Neue Position'}</p>
+
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-xs font-medium text-ink-700 mb-1">Artikel (optional)</label>
+          <select id="${fid}_article" onchange="onQiArticleChange('${fid}')" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— freie Position —</option>
+            ${articles.map(a => `<option value="${a.id}" ${currentArticleId === a.id ? 'selected' : ''}>${escapeHtml(a.fields.name1 || '–')}${a.fields.article_no ? ' (' + escapeHtml(a.fields.article_no) + ')' : ''}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Beschreibung</label>
+        <textarea id="${fid}_description" rows="2" placeholder="Position-Beschreibung (mehrzeilig erlaubt)" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+      </div>
+
+      <div class="grid grid-cols-4 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
+          <input id="${fid}_unit" value="${escapeHtml(f.unit || 'Stück')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">EP €</label>
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2 items-end">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${f.vat_rate ?? 19}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="text-right">
+          <label class="block text-xs font-medium text-ink-700 mb-1">Zeilensumme netto</label>
+          <p id="${fid}_preview" class="font-mono text-sm font-semibold text-ink-900 px-3 py-1.5">${formatPrice(calcLineNet(f.qty, f.unit_price_net, f.discount_pct))} €</p>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" onclick="cancelQuoteItemInline('${quoteId}','${itemId || ''}')" class="px-3 py-1.5 text-sm rounded-lg border border-ink-200 bg-white hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="saveQuoteItemInline('${quoteId}','${itemId || ''}')" class="px-3 py-1.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById(fid + '_description')?.focus(), 50);
+}
+
+function onQiArticleChange(fid) {
+  const formEl = document.querySelector('#qiFormWrap [data-qi-form]');
+  if (!formEl) return;
+  const articles = JSON.parse(formEl.getAttribute('data-articles').replace(/&#39;/g, "'"));
+  const articleId = document.getElementById(fid + '_article')?.value;
+  if (!articleId) return;
+  const a = articles.find(x => x.id === articleId);
+  if (!a) return;
+  // Auto-fill — überschreibt aktuelle Werte (User kann danach anpassen)
+  const descEl = document.getElementById(fid + '_description');
+  if (descEl && !descEl.value) descEl.value = [a.name1, a.name2, a.desc].filter(Boolean).join('\n');
+  const priceEl = document.getElementById(fid + '_unit_price_net');
+  if (priceEl) priceEl.value = a.price;
+  const unitEl = document.getElementById(fid + '_unit');
+  if (unitEl) unitEl.value = a.unit;
+  const vatEl = document.getElementById(fid + '_vat_rate');
+  if (vatEl) vatEl.value = a.vat;
+  recalcQiPreview(fid);
+}
+
+function recalcQiPreview(fid) {
+  const qty   = parseDecimal(document.getElementById(fid + '_qty')?.value);
+  const price = parseDecimal(document.getElementById(fid + '_unit_price_net')?.value);
+  const disc  = parseDecimal(document.getElementById(fid + '_discount_pct')?.value);
+  const net = calcLineNet(qty, price, disc);
+  const el = document.getElementById(fid + '_preview');
+  if (el) el.textContent = formatPrice(net) + ' €';
+}
+
+function cancelQuoteItemInline(quoteId, itemId) {
+  document.getElementById('qiFormWrap').innerHTML = '';
+  document.getElementById('addQiBtn')?.classList.remove('hidden');
+  if (itemId) {
+    const row = document.querySelector(`[data-qi-row="${itemId}"]`);
+    if (row) row.classList.remove('hidden');
+  }
+}
+
+async function saveQuoteItemInline(quoteId, itemId) {
+  const fid = 'qif_' + (itemId || 'new');
+  const $v = id => (document.getElementById(fid + '_' + id)?.value || '').trim();
+  const articleId = document.getElementById(fid + '_article')?.value || '';
+  const desc = $v('description');
+  if (!desc) return toast('Beschreibung fehlt', 'error');
+  const pos = parseInt($v('pos'), 10) || 1;
+  const qty = parseDecimal($v('qty')) || 0;
+  const price = parseDecimal($v('unit_price_net')) || 0;
+  const disc = parseDecimal($v('discount_pct')) || 0;
+  const vat = parseDecimal($v('vat_rate')) || 0;
+  const fields = {
+    pos, qty,
+    unit:           $v('unit'),
+    unit_price_net: price,
+    discount_pct:   disc,
+    vat_rate:       vat,
+    description:    desc,
+    line_total_net: calcLineNet(qty, price, disc),
+    label:          'Pos.' + pos + ' · ' + desc.split('\n')[0].substring(0, 50)
+  };
+  fields.article_id = articleId ? [articleId] : [];
+  if (!itemId) fields.quote_id = [quoteId];
+  try {
+    if (itemId) await updateData('QuoteItem', itemId, fields);
+    else        await writeData('QuoteItem', fields);
+    document.getElementById('qiFormWrap').innerHTML = '';
+    document.getElementById('addQiBtn')?.classList.remove('hidden');
+    await refreshQuoteItemsSection(quoteId);
+    toast('Position gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteQuoteItemInline(quoteId, itemId) {
+  if (!confirm('Diese Position wirklich löschen?')) return;
+  try {
+    await deleteData('QuoteItem', itemId);
+    await refreshQuoteItemsSection(quoteId);
+    toast('Position gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function refreshQuoteItemsSection(quoteId) {
+  const wrap = document.getElementById('quoteItemsWrap');
+  if (!wrap) return;
+  try {
+    const all = await readData('QuoteItem');
+    const items = all.filter(it => (it.fields.quote_id || []).includes(quoteId));
+    wrap.innerHTML = renderQuoteItems(quoteId, items);
+    const sumsEl = document.getElementById('quoteSums');
+    if (sumsEl) sumsEl.innerHTML = quoteSumsHtml(calcQuoteSums(items));
+    if (window.lucide) lucide.createIcons();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function saveQuote(e, id, keepOpen) {
+  if (e && e.preventDefault) e.preventDefault();
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  const form = e?.target?.tagName === 'FORM' ? e.target : (e?.target?.closest?.('form') || document.querySelector('#modalBox form'));
+  if (!form) return;
+  const fd = new FormData(form);
+  const fields = {};
+  ['quote_no','title','description','date','valid_until','status','payment_terms','notes'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  const cidSel = (fd.get('customer_id') || '').trim();
+  const conSel = (fd.get('contact_id')  || '').trim();
+  fields.customer_id = cidSel ? [cidSel] : [];
+  fields.contact_id  = conSel ? [conSel] : [];
+  if (!fields.title) return toast('Titel fehlt', 'error');
+  fields.status = fields.status || 'Entwurf';
+  if (!id) fields.company_id = [cur.id];
+  if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
+
+  // Summen aus aktuellen Positionen
+  if (id) {
+    try {
+      const all = await readData('QuoteItem');
+      const items = all.filter(it => (it.fields.quote_id || []).includes(id));
+      const sums = calcQuoteSums(items);
+      fields.subtotal_net = sums.subtotal_net;
+      fields.vat_total    = sums.vat_total;
+      fields.total_gross  = sums.total_gross;
+    } catch (e) {}
+  }
+  try {
+    let savedId = id;
+    if (id) {
+      await updateData('Quote', id, fields);
+    } else {
+      const created = await writeData('Quote', fields);
+      savedId = created.id;
+    }
+    if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
+    if (keepOpen) {
+      closeModal();
+      toast('Gespeichert — Modal bleibt offen', 'success');
+      setTimeout(() => openQuoteModal(savedId), 60);
+    } else {
+      closeModal();
+      renderQuotes();
+      toast('Gespeichert', 'success');
+    }
   } catch (err) { toast(err.message, 'error'); }
 }
 
