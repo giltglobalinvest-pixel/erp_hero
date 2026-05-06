@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.23';
+const APP_VERSION = 'v2.24';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -4562,7 +4562,8 @@ async function openQuoteModal(id) {
   customersInCompany.forEach(c => { window._quoteCustomerCache.byId[c.id] = c.fields; });
 
   openModal(`
-    <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-6">
+    <div class="lg:flex lg:items-stretch">
+    <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-6 lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto">
       <div class="flex items-baseline justify-between mb-4">
         <h3 class="text-lg font-bold text-ink-900">${id ? 'Angebot bearbeiten' : 'Neues Angebot'}</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
@@ -4655,10 +4656,18 @@ async function openQuoteModal(id) {
         <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
       </div>
     </form>
-  `);
-
-  // Modal auf breite Variante umstellen (Desktop sieht mehr)
-  document.getElementById('modalBox')?.classList.replace('max-w-lg', 'max-w-5xl');
+    <div class="hidden lg:block lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-50 lg:border-l border-ink-200 p-6">
+      <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-2 flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau</p>
+      <div id="quotePreview" class="bg-white shadow-card rounded-lg p-6 min-h-[200px]"></div>
+    </div>
+    </div>
+  `, { maxWidth: 'max-w-7xl' });
+  // Modal-Box: max-w-7xl + Outer-Overflow aushebeln (Spalten machen ihr eigenes Scrolling)
+  const box = document.getElementById('modalBox');
+  if (box) {
+    box.classList.remove('max-w-lg', 'max-w-5xl', 'max-h-[88vh]', 'overflow-y-auto');
+    box.classList.add('max-w-7xl');
+  }
 
   // Bei neuem Angebot: Standardvorlagen automatisch einfügen (nur wenn Felder leer)
   if (!id) {
@@ -4667,6 +4676,122 @@ async function openQuoteModal(id) {
       await applyDefaultTemplate('notes', 'Schlusstext');
     }, 80);
   }
+
+  // Live-Vorschau initial befüllen + Listener für Änderungen
+  setTimeout(() => {
+    updateQuotePreview();
+    const form = document.querySelector('#modalBox form');
+    if (form) {
+      let dbTimer = null;
+      const trigger = () => { clearTimeout(dbTimer); dbTimer = setTimeout(updateQuotePreview, 250); };
+      form.addEventListener('input', trigger);
+      form.addEventListener('change', trigger);
+    }
+  }, 150);
+}
+
+async function updateQuotePreview() {
+  const target = document.getElementById('quotePreview');
+  if (!target) return;
+  const ctx = await buildQuoteVariableContext();
+  // Form-Werte für intro/notes ergänzen + items laden
+  const form = document.querySelector('#modalBox form');
+  const fd = form ? new FormData(form) : null;
+  const intro   = fd ? (fd.get('description') || '') : '';
+  const closing = fd ? (fd.get('notes')       || '') : '';
+  const cur = getCurrentCompany();
+  let items = [];
+  const qid = window._currentQuoteIdInModal;
+  if (qid) {
+    try {
+      const all = await readData('QuoteItem');
+      items = all.filter(it => (it.fields.quote_id || []).includes(qid))
+        .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+    } catch (e) {}
+  }
+  target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing);
+  if (window.lucide) lucide.createIcons();
+}
+
+function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw) {
+  const c  = ctx.company  || {};
+  const cu = ctx.customer || {};
+  const q  = ctx.quote    || {};
+  const sums = calcQuoteSums(items);
+  const intro   = substituteVariables(introRaw   || '', 'Angebot', ctx);
+  const closing = substituteVariables(closingRaw || '', 'Angebot', ctx);
+  const companyAddrLine = [c.name, c.street, [c.zip, c.city].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+  return `
+    <div class="text-sm text-ink-900">
+      <div class="flex items-start justify-between mb-3 pb-3 border-b border-ink-200">
+        <div class="text-[10px] text-ink-500 leading-snug">${escapeHtml(companyAddrLine)}</div>
+        <svg class="h-7 shrink-0" style="aspect-ratio:320/74" aria-label="${escapeHtml(c.name || 'FLP')}"><use href="#flp-logo"/></svg>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 mb-5">
+        <div class="text-xs leading-relaxed">
+          ${cu.name1   ? escapeHtml(cu.name1)   + '<br>' : '<span class="text-ink-400 italic">— Empfänger —</span>'}
+          ${cu.name2   ? escapeHtml(cu.name2)   + '<br>' : ''}
+          ${cu.street  ? escapeHtml(cu.street)  + '<br>' : ''}
+          ${(cu.zip || cu.city) ? escapeHtml([cu.zip, cu.city].filter(Boolean).join(' ')) : ''}
+        </div>
+        <div class="text-[11px] space-y-0.5">
+          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Angebots-Nr.:</span><span class="text-right font-mono">${escapeHtml(q.quote_no || '–')}</span></div>
+          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Datum:</span><span class="text-right">${escapeHtml(formatDeDate(q.date))}</span></div>
+          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Kunden-Nr.:</span><span class="text-right font-mono">${escapeHtml(cu.customer_no || '–')}</span></div>
+          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Gültig bis:</span><span class="text-right">${escapeHtml(formatDeDate(q.valid_until))}</span></div>
+          ${c.phone ? `<div class="grid grid-cols-2 gap-1 pt-1 border-t border-ink-100 mt-1"><span class="text-ink-500">Telefon:</span><span class="text-right">${escapeHtml(c.phone)}</span></div>` : ''}
+          ${c.email ? `<div class="grid grid-cols-2 gap-1"><span class="text-ink-500">E-Mail:</span><span class="text-right truncate">${escapeHtml(c.email)}</span></div>` : ''}
+        </div>
+      </div>
+
+      <h2 class="text-xl font-bold mb-2">Angebot</h2>
+      ${intro ? `<div class="whitespace-pre-line text-xs leading-relaxed mb-4">${escapeHtml(intro)}</div>` : '<p class="text-xs text-ink-400 italic mb-4">Einleitung — kein Text</p>'}
+
+      ${items.length > 0 ? `
+        <table class="w-full text-[11px] mb-3">
+          <thead class="bg-brand-500 text-white text-[10px] uppercase tracking-wider">
+            <tr>
+              <th class="px-1.5 py-1.5 text-left">Pos.</th>
+              <th class="px-1.5 py-1.5 text-left">Bezeichnung</th>
+              <th class="px-1.5 py-1.5 text-right">Menge</th>
+              <th class="px-1.5 py-1.5 text-left">EH</th>
+              <th class="px-1.5 py-1.5 text-right">EP</th>
+              <th class="px-1.5 py-1.5 text-right">Gesamt</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(it => {
+              const f = it.fields || {};
+              const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
+              const desc = (f.description || '').split('\n')[0] || '';
+              return `<tr class="border-b border-ink-100 align-top">
+                <td class="px-1.5 py-1">${f.pos || ''}</td>
+                <td class="px-1.5 py-1">${escapeHtml(desc)}${f.discount_pct > 0 ? `<br><span class="text-[10px] text-amber-700">Rabatt ${f.discount_pct}%</span>` : ''}</td>
+                <td class="px-1.5 py-1 text-right tabular-nums">${escapeHtml(String(f.qty || ''))}</td>
+                <td class="px-1.5 py-1">${escapeHtml(f.unit || '')}</td>
+                <td class="px-1.5 py-1 text-right font-mono tabular-nums">${formatPrice(f.unit_price_net || 0)}</td>
+                <td class="px-1.5 py-1 text-right font-mono tabular-nums">${formatPrice(lineNet)}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      ` : '<p class="text-xs text-ink-400 italic mb-3">— noch keine Positionen —</p>'}
+
+      <div class="flex justify-end mb-4">
+        <div class="w-52 text-xs space-y-0.5">
+          <div class="flex justify-between"><span class="text-ink-600">Nettobetrag</span><span class="font-mono tabular-nums">${formatPrice(sums.subtotal_net)} €</span></div>
+          <div class="flex justify-between"><span class="text-ink-600">USt</span><span class="font-mono tabular-nums">${formatPrice(sums.vat_total)} €</span></div>
+          <div class="flex justify-between border-t border-ink-300 pt-1 mt-1 font-bold"><span>Gesamt</span><span class="font-mono tabular-nums">${formatPrice(sums.total_gross)} €</span></div>
+        </div>
+      </div>
+
+      ${q.delivery_terms ? `<p class="text-xs"><span class="text-ink-500">Lieferung:</span> ${escapeHtml(q.delivery_terms)}</p>` : ''}
+      ${q.payment_terms  ? `<p class="text-xs"><span class="text-ink-500">Zahlungsbedingungen:</span> ${escapeHtml(q.payment_terms)}</p>` : ''}
+
+      ${closing ? `<div class="whitespace-pre-line text-xs leading-relaxed mt-4">${escapeHtml(closing)}</div>` : ''}
+    </div>
+  `;
 }
 
 function quoteSumsHtml(sums) {
@@ -5216,6 +5341,8 @@ async function refreshQuoteItemsSection(quoteId) {
     const sumsEl = document.getElementById('quoteSums');
     if (sumsEl) sumsEl.innerHTML = quoteSumsHtml(calcQuoteSums(items));
     if (window.lucide) lucide.createIcons();
+    // Live-Vorschau ebenfalls aktualisieren
+    updateQuotePreview();
   } catch (e) { toast(e.message, 'error'); }
 }
 
