@@ -372,7 +372,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.3';
+const APP_VERSION = 'v2.4';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1815,13 +1815,13 @@ async function renderArticles() {
   }
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Artikel…</p>';
 
-  let all = [], allSuppliers = [];
+  let all = [], allCategories = [];
   try {
-    [all, allSuppliers] = await Promise.all([readData('Article'), readData('Supplier')]);
+    [all, allCategories] = await Promise.all([readData('Article'), readData('Category')]);
   } catch (e) { toast(e.message, 'error'); }
 
-  const supMap = {};
-  allSuppliers.forEach(s => { supMap[s.id] = s.fields; });
+  const catMap = {};
+  allCategories.forEach(c => { catMap[c.id] = c.fields; });
 
   let list = all.filter(a => (a.fields.company_id || []).includes(cur.id));
   if (!_articleListState.showArchived) list = list.filter(a => (a.fields.status || 'aktiv') !== 'archiviert');
@@ -1830,14 +1830,18 @@ async function renderArticles() {
   if (q) {
     list = list.filter(a => {
       const f = a.fields;
-      const sid = (f.default_supplier_id || [])[0];
-      const sup = supMap[sid] || {};
-      return [f.name1, f.name2, f.article_no, f.description, f.category, f.manufacturer, f.manufacturer_no, f.ean, sup.name1]
+      const catId = (f.category_id || [])[0];
+      const catName = catMap[catId]?.name || f.category || '';
+      return [f.name1, f.name2, f.article_no, f.description, catName, f.manufacturer, f.manufacturer_no]
         .some(v => (v || '').toString().toLowerCase().includes(q));
     });
   }
 
   const sortKey = _articleListState.sort;
+  const catName = a => {
+    const cid = (a.fields.category_id || [])[0];
+    return (catMap[cid]?.name || a.fields.category || '').toLowerCase();
+  };
   list.sort((a, b) => {
     if (sortKey === 'article_no') {
       const av = parseInt((a.fields.article_no || '').replace(/\D/g, ''), 10) || 0;
@@ -1845,9 +1849,7 @@ async function renderArticles() {
       return av - bv;
     }
     if (sortKey === 'category') {
-      const ac = (a.fields.category || '').toLowerCase();
-      const bc = (b.fields.category || '').toLowerCase();
-      const cmp = ac.localeCompare(bc, 'de');
+      const cmp = catName(a).localeCompare(catName(b), 'de');
       if (cmp !== 0) return cmp;
     }
     const av = (a.fields.name1 || '').toLowerCase();
@@ -1862,9 +1864,14 @@ async function renderArticles() {
           <h2 class="text-xl font-bold text-ink-900">Artikel</h2>
           <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
         </div>
-        <button onclick="openArticleModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i> Neuer Artikel
-        </button>
+        <div class="flex gap-2">
+          <button onclick="openCategoryManagement()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
+            <i data-lucide="tags" class="w-4 h-4"></i> Kategorien
+          </button>
+          <button onclick="openArticleModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+            <i data-lucide="plus" class="w-4 h-4"></i> Neuer Artikel
+          </button>
+        </div>
       </div>
       <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
@@ -1887,7 +1894,7 @@ async function renderArticles() {
         <div class="divide-y divide-ink-100">
           ${list.length === 0
             ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _articleListState.showArchived ? 'Keine Treffer.' : 'Noch keine Artikel für diesen Mandanten. Lege den ersten an mit „+ Neuer Artikel".'}</div>`
-            : list.map(rec => articleRow(rec, supMap)).join('')}
+            : list.map(rec => articleRow(rec, catMap)).join('')}
         </div>
       </div>
     </div>
@@ -1901,12 +1908,12 @@ function onArticleSearchInput(value) {
   _articleSearchTimer = setTimeout(() => renderArticles(), 200);
 }
 
-function articleRow(rec, supMap) {
+function articleRow(rec, catMap) {
   const f = rec.fields || {};
   const archived = f.status === 'archiviert';
-  const sid = (f.default_supplier_id || [])[0];
-  const sup = supMap?.[sid];
-  const meta = [f.category, f.manufacturer].filter(Boolean).join(' · ');
+  const catId = (f.category_id || [])[0];
+  const catName = catMap?.[catId]?.name || f.category || '';
+  const meta = [catName, f.manufacturer].filter(Boolean).join(' · ');
   const price = (f.sales_price !== undefined && f.sales_price !== null && f.sales_price !== '')
     ? formatPrice(f.sales_price) + ' € / ' + (f.unit || 'Stk')
     : '';
@@ -1926,7 +1933,7 @@ function articleRow(rec, supMap) {
         </div>
         ${f.name2 ? `<p class="text-sm text-ink-500 truncate">${escapeHtml(f.name2)}</p>` : ''}
         <p class="text-xs text-ink-500 mt-0.5 truncate">
-          ${meta ? escapeHtml(meta) : '<span class="text-ink-400">— ohne Kategorie —</span>'}${sup ? ' · Lieferant: ' + escapeHtml(sup.name1 || '–') : ''}
+          ${meta ? escapeHtml(meta) : '<span class="text-ink-400">— ohne Kategorie —</span>'}
         </p>
       </div>
       <div class="flex items-center gap-3 shrink-0 ml-2">
@@ -1948,9 +1955,11 @@ async function openArticleModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   let f = {};
-  let allArticles = [], allSuppliers = [];
+  let allArticles = [], allCategories = [], allArtSuppliers = [];
   try {
-    [allArticles, allSuppliers] = await Promise.all([readData('Article'), readData('Supplier')]);
+    [allArticles, allCategories, allArtSuppliers] = await Promise.all([
+      readData('Article'), readData('Category'), readData('ArticleSupplier')
+    ]);
   } catch (e) { toast(e.message, 'error'); return; }
 
   if (id) {
@@ -1969,13 +1978,13 @@ async function openArticleModal(id) {
   }
 
   const articlesInCompany = allArticles.filter(a => (a.fields.company_id || []).includes(cur.id));
-  const categories = distinctValues(articlesInCompany, 'category', ART_CATEGORY_DEFAULTS);
-  const units      = distinctValues(articlesInCompany, 'unit',     ART_UNIT_DEFAULTS);
+  const units = distinctValues(articlesInCompany, 'unit', ART_UNIT_DEFAULTS);
+  const categoriesInCompany = allCategories
+    .filter(c => (c.fields.company_id || []).includes(cur.id) && (c.fields.status || 'aktiv') === 'aktiv')
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const currentCategoryId = (f.category_id || [])[0] || '';
 
-  const suppliersInCompany = allSuppliers
-    .filter(s => (s.fields.company_id || []).includes(cur.id) && (s.fields.status || 'aktiv') === 'aktiv')
-    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
-  const currentSupplierId = (f.default_supplier_id || [])[0] || '';
+  const articleSuppliers = id ? allArtSuppliers.filter(j => (j.fields.article_id || []).includes(id)) : [];
 
   openModal(`
     <form onsubmit="saveArticle(event, '${id || ''}')" class="p-6">
@@ -2014,29 +2023,24 @@ async function openArticleModal(id) {
       <div class="grid grid-cols-2 gap-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Kategorie</label>
-          <input name="category" list="art_categories_list" value="${escapeHtml(f.category || '')}" placeholder="z.B. Frequenzumrichter" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-          <datalist id="art_categories_list">${categories.map(c => `<option value="${escapeHtml(c)}">`).join('')}</datalist>
+          <select name="category_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— ohne Kategorie —</option>
+            ${categoriesInCompany.map(c => `<option value="${c.id}" ${currentCategoryId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name || '–')}</option>`).join('')}
+          </select>
+          <p class="text-xs text-ink-500 mt-1">Verwaltung über „Kategorien"-Button in der Liste</p>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Hersteller</label>
           <input name="manufacturer" value="${escapeHtml(f.manufacturer || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
-        <div>
+        <div class="col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Hersteller-Artikelnr.</label>
           <input name="manufacturer_no" value="${escapeHtml(f.manufacturer_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">EAN / Barcode</label>
-          <input name="ean" value="${escapeHtml(f.ean || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
       </div>
 
-      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Preise (netto)</h4>
-      <div class="grid grid-cols-4 gap-3">
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Einkauf €</label>
-          <input name="purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Verkaufspreis (netto)</h4>
+      <div class="grid grid-cols-3 gap-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Verkauf €</label>
           <input name="sales_price" inputmode="decimal" value="${f.sales_price ?? ''}" placeholder="0,00" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
@@ -2052,14 +2056,8 @@ async function openArticleModal(id) {
         </div>
       </div>
 
-      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Lieferant</h4>
-      <div>
-        <label class="block text-sm font-medium text-ink-700 mb-1">Standard-Lieferant</label>
-        <select name="default_supplier_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-          <option value="">— kein Standard-Lieferant —</option>
-          ${suppliersInCompany.map(s => `<option value="${s.id}" ${currentSupplierId === s.id ? 'selected' : ''}>${escapeHtml(s.fields.name1 || '–')}${s.fields.supplier_no ? ' (' + escapeHtml(s.fields.supplier_no) + ')' : ''}</option>`).join('')}
-        </select>
-      </div>
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Lieferanten (EK-Preise · Bestelltext · Lieferzeit)</h4>
+      <div id="articleSuppliersWrap">${renderArticleSuppliers(id || '', articleSuppliers)}</div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen</h4>
       <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
@@ -2082,22 +2080,18 @@ async function saveArticle(e, id) {
     name2:           (fd.get('name2') || '').trim(),
     article_no:      (fd.get('article_no') || '').trim(),
     description:     (fd.get('description') || '').trim(),
-    category:        (fd.get('category') || '').trim(),
     manufacturer:    (fd.get('manufacturer') || '').trim(),
     manufacturer_no: (fd.get('manufacturer_no') || '').trim(),
-    ean:             (fd.get('ean') || '').trim(),
     unit:            (fd.get('unit') || '').trim(),
     status:          fd.get('status') || 'aktiv',
     notes:           (fd.get('notes') || '').trim()
   };
-  const purchase = parseDecimal(fd.get('purchase_price'));
-  const sales    = parseDecimal(fd.get('sales_price'));
-  const vat      = parseDecimal(fd.get('vat_rate'));
-  if (purchase !== null) fields.purchase_price = purchase;
-  if (sales    !== null) fields.sales_price    = sales;
-  if (vat      !== null) fields.vat_rate       = vat;
-  const supId = (fd.get('default_supplier_id') || '').trim();
-  fields.default_supplier_id = supId ? [supId] : [];
+  const sales = parseDecimal(fd.get('sales_price'));
+  const vat   = parseDecimal(fd.get('vat_rate'));
+  if (sales !== null) fields.sales_price = sales;
+  if (vat   !== null) fields.vat_rate    = vat;
+  const catId = (fd.get('category_id') || '').trim();
+  fields.category_id = catId ? [catId] : [];
 
   if (!fields.name1) return toast('Name (Zeile 1) fehlt', 'error');
   if (!id) fields.company_id = [cur.id];
@@ -2117,6 +2111,314 @@ async function toggleArticleArchive(id, archive) {
     await updateData('Article', id, { status: archive ? 'archiviert' : 'aktiv' });
     renderArticles();
     toast(archive ? 'Archiviert' : 'Reaktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   ARTIKEL: LIEFERANTEN-JUNCTION (EK-Preise pro Lieferant)
+   ============================================================ */
+function renderArticleSuppliers(articleId, junctions) {
+  if (!articleId) {
+    return '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Speichere zuerst den Artikel — danach kannst du Lieferanten mit EK-Preisen hinzufügen.</p>';
+  }
+  const sorted = [...junctions].sort((a, b) => {
+    const ap = a.fields.is_default ? 0 : 1;
+    const bp = b.fields.is_default ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    return 0;
+  });
+  const list = sorted.length === 0
+    ? '<p class="text-xs text-ink-500 italic px-3 py-2">Noch keine Lieferanten zugeordnet.</p>'
+    : '<div id="artSuppliersList" class="space-y-2">' + sorted.map(j => `<div data-as-row="${j.id}">${articleSupplierRow(articleId, j)}</div>`).join('') + '</div>';
+  return `
+    ${list}
+    <div id="artSupplierFormWrap" class="mt-2"></div>
+    <button id="addArtSupplierBtn" type="button" onclick="showArticleSupplierInlineForm('${articleId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+      <i data-lucide="plus" class="w-4 h-4"></i> Lieferant hinzufügen
+    </button>
+  `;
+}
+
+function articleSupplierRow(articleId, j) {
+  const f = j.fields || {};
+  const sid = (f.supplier_id || [])[0];
+  const supName = APP_KEYS.suppliersById?.[sid]?.name1 || '— unbekannt —';
+  const price = (f.purchase_price !== undefined && f.purchase_price !== null && f.purchase_price !== '')
+    ? formatPrice(f.purchase_price) + ' €'
+    : '';
+  const meta = [price, f.delivery_time].filter(Boolean).join(' · ');
+  return `
+    <div class="p-3 bg-ink-50 rounded-lg border border-ink-100">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            ${f.is_default ? '<i data-lucide="star" class="w-3.5 h-3.5 text-amber-500" style="fill:currentColor"></i>' : ''}
+            <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(supName)}</p>
+            ${meta ? `<span class="text-xs text-ink-500 font-mono tabular-nums">${escapeHtml(meta)}</span>` : ''}
+          </div>
+          ${f.order_text ? `<p class="text-xs text-ink-600 mt-1 whitespace-pre-line">${escapeHtml(f.order_text)}</p>` : ''}
+        </div>
+        <div class="flex gap-1 shrink-0">
+          <button type="button" onclick="showArticleSupplierInlineForm('${articleId}','${j.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
+            <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+          </button>
+          <button type="button" onclick="deleteArticleSupplierInline('${articleId}','${j.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function showArticleSupplierInlineForm(articleId, junctionId) {
+  if (document.querySelector('#artSupplierFormWrap [data-as-form]')) return;
+  const cur = getCurrentCompany();
+
+  let f = {};
+  let othersExist = false;
+  try {
+    const all = await readData('ArticleSupplier');
+    if (junctionId) f = all.find(j => j.id === junctionId)?.fields || {};
+    const peers = all.filter(j => (j.fields.article_id || []).includes(articleId) && j.id !== junctionId);
+    othersExist = peers.length > 0;
+    if (!junctionId && !peers.some(j => j.fields.is_default)) f.is_default = true;
+  } catch (e) {}
+
+  // Suppliers im aktuellen Mandanten — und Cache für Anzeige
+  let suppliersInCompany = [];
+  try {
+    const allSup = await readData('Supplier');
+    APP_KEYS.suppliersById = {};
+    allSup.forEach(s => { APP_KEYS.suppliersById[s.id] = s.fields; });
+    suppliersInCompany = allSup
+      .filter(s => (s.fields.company_id || []).includes(cur.id) && (s.fields.status || 'aktiv') === 'aktiv')
+      .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  } catch (e) {}
+
+  const currentSupId = (f.supplier_id || [])[0] || '';
+  const fid = 'asf_' + (junctionId || 'new');
+
+  if (junctionId) {
+    const row = document.querySelector(`[data-as-row="${junctionId}"]`);
+    if (row) row.classList.add('hidden');
+  }
+  document.getElementById('addArtSupplierBtn')?.classList.add('hidden');
+
+  document.getElementById('artSupplierFormWrap').innerHTML = `
+    <div data-as-form class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3">
+      <p class="text-sm font-semibold text-brand-700">${junctionId ? 'Lieferant bearbeiten' : 'Neuer Lieferant'}</p>
+
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Lieferant <span class="text-red-500">*</span></label>
+        <select id="${fid}_supplier" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <option value="">— bitte wählen —</option>
+          ${suppliersInCompany.map(s => `<option value="${s.id}" ${currentSupId === s.id ? 'selected' : ''}>${escapeHtml(s.fields.name1 || '–')}${s.fields.supplier_no ? ' (' + escapeHtml(s.fields.supplier_no) + ')' : ''}</option>`).join('')}
+        </select>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
+          <input id="${fid}_purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Lieferzeit</label>
+          <input id="${fid}_delivery_time" value="${escapeHtml(f.delivery_time || '')}" placeholder="z.B. 5 Tage" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Bestelltext / Lieferanten-Art.-Nr.</label>
+        <textarea id="${fid}_order_text" rows="2" placeholder="z.B. Lieferant-Artikelnr. + Bezeichnung wie sie auf der Bestellung erscheinen soll" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.order_text || '')}</textarea>
+      </div>
+
+      <label class="flex items-center gap-2 pt-1">
+        <input type="checkbox" id="${fid}_is_default" ${f.is_default ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+        <span class="text-sm">Hauptlieferant ${othersExist ? '<span class="text-xs text-ink-500">(ersetzt den bisherigen)</span>' : ''}</span>
+      </label>
+
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" onclick="cancelArticleSupplierInline('${articleId}','${junctionId || ''}')" class="px-3 py-1.5 text-sm rounded-lg border border-ink-200 bg-white hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="saveArticleSupplierInline('${articleId}','${junctionId || ''}')" class="px-3 py-1.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById(fid + '_supplier')?.focus(), 50);
+}
+
+function cancelArticleSupplierInline(articleId, junctionId) {
+  document.getElementById('artSupplierFormWrap').innerHTML = '';
+  document.getElementById('addArtSupplierBtn')?.classList.remove('hidden');
+  if (junctionId) {
+    const row = document.querySelector(`[data-as-row="${junctionId}"]`);
+    if (row) row.classList.remove('hidden');
+  }
+}
+
+async function saveArticleSupplierInline(articleId, junctionId) {
+  const fid = 'asf_' + (junctionId || 'new');
+  const supId = document.getElementById(fid + '_supplier')?.value || '';
+  if (!supId) return toast('Lieferant fehlt', 'error');
+  const purchase = parseDecimal(document.getElementById(fid + '_purchase_price')?.value);
+  const fields = {
+    supplier_id:    [supId],
+    delivery_time:  (document.getElementById(fid + '_delivery_time')?.value || '').trim(),
+    order_text:     (document.getElementById(fid + '_order_text')?.value || '').trim(),
+    is_default:     document.getElementById(fid + '_is_default')?.checked || false
+  };
+  if (purchase !== null) fields.purchase_price = purchase;
+  if (!junctionId) {
+    fields.article_id = [articleId];
+    const supName = APP_KEYS.suppliersById?.[supId]?.name1 || '?';
+    fields.label = supName; // Primary-Feld: nur als Label sichtbar in Airtable
+  }
+
+  try {
+    if (fields.is_default) {
+      const all = await readData('ArticleSupplier');
+      const others = all.filter(j =>
+        (j.fields.article_id || []).includes(articleId) &&
+        j.fields.is_default &&
+        j.id !== junctionId
+      );
+      for (const o of others) await updateData('ArticleSupplier', o.id, { is_default: false });
+    }
+    if (junctionId) await updateData('ArticleSupplier', junctionId, fields);
+    else            await writeData('ArticleSupplier', fields);
+    document.getElementById('artSupplierFormWrap').innerHTML = '';
+    document.getElementById('addArtSupplierBtn')?.classList.remove('hidden');
+    await refreshArticleSuppliersSection(articleId);
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteArticleSupplierInline(articleId, junctionId) {
+  if (!confirm('Diesen Lieferant-Eintrag wirklich löschen?')) return;
+  try {
+    await deleteData('ArticleSupplier', junctionId);
+    await refreshArticleSuppliersSection(articleId);
+    toast('Gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function refreshArticleSuppliersSection(articleId) {
+  const wrap = document.getElementById('articleSuppliersWrap');
+  if (!wrap) return;
+  try {
+    const all = await readData('ArticleSupplier');
+    const junctions = all.filter(j => (j.fields.article_id || []).includes(articleId));
+    wrap.innerHTML = renderArticleSuppliers(articleId, junctions);
+    if (window.lucide) lucide.createIcons();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* ============================================================
+   ARTIKEL: KATEGORIE-VERWALTUNG
+   ============================================================ */
+async function openCategoryManagement() {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  await renderCategoryManagement();
+}
+
+async function renderCategoryManagement() {
+  const cur = getCurrentCompany();
+  let all = [], allArticles = [];
+  try {
+    [all, allArticles] = await Promise.all([readData('Category'), readData('Article')]);
+  } catch (e) { toast(e.message, 'error'); return; }
+
+  const list = all
+    .filter(c => (c.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+
+  // Zähle Artikel pro Kategorie (im aktuellen Mandanten)
+  const usageByCat = {};
+  allArticles.forEach(a => {
+    if (!(a.fields.company_id || []).includes(cur.id)) return;
+    (a.fields.category_id || []).forEach(cid => {
+      usageByCat[cid] = (usageByCat[cid] || 0) + 1;
+    });
+  });
+
+  const rows = list.length === 0
+    ? '<p class="px-3 py-4 text-sm text-ink-500 italic text-center">Noch keine Kategorien für diesen Mandanten.</p>'
+    : list.map(c => {
+        const count = usageByCat[c.id] || 0;
+        return `
+          <div data-cat-row="${c.id}" class="flex items-center justify-between p-3 border-b border-ink-100 last:border-b-0">
+            <div class="flex-1 min-w-0">
+              <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(c.fields.name || '–')}</p>
+              <p class="text-xs text-ink-500">${count} Artikel</p>
+            </div>
+            <div class="flex gap-1 shrink-0">
+              <button type="button" onclick="renameCategory('${c.id}', '${escapeHtml((c.fields.name || '').replace(/'/g, "\\'"))}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Umbenennen"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+              <button type="button" onclick="deleteCategory('${c.id}', ${count})" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-baseline justify-between mb-4">
+        <h3 class="text-lg font-bold text-ink-900">Kategorien verwalten</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4">
+        ${rows}
+      </div>
+      <div class="flex gap-2">
+        <input id="newCatName" type="text" placeholder="Neue Kategorie…" onkeydown="if(event.key==='Enter'){event.preventDefault();addCategory()}" class="flex-1 px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <button type="button" onclick="addCategory()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
+          <i data-lucide="plus" class="w-4 h-4"></i> Hinzufügen
+        </button>
+      </div>
+      <div class="flex justify-end mt-5">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('newCatName')?.focus(), 50);
+}
+
+async function addCategory() {
+  const cur = getCurrentCompany();
+  const input = document.getElementById('newCatName');
+  const name = (input?.value || '').trim();
+  if (!name) return toast('Name fehlt', 'error');
+  try {
+    await writeData('Category', { name, company_id: [cur.id], status: 'aktiv' });
+    if (input) input.value = '';
+    await renderCategoryManagement();
+    toast('Kategorie angelegt', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function renameCategory(catId, currentName) {
+  const newName = prompt('Kategorie umbenennen:', currentName);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) return toast('Name fehlt', 'error');
+  try {
+    await updateData('Category', catId, { name: trimmed });
+    await renderCategoryManagement();
+    toast('Umbenannt', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteCategory(catId, articleCount) {
+  if (articleCount > 0) {
+    if (!confirm(`Diese Kategorie wird von ${articleCount} Artikel${articleCount===1?'':'n'} verwendet. Beim Löschen wird die Kategorie aus diesen Artikeln entfernt — die Artikel selbst bleiben. Wirklich löschen?`)) return;
+  } else {
+    if (!confirm('Diese Kategorie wirklich löschen?')) return;
+  }
+  try {
+    await deleteData('Category', catId);
+    await renderCategoryManagement();
+    toast('Kategorie gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
