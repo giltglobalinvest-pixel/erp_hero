@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.21';
+const APP_VERSION = 'v2.22';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1484,7 +1484,7 @@ function templateRow(rec) {
 // Default-Vorlagen-Inhalt nach Sektion (wenn neue Vorlage angelegt wird)
 function defaultTemplateContent(docType, section) {
   if (docType === 'Angebot') {
-    if (section === 'Einleitung') return 'Sehr {{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage. Wir freuen uns, Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen.\n\nDas Angebot ist gültig bis zum {{angebot.gueltig_bis}}.\n\nLieferbedingungen: {{angebot.lieferung}}\nZahlungsbedingungen: {{angebot.zahlungsziel}}';
+    if (section === 'Einleitung') return '{{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage. Wir freuen uns, Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen.\n\nDas Angebot ist gültig bis zum {{angebot.gueltig_bis}}.\n\nLieferbedingungen: {{angebot.lieferung}}\nZahlungsbedingungen: {{angebot.zahlungsziel}}';
     if (section === 'Schlusstext') return 'Wir hoffen, dass Ihnen unser Angebot zusagt und freuen uns auf Ihren Auftrag.\n\nMit freundlichen Grüßen\n\n{{user.name}}\n{{firma.name}}';
   }
   return '';
@@ -2789,6 +2789,19 @@ async function saveArticle(e, id, keepOpen) {
       const created = await writeData('Article', fields);
       savedId = created.id;
     }
+    // Bestelltext aller verknüpften ArticleSupplier-Records mit der neuen Beschreibung syncen
+    if (savedId) {
+      try {
+        const newOrderText = [fields.name1, fields.name2, fields.description].filter(Boolean).join('\n');
+        const all = await readData('ArticleSupplier');
+        const linked = all.filter(j => (j.fields.article_id || []).includes(savedId));
+        for (const j of linked) {
+          if ((j.fields.order_text || '') !== newOrderText) {
+            await updateData('ArticleSupplier', j.id, { order_text: newOrderText });
+          }
+        }
+      } catch (e) {}
+    }
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
     if (keepOpen) {
       closeModal();
@@ -3877,7 +3890,14 @@ const TEMPLATE_VARIABLES = {
     { name: 'kunde.kundennr',          label: 'Kundennr.',         resolve: c => c.customer?.customer_no || '' },
     { name: 'kunde.adresse',           label: 'Kunde · Adresse',   resolve: c => [c.customer?.street, [c.customer?.zip, c.customer?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') },
     { name: 'kunde.ustid',             label: 'Kunde · USt-IdNr',  resolve: c => c.customer?.vat_id || '' },
-    { name: 'kontakt.anrede',          label: 'Anrede (Herr/Frau)',resolve: c => contactSalutation(c.contact || {}) },
+    { name: 'kontakt.anrede',          label: 'Anrede (Sehr geehrter Herr/Frau)', resolve: c => {
+        const g = c.contact?.gender;
+        if (g === 'männlich') return 'Sehr geehrter Herr';
+        if (g === 'weiblich') return 'Sehr geehrte Frau';
+        return 'Sehr geehrte Damen und Herren';
+      }
+    },
+    { name: 'kontakt.anrede_kurz',      label: 'Anrede kurz (Herr/Frau)', resolve: c => contactSalutation(c.contact || {}) },
     { name: 'kontakt.vorname',         label: 'Kontakt · Vorname', resolve: c => c.contact?.first_name || '' },
     { name: 'kontakt.nachname',        label: 'Kontakt · Nachname',resolve: c => c.contact?.last_name  || '' },
     { name: 'kontakt.name',            label: 'Kontakt · Voll',    resolve: c => contactDisplayName(c.contact || {}) },
@@ -4170,12 +4190,18 @@ async function openQuoteModal(id) {
   window._currentQuoteIdInModal = id || null;
   // Internen Modus standardmäßig aus
   if (typeof window._quoteInternalMode === 'undefined') window._quoteInternalMode = false;
-  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [];
   try {
-    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields] = await Promise.all([
-      readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company'), readData('CustomField')
+    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms] = await Promise.all([
+      readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company'), readData('CustomField'),
+      readData('PaymentTerm'), readData('DeliveryTerm')
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
+  const paymentTerms = allPaymentTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
+  const deliveryTerms = allDeliveryTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
+  // Default-Werte für neue Angebote
+  const initialPayment  = f.payment_terms  || (id ? '' : (paymentTerms.find(t => t.fields.is_default)?.fields.name || ''));
+  const initialDelivery = f.delivery_terms || (id ? '' : (deliveryTerms.find(t => t.fields.is_default)?.fields.name || ''));
   // Template-Cache für die Vorlagen-Picker
   window._quoteTemplates = allTemplates.filter(t =>
     (t.fields.company_id || []).includes(cur.id) &&
@@ -4190,6 +4216,10 @@ async function openQuoteModal(id) {
     (cf.fields.doc_type === 'Angebot') &&
     (cf.fields.status || 'aktiv') === 'aktiv'
   ).sort((a,b) => (a.fields.label || a.fields.name || '').localeCompare(b.fields.label || b.fields.name || '', 'de'));
+
+  // Default-Templates für Auto-Auswahl bei neuen Dokumenten
+  const defaultIntroTpl   = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Einleitung'  && t.fields.is_default);
+  const defaultClosingTpl = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Schlusstext' && t.fields.is_default);
 
   if (id) {
     const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
@@ -4271,18 +4301,36 @@ async function openQuoteModal(id) {
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
-          <input name="payment_terms" value="${escapeHtml(f.payment_terms || '')}" placeholder="14 Tage netto" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <div class="flex gap-1.5">
+            <select name="payment_terms" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              <option value="">— wählen —</option>
+              ${paymentTerms.map(t => `<option value="${escapeHtml(t.fields.name || '')}" ${initialPayment === (t.fields.name || '') ? 'selected' : ''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '')}</option>`).join('')}
+              ${initialPayment && !paymentTerms.find(t => t.fields.name === initialPayment) ? `<option value="${escapeHtml(initialPayment)}" selected>${escapeHtml(initialPayment)} (alt)</option>` : ''}
+            </select>
+            <button type="button" onclick="openPaymentTermManagement(true)" class="px-2.5 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-ink-600" title="Zahlungsbedingungen verwalten">
+              <i data-lucide="settings-2" class="w-4 h-4"></i>
+            </button>
+          </div>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Lieferbedingungen</label>
-          <input name="delivery_terms" value="${escapeHtml(f.delivery_terms || '')}" placeholder="EXW Fellbach" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <div class="flex gap-1.5">
+            <select name="delivery_terms" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              <option value="">— wählen —</option>
+              ${deliveryTerms.map(t => `<option value="${escapeHtml(t.fields.name || '')}" ${initialDelivery === (t.fields.name || '') ? 'selected' : ''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '')}</option>`).join('')}
+              ${initialDelivery && !deliveryTerms.find(t => t.fields.name === initialDelivery) ? `<option value="${escapeHtml(initialDelivery)}" selected>${escapeHtml(initialDelivery)} (alt)</option>` : ''}
+            </select>
+            <button type="button" onclick="openDeliveryTermManagement(true)" class="px-2.5 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-ink-600" title="Lieferbedingungen verwalten">
+              <i data-lucide="settings-2" class="w-4 h-4"></i>
+            </button>
+          </div>
         </div>
         <div class="col-span-2">
           <div class="flex items-center justify-between mb-1">
             <label class="text-sm font-medium text-ink-700">Einleitung</label>
-            ${quoteTemplatePicker('description', 'Einleitung', (f.intro_template_id || [])[0] || '')}
+            ${quoteTemplatePicker('description', 'Einleitung', (f.intro_template_id || [])[0] || (id ? '' : (defaultIntroTpl?.id || '')))}
           </div>
-          <input type="hidden" name="intro_template_id" value="${escapeHtml((f.intro_template_id || [])[0] || '')}">
+          <input type="hidden" name="intro_template_id" value="${escapeHtml((f.intro_template_id || [])[0] || (id ? '' : (defaultIntroTpl?.id || '')))}">
           <textarea name="description" rows="3" placeholder="Anrede + Einleitung — z.B. „Sehr geehrte Damen und Herren, …"" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
         </div>
       </div>
@@ -4297,9 +4345,9 @@ async function openQuoteModal(id) {
       <div class="mt-5">
         <div class="flex items-center justify-between mb-1">
           <label class="text-sm font-medium text-ink-700">Schlusstext</label>
-          ${quoteTemplatePicker('notes', 'Schlusstext', (f.closing_template_id || [])[0] || '')}
+          ${quoteTemplatePicker('notes', 'Schlusstext', (f.closing_template_id || [])[0] || (id ? '' : (defaultClosingTpl?.id || '')))}
         </div>
-        <input type="hidden" name="closing_template_id" value="${escapeHtml((f.closing_template_id || [])[0] || '')}">
+        <input type="hidden" name="closing_template_id" value="${escapeHtml((f.closing_template_id || [])[0] || (id ? '' : (defaultClosingTpl?.id || '')))}">
         <textarea name="notes" rows="3" placeholder="z.B. Grußformel + Bankverbindung + Hinweise" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
       </div>
 
@@ -4362,16 +4410,20 @@ function onQuoteCustomerChange(value) {
     contactValueEl.value = '';
     if (contactSearchEl) contactSearchEl.value = '';
   }
-  // 2) Defaults aus Customer (nur wenn Felder leer)
+  // 2) Defaults aus Customer (nur wenn Felder leer; Select wird per Wert gesetzt)
   if (cid) {
     const cFields = cache.byId?.[cid] || {};
-    const ptInput = document.querySelector('#modalBox input[name="payment_terms"]');
-    if (ptInput && !ptInput.value.trim()) {
-      ptInput.value = cFields.payment_terms || '14 Tage netto';
+    const ptSel = document.querySelector('#modalBox select[name="payment_terms"]');
+    if (ptSel && !ptSel.value) {
+      const want = cFields.payment_terms || '14 Tage netto';
+      const opt = Array.from(ptSel.options).find(o => o.value === want);
+      if (opt) ptSel.value = want;
     }
-    const dtInput = document.querySelector('#modalBox input[name="delivery_terms"]');
-    if (dtInput && !dtInput.value.trim()) {
-      dtInput.value = cFields.delivery_terms || 'EXW Fellbach';
+    const dtSel = document.querySelector('#modalBox select[name="delivery_terms"]');
+    if (dtSel && !dtSel.value) {
+      const want = cFields.delivery_terms || 'EXW Fellbach';
+      const opt = Array.from(dtSel.options).find(o => o.value === want);
+      if (opt) dtSel.value = want;
     }
     // 3) Standardvorlagen mit aktuellem Kunden-Kontext nach-substituieren (sofern Felder noch leer)
     setTimeout(() => {
@@ -4379,6 +4431,124 @@ function onQuoteCustomerChange(value) {
       applyDefaultTemplate('notes', 'Schlusstext');
     }, 50);
   }
+}
+
+/* ============================================================
+   ZAHLUNGS-/LIEFERBEDINGUNGEN-VERWALTUNG (CRUD)
+   ============================================================ */
+let _termMgmtCtx = null;
+
+async function openPaymentTermManagement(useModal2 = false) {
+  _termMgmtCtx = { table: 'PaymentTerm', titleSing: 'Zahlungsbedingung', titlePlur: 'Zahlungsbedingungen', useModal2 };
+  await renderTermManagement();
+}
+async function openDeliveryTermManagement(useModal2 = false) {
+  _termMgmtCtx = { table: 'DeliveryTerm', titleSing: 'Lieferbedingung', titlePlur: 'Lieferbedingungen', useModal2 };
+  await renderTermManagement();
+}
+
+async function renderTermManagement() {
+  const ctx = _termMgmtCtx;
+  const cur = getCurrentCompany();
+  let all = [];
+  try { all = await readData(ctx.table); } catch (e) { toast(e.message, 'error'); return; }
+  const list = all
+    .filter(r => (r.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const rows = list.length === 0
+    ? `<p class="px-3 py-4 text-sm text-ink-500 italic text-center">Noch keine ${escapeHtml(ctx.titlePlur)}.</p>`
+    : list.map(r => {
+        const f = r.fields;
+        return `
+          <div class="flex items-center justify-between p-3 border-b border-ink-100 last:border-b-0">
+            <div class="flex items-center gap-2 flex-1 min-w-0">
+              ${f.is_default ? '<i data-lucide="star" class="w-3.5 h-3.5 text-amber-500" style="fill:currentColor"></i>' : ''}
+              <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(f.name || '–')}</p>
+              ${f.is_default ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Standard</span>' : ''}
+            </div>
+            <div class="flex gap-1 shrink-0">
+              <button type="button" onclick="toggleTermDefault('${r.id}', ${!f.is_default})" class="p-1.5 text-ink-500 hover:text-amber-600 hover:bg-ink-100 rounded" title="${f.is_default ? 'Standard entfernen' : 'Als Standard'}"><i data-lucide="star" class="w-3.5 h-3.5"${f.is_default?' style="fill:currentColor;color:#f59e0b"':''}></i></button>
+              <button type="button" onclick="renameTerm('${r.id}', '${escapeHtml((f.name || '').replace(/'/g, "\\'"))}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Umbenennen"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+              <button type="button" onclick="deleteTerm('${r.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+  const html = `
+    <div class="p-6">
+      <div class="flex items-baseline justify-between mb-2">
+        <h3 class="text-lg font-bold text-ink-900">${escapeHtml(ctx.titlePlur)}</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+      <p class="text-xs text-ink-500 mb-3">Standardwert wird bei neuem Angebot vor-ausgewählt, falls beim Kunden nichts hinterlegt ist.</p>
+      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4 max-h-72 overflow-y-auto">${rows}</div>
+      <div class="flex gap-2">
+        <input id="newTermName" type="text" placeholder="Neue ${escapeHtml(ctx.titleSing)}, z.B. „14 Tage netto"" onkeydown="if(event.key==='Enter'){event.preventDefault();addTerm()}" class="flex-1 px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <button type="button" onclick="addTerm()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
+          <i data-lucide="plus" class="w-4 h-4"></i> Hinzufügen
+        </button>
+      </div>
+      <div class="flex justify-end mt-5">
+        <button type="button" onclick="${ctx.useModal2 ? 'closeModal2()' : 'closeModal()'}" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen</button>
+      </div>
+    </div>
+  `;
+  if (ctx.useModal2) openModal2(html); else openModal(html);
+  setTimeout(() => document.getElementById('newTermName')?.focus(), 50);
+}
+
+async function addTerm() {
+  const ctx = _termMgmtCtx;
+  const cur = getCurrentCompany();
+  const input = document.getElementById('newTermName');
+  const name = (input?.value || '').trim();
+  if (!name) return toast('Name fehlt', 'error');
+  try {
+    await writeData(ctx.table, { name, company_id: [cur.id], status: 'aktiv' });
+    if (input) input.value = '';
+    await renderTermManagement();
+    toast(ctx.titleSing + ' angelegt', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function renameTerm(id, currentName) {
+  const ctx = _termMgmtCtx;
+  const newName = prompt(ctx.titleSing + ' umbenennen:', currentName);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) return toast('Name fehlt', 'error');
+  try {
+    await updateData(ctx.table, id, { name: trimmed });
+    await renderTermManagement();
+    toast('Umbenannt', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteTerm(id) {
+  const ctx = _termMgmtCtx;
+  if (!confirm('Wirklich löschen? Bestehende Dokumente behalten den Wert als Text.')) return;
+  try {
+    await deleteData(ctx.table, id);
+    await renderTermManagement();
+    toast(ctx.titleSing + ' gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleTermDefault(id, makeDefault) {
+  const ctx = _termMgmtCtx;
+  const cur = getCurrentCompany();
+  try {
+    if (makeDefault) {
+      // andere Defaults entflaggen
+      const all = await readData(ctx.table);
+      const others = all.filter(r => (r.fields.company_id || []).includes(cur.id) && r.fields.is_default && r.id !== id);
+      for (const o of others) await updateData(ctx.table, o.id, { is_default: false });
+    }
+    await updateData(ctx.table, id, { is_default: !!makeDefault });
+    await renderTermManagement();
+    toast(makeDefault ? 'Als Standard gesetzt' : 'Standard entfernt', 'success');
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 function renderQuoteItems(quoteId, items) {
@@ -4938,10 +5108,10 @@ async function showArticleSupplierInlineForm(articleId, junctionId) {
         </div>
       </div>
 
-      <div>
-        <label class="block text-xs font-medium text-ink-700 mb-1">Bestelltext / Lieferanten-Art.-Nr.</label>
-        <textarea id="${fid}_order_text" rows="2" placeholder="z.B. Lieferant-Artikelnr. + Bezeichnung wie sie auf der Bestellung erscheinen soll" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.order_text || '')}</textarea>
-      </div>
+      <p class="text-xs text-ink-500 italic px-2 py-1 bg-ink-50 rounded border border-ink-100">
+        <i data-lucide="info" class="w-3 h-3 inline-block align-text-top"></i>
+        Bestelltext entspricht automatisch der Artikelbeschreibung — wird auf der Bestellung mit eingedruckt.
+      </p>
 
       <label class="flex items-center gap-2 pt-1">
         <input type="checkbox" id="${fid}_is_default" ${f.is_default ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
@@ -4972,10 +5142,19 @@ async function saveArticleSupplierInline(articleId, junctionId) {
   const supId = document.getElementById(fid + '_supplier')?.value || '';
   if (!supId) return toast('Lieferant fehlt', 'error');
   const purchase = parseDecimal(document.getElementById(fid + '_purchase_price')?.value);
+  // Bestelltext = aktuelle Artikelbeschreibung (Snapshot bei jedem Save)
+  let orderText = '';
+  try {
+    const allArt = await readData('Article');
+    const art = allArt.find(a => a.id === articleId)?.fields;
+    if (art) {
+      orderText = [art.name1, art.name2, art.description].filter(Boolean).join('\n');
+    }
+  } catch (e) {}
   const fields = {
     supplier_id:    [supId],
     delivery_time:  (document.getElementById(fid + '_delivery_time')?.value || '').trim(),
-    order_text:     (document.getElementById(fid + '_order_text')?.value || '').trim(),
+    order_text:     orderText,
     is_default:     document.getElementById(fid + '_is_default')?.checked || false
   };
   if (purchase !== null) fields.purchase_price = purchase;
