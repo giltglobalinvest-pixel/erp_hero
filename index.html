@@ -312,6 +312,10 @@
               <i data-lucide="users" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Benutzer</span>
             </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-templates">
+              <i data-lucide="file-text" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Textvorlagen</span>
+            </button>
           </div>
         </div>
       </nav>
@@ -398,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.16';
+const APP_VERSION = 'v2.17';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1057,6 +1061,7 @@ function dispatchRoute(route) {
     case 'angebote':        renderQuotes(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
+    case 'admin-templates': renderAdminTextemplates(); break;
     default:                renderWelcome();
   }
 }
@@ -1381,6 +1386,203 @@ async function toggleUserStatus(id, currentlyInactive) {
     await updateData('User', id, { status: currentlyInactive ? 'aktiv' : 'inaktiv' });
     renderAdminUsers();
     toast(currentlyInactive ? 'Aktiviert' : 'Deaktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   ADMIN: TEXTVORLAGEN
+   ============================================================ */
+const _templateListState = { docType: 'alle' };
+
+const TEMPLATE_DOCTYPES = ['Angebot','Auftrag','Rechnung','Lieferschein','Artikel','E-Mail','Allgemein'];
+const TEMPLATE_SECTIONS = ['Einleitung','Beschreibung','Schlusstext','Body','Allgemein'];
+
+async function renderAdminTextemplates() {
+  setPageTitle('Textvorlagen');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Vorlagen…</p>';
+  let all = [];
+  try { all = await readData('Textemplate', null, { sort: [{ field: 'name', direction: 'asc' }] }); } catch (e) { toast(e.message, 'error'); }
+  let list = all.filter(t => (t.fields.company_id || []).includes(cur.id));
+  if (_templateListState.docType !== 'alle') {
+    list = list.filter(t => (t.fields.doc_type || '') === _templateListState.docType);
+  }
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-4xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-ink-900">Textvorlagen</h2>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
+        </div>
+        <button onclick="openTemplateModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i> Neue Vorlage
+        </button>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
+        <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
+          <label class="text-xs text-ink-500">Doc-Typ:</label>
+          <select onchange="_templateListState.docType=this.value;renderAdminTextemplates()" class="text-sm border border-ink-200 rounded-lg px-2 py-2">
+            <option value="alle" ${_templateListState.docType==='alle'?'selected':''}>alle</option>
+            ${TEMPLATE_DOCTYPES.map(d => `<option value="${d}" ${_templateListState.docType===d?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>
+        <div class="divide-y divide-ink-100">
+          ${list.length === 0
+            ? '<div class="p-10 text-center text-ink-500 text-sm">Noch keine Vorlagen. Lege die erste an mit „+ Neue Vorlage".</div>'
+            : list.map(templateRow).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function templateRow(rec) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const preview = (f.content || '').substring(0, 120) + ((f.content || '').length > 120 ? '…' : '');
+  return `
+    <div class="flex items-start justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openTemplateModal('${rec.id}')">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <p class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'}">${escapeHtml(f.name || '–')}</p>
+          ${f.doc_type ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">${escapeHtml(f.doc_type)}</span>` : ''}
+          ${f.section ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded">${escapeHtml(f.section)}</span>` : ''}
+        </div>
+        ${preview ? `<p class="text-xs text-ink-500 mt-1 whitespace-pre-line line-clamp-2">${escapeHtml(preview)}</p>` : ''}
+      </div>
+      <div class="flex gap-1 shrink-0 ml-2" onclick="event.stopPropagation()">
+        <button onclick="openTemplateModal('${rec.id}')" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten">
+          <i data-lucide="pencil" class="w-4 h-4"></i>
+        </button>
+        <button onclick="deleteTemplate('${rec.id}')" class="p-2 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen">
+          <i data-lucide="trash-2" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function openTemplateModal(id) {
+  const cur = getCurrentCompany();
+  let f = {};
+  if (id) {
+    const all = await readData('Textemplate');
+    f = all.find(r => r.id === id)?.fields || {};
+  } else {
+    f.doc_type = 'Angebot';
+    f.section = 'Einleitung';
+    f.status = 'aktiv';
+  }
+  openModal(`
+    <form onsubmit="saveTemplate(event, '${id || ''}')" class="p-6">
+      <h3 class="text-lg font-bold mb-4 text-ink-900">${id ? 'Vorlage bearbeiten' : 'Neue Vorlage'}</h3>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Name <span class="text-red-500">*</span></label>
+          <input name="name" required value="${escapeHtml(f.name || '')}" placeholder="z.B. Standard-Einleitung Angebot" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Dokumenttyp</label>
+          <select id="tpl_doc_type" name="doc_type" onchange="updateTemplateVariablesPanel()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            ${TEMPLATE_DOCTYPES.map(d => `<option value="${d}" ${(f.doc_type||'Angebot')===d?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Sektion</label>
+          <select name="section" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            ${TEMPLATE_SECTIONS.map(s => `<option value="${s}" ${(f.section||'Einleitung')===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+          <select name="status" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="aktiv" ${(f.status||'aktiv')==='aktiv'?'selected':''}>aktiv</option>
+            <option value="archiviert" ${f.status==='archiviert'?'selected':''}>archiviert</option>
+          </select>
+        </div>
+      </div>
+
+      <label class="block text-sm font-medium text-ink-700 mt-4 mb-1">Inhalt (mit Platzhaltern in <code class="text-xs bg-ink-100 px-1 rounded">{{…}}</code>)</label>
+      <textarea id="tpl_content" name="content" rows="8" placeholder="Sehr {{kontakt.anrede}} {{kontakt.nachname}},&#10;&#10;vielen Dank für Ihre Anfrage. Wir freuen uns Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen…" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.content || '')}</textarea>
+
+      <div class="mt-4">
+        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-2">Verfügbare Variablen — Klick fügt am Cursor ein</p>
+        <div id="tpl_vars_panel" class="bg-ink-50 rounded-lg p-3 border border-ink-200 max-h-40 overflow-y-auto"></div>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-5">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </form>
+  `);
+  updateTemplateVariablesPanel();
+}
+
+function updateTemplateVariablesPanel() {
+  const docType = document.getElementById('tpl_doc_type')?.value || 'Angebot';
+  const vars = TEMPLATE_VARIABLES[docType] || [];
+  const panel = document.getElementById('tpl_vars_panel');
+  if (!panel) return;
+  if (vars.length === 0) {
+    panel.innerHTML = '<p class="text-xs text-ink-500 italic">Für diesen Dokumenttyp sind noch keine Variablen definiert.</p>';
+    return;
+  }
+  panel.innerHTML = vars.map(v => `
+    <button type="button" onclick="insertTemplateVariable('${v.name}')" class="inline-flex items-center gap-1 mr-1 mb-1 px-2 py-1 text-xs bg-white border border-ink-200 rounded hover:border-brand-400 hover:bg-brand-50">
+      <code class="font-mono text-brand-600">{{${escapeHtml(v.name)}}}</code>
+      <span class="text-ink-500">${escapeHtml(v.label)}</span>
+    </button>
+  `).join('');
+}
+
+function insertTemplateVariable(varName) {
+  const ta = document.getElementById('tpl_content');
+  if (!ta) return;
+  const placeholder = '{{' + varName + '}}';
+  const start = ta.selectionStart || 0;
+  const end   = ta.selectionEnd || 0;
+  const before = ta.value.slice(0, start);
+  const after  = ta.value.slice(end);
+  ta.value = before + placeholder + after;
+  ta.focus();
+  const newPos = start + placeholder.length;
+  ta.setSelectionRange(newPos, newPos);
+}
+
+async function saveTemplate(e, id) {
+  e.preventDefault();
+  const cur = getCurrentCompany();
+  const fd = new FormData(e.target);
+  const fields = {};
+  ['name','doc_type','section','content','status'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  if (!fields.name) return toast('Name fehlt', 'error');
+  fields.status = fields.status || 'aktiv';
+  if (!id) fields.company_id = [cur.id];
+  try {
+    if (id) await updateData('Textemplate', id, fields);
+    else    await writeData('Textemplate', fields);
+    closeModal();
+    renderAdminTextemplates();
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteTemplate(id) {
+  if (!confirm('Diese Vorlage wirklich löschen?')) return;
+  try {
+    await deleteData('Textemplate', id);
+    renderAdminTextemplates();
+    toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
@@ -3421,6 +3623,61 @@ function calcLineNet(qty, price, disc) {
   return Math.round(((qty || 0) * (price || 0) * (1 - (disc || 0) / 100)) * 100) / 100;
 }
 
+/* ============================================================
+   TEXTVORLAGEN: Variablen-Definitionen + Substitution
+   ============================================================ */
+function formatDeDate(iso) {
+  if (!iso) return '';
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : iso;
+}
+
+const TEMPLATE_VARIABLES = {
+  Angebot: [
+    { name: 'angebot.nr',              label: 'Angebotsnr.',       resolve: c => c.quote?.quote_no || '' },
+    { name: 'angebot.datum',           label: 'Datum',             resolve: c => formatDeDate(c.quote?.date) },
+    { name: 'angebot.gueltig_bis',     label: 'Gültig bis',        resolve: c => formatDeDate(c.quote?.valid_until) },
+    { name: 'kunde.firma',             label: 'Kunde · Firma',     resolve: c => c.customer?.name1 || '' },
+    { name: 'kunde.firma2',            label: 'Kunde · Zusatz',    resolve: c => c.customer?.name2 || '' },
+    { name: 'kunde.kundennr',          label: 'Kundennr.',         resolve: c => c.customer?.customer_no || '' },
+    { name: 'kunde.adresse',           label: 'Kunde · Adresse',   resolve: c => [c.customer?.street, [c.customer?.zip, c.customer?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') },
+    { name: 'kunde.ustid',             label: 'Kunde · USt-IdNr',  resolve: c => c.customer?.vat_id || '' },
+    { name: 'kontakt.anrede',          label: 'Anrede (Herr/Frau)',resolve: c => contactSalutation(c.contact || {}) },
+    { name: 'kontakt.vorname',         label: 'Kontakt · Vorname', resolve: c => c.contact?.first_name || '' },
+    { name: 'kontakt.nachname',        label: 'Kontakt · Nachname',resolve: c => c.contact?.last_name  || '' },
+    { name: 'kontakt.name',            label: 'Kontakt · Voll',    resolve: c => contactDisplayName(c.contact || {}) },
+    { name: 'kontakt.email',           label: 'Kontakt · Email',   resolve: c => c.contact?.email || '' },
+    { name: 'firma.name',              label: 'Eigene Firma',      resolve: c => c.company?.name || '' },
+    { name: 'firma.adresse',           label: 'Eigene Adresse',    resolve: c => [c.company?.street, [c.company?.zip, c.company?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') },
+    { name: 'firma.telefon',           label: 'Eigene Telefon',    resolve: c => c.company?.phone || '' },
+    { name: 'firma.email',             label: 'Eigene Email',      resolve: c => c.company?.email || '' },
+    { name: 'firma.ustid',             label: 'Eigene USt-IdNr',   resolve: c => c.company?.vat_id || '' },
+    { name: 'angebot.zahlungsziel',    label: 'Zahlungsziel',      resolve: c => c.quote?.payment_terms || '' },
+    { name: 'angebot.lieferung',       label: 'Lieferbedingungen', resolve: c => c.quote?.delivery_terms || '' },
+    { name: 'user.name',               label: 'Bearbeiter',        resolve: c => c.user?.name || '' },
+    { name: 'datum.heute',             label: 'Heute',             resolve: ()=> formatDeDate(new Date().toISOString().slice(0,10)) }
+  ],
+  Auftrag:      [], // wird befüllt sobald Aufträge implementiert sind
+  Rechnung:     [],
+  Lieferschein: [],
+  Artikel:      [],
+  'E-Mail':     [], // teilt sich Variablen mit Angebot — eigene Liste falls abweichend
+  Allgemein:    []
+};
+
+function substituteVariables(text, docType, ctx) {
+  if (!text) return '';
+  const vars = TEMPLATE_VARIABLES[docType] || [];
+  let out = String(text);
+  vars.forEach(v => {
+    const placeholder = '{{' + v.name + '}}';
+    if (out.includes(placeholder)) {
+      try { out = out.split(placeholder).join(String(v.resolve(ctx) ?? '')); } catch(e) {}
+    }
+  });
+  return out;
+}
+
 async function renderQuotes() {
   setPageTitle('Angebote');
   const cur = getCurrentCompany();
@@ -3538,13 +3795,71 @@ function quoteRow(rec, custMap) {
   `;
 }
 
+function quoteTemplatePicker(fieldName, sectionLabel) {
+  const tpls = (window._quoteTemplates || []).filter(t => (t.fields.section || '') === sectionLabel);
+  if (tpls.length === 0) return '<span class="text-xs text-ink-400 italic">— keine Vorlage —</span>';
+  return `
+    <select onchange="onTemplatePicked(this, '${fieldName}', 'Angebot')" class="text-xs border border-ink-200 rounded-md px-2 py-1 max-w-[200px]">
+      <option value="">Vorlage einfügen…</option>
+      ${tpls.sort((a,b) => (a.fields.name||'').localeCompare(b.fields.name||'','de')).map(t => `<option value="${t.id}">${escapeHtml(t.fields.name || '–')}</option>`).join('')}
+    </select>
+  `;
+}
+
+async function buildQuoteVariableContext() {
+  const form = document.querySelector('#modalBox form');
+  if (!form) return {};
+  const fd = new FormData(form);
+  const cidSel = (fd.get('customer_id') || '').trim();
+  const conSel = (fd.get('contact_id')  || '').trim();
+  const cache  = window._quoteCustomerCache || {};
+  const customer = cache.byId?.[cidSel];
+  const contact  = cache.contacts?.find(c => c.id === conSel)?.fields;
+  const company  = window._quoteCompanyCache || {};
+  return {
+    quote: {
+      quote_no:       (fd.get('quote_no') || '').trim(),
+      date:           (fd.get('date') || '').trim(),
+      valid_until:    (fd.get('valid_until') || '').trim(),
+      payment_terms:  (fd.get('payment_terms') || '').trim(),
+      delivery_terms: (fd.get('delivery_terms') || '').trim()
+    },
+    customer, contact, company,
+    user: APP_KEYS.user || {}
+  };
+}
+
+function onTemplatePicked(selectEl, fieldName, docType) {
+  const tplId = selectEl.value;
+  selectEl.value = ''; // wieder auf "Vorlage einfügen…" zurück
+  if (!tplId) return;
+  const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
+  if (!tpl) return;
+  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"]`);
+  if (!ta) return;
+  if (ta.value.trim() && !confirm('Aktuellen Text durch Vorlage ersetzen?')) return;
+  buildQuoteVariableContext().then(ctx => {
+    ta.value = substituteVariables(tpl.fields.content || '', docType, ctx);
+  });
+}
+
 async function openQuoteModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
-  let f = {}, items = [], allCustomers = [], allContacts = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [];
   try {
-    [allCustomers, allContacts] = await Promise.all([readData('Customer'), readData('Contact')]);
+    [allCustomers, allContacts, allTemplates, allCompanies] = await Promise.all([
+      readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company')
+    ]);
   } catch (e) { toast(e.message, 'error'); return; }
+  // Template-Cache für die Vorlagen-Picker
+  window._quoteTemplates = allTemplates.filter(t =>
+    (t.fields.company_id || []).includes(cur.id) &&
+    (t.fields.doc_type === 'Angebot') &&
+    (t.fields.status || 'aktiv') === 'aktiv'
+  );
+  // Company-Cache für Variablen-Substitution
+  window._quoteCompanyCache = allCompanies.find(c => c.id === cur.id)?.fields || { name: cur.name };
 
   if (id) {
     const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
@@ -3633,8 +3948,18 @@ async function openQuoteModal(id) {
           <input name="delivery_terms" value="${escapeHtml(f.delivery_terms || '')}" placeholder="EXW Fellbach" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Beschreibung / Vortext</label>
-          <textarea name="description" rows="2" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+          <div class="flex items-center justify-between mb-1">
+            <label class="text-sm font-medium text-ink-700">Einleitung (Seite 1)</label>
+            ${quoteTemplatePicker('description', 'Einleitung')}
+          </div>
+          <textarea name="description" rows="3" placeholder="Anrede + Einleitung — z.B. „Sehr geehrte Damen und Herren, …"" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+        </div>
+        <div class="col-span-2">
+          <div class="flex items-center justify-between mb-1">
+            <label class="text-sm font-medium text-ink-700">Beschreibung (Seite 2)</label>
+            ${quoteTemplatePicker('body_text', 'Beschreibung')}
+          </div>
+          <textarea name="body_text" rows="5" placeholder="Detailbeschreibung, Hinweise zum Angebot, Bedingungen…" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.body_text || '')}</textarea>
         </div>
       </div>
 
@@ -3968,7 +4293,7 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
+  ['quote_no','description','body_text','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
