@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.17';
+const APP_VERSION = 'v2.18';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1468,6 +1468,16 @@ function templateRow(rec) {
   `;
 }
 
+// Default-Vorlagen-Inhalt nach Sektion (wenn neue Vorlage angelegt wird)
+function defaultTemplateContent(docType, section) {
+  if (docType === 'Angebot') {
+    if (section === 'Einleitung') return 'Sehr {{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage. Wir freuen uns, Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen.\n\nDas Angebot ist gültig bis zum {{angebot.gueltig_bis}}.';
+    if (section === 'Beschreibung') return 'Bitte beachten Sie:\n- Liefertermin nach Auftragsbestätigung\n- Es gelten unsere allgemeinen Geschäftsbedingungen\n- Lieferbedingungen: {{angebot.lieferung}}\n- Zahlungsbedingungen: {{angebot.zahlungsziel}}';
+    if (section === 'Schlusstext') return 'Wir hoffen, dass Ihnen unser Angebot zusagt und freuen uns auf Ihren Auftrag.\n\nMit freundlichen Grüßen\n\n{{user.name}}\n{{firma.name}}';
+  }
+  return '';
+}
+
 async function openTemplateModal(id) {
   const cur = getCurrentCompany();
   let f = {};
@@ -1478,6 +1488,7 @@ async function openTemplateModal(id) {
     f.doc_type = 'Angebot';
     f.section = 'Einleitung';
     f.status = 'aktiv';
+    f.content = defaultTemplateContent(f.doc_type, f.section);
   }
   openModal(`
     <form onsubmit="saveTemplate(event, '${id || ''}')" class="p-6">
@@ -1509,8 +1520,22 @@ async function openTemplateModal(id) {
         </div>
       </div>
 
+      <div class="mt-4 bg-gradient-to-br from-brand-50 to-white border border-brand-200 rounded-lg p-3">
+        <div class="flex items-center gap-2 mb-2">
+          <i data-lucide="sparkles" class="w-4 h-4 text-brand-600"></i>
+          <span class="text-sm font-semibold text-brand-800">Vorlage mit KI generieren</span>
+        </div>
+        <p class="text-xs text-ink-600 mb-2">Beschreib was die Vorlage tun soll — die KI baut den Text und setzt passende Platzhalter ein.</p>
+        <textarea id="tpl_ai_brief" rows="2" placeholder="z.B. „Höfliche Einleitung für Erstangebot mit Verweis auf vorherige Anfrage und Hinweis auf Gültigkeitsdauer"" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-brand-500/30"></textarea>
+        <div class="flex justify-end">
+          <button type="button" id="tpl_ai_btn" onclick="generateTemplateWithAI()" class="bg-ink-900 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-800 flex items-center gap-2">
+            <i data-lucide="sparkles" class="w-4 h-4"></i> <span id="tpl_ai_label">Generieren</span>
+          </button>
+        </div>
+      </div>
+
       <label class="block text-sm font-medium text-ink-700 mt-4 mb-1">Inhalt (mit Platzhaltern in <code class="text-xs bg-ink-100 px-1 rounded">{{…}}</code>)</label>
-      <textarea id="tpl_content" name="content" rows="8" placeholder="Sehr {{kontakt.anrede}} {{kontakt.nachname}},&#10;&#10;vielen Dank für Ihre Anfrage. Wir freuen uns Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen…" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.content || '')}</textarea>
+      <textarea id="tpl_content" name="content" rows="10" placeholder="Sehr {{kontakt.anrede}} {{kontakt.nachname}},&#10;&#10;vielen Dank für Ihre Anfrage…" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.content || '')}</textarea>
 
       <div class="mt-4">
         <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-2">Verfügbare Variablen — Klick fügt am Cursor ein</p>
@@ -1584,6 +1609,57 @@ async function deleteTemplate(id) {
     renderAdminTextemplates();
     toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
+}
+
+async function generateTemplateWithAI() {
+  const briefEl = document.getElementById('tpl_ai_brief');
+  const brief = (briefEl?.value || '').trim();
+  if (!brief) { toast('Bitte erst eine Beschreibung eingeben', 'warn'); return; }
+  if (!APP_KEYS.anthropicKey) { toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error'); return; }
+  const docType = document.getElementById('tpl_doc_type')?.value || 'Angebot';
+  const section = document.querySelector('#modalBox select[name="section"]')?.value || 'Einleitung';
+  const ta = document.getElementById('tpl_content');
+  if (!ta) return;
+  if (ta.value.trim() && !confirm('Aktuellen Inhalt durch KI-generierten Text ersetzen?')) return;
+
+  const vars = TEMPLATE_VARIABLES[docType] || [];
+  const varsList = vars.map(v => `- {{${v.name}}} → ${v.label}`).join('\n');
+
+  const prompt = `Du bist Vertriebsassistent bei FLP Lift Parts GmbH (B2B-Großhandel für Aufzug-Ersatzteile in Deutschland).
+
+Erstelle eine professionelle deutsche Textvorlage für folgenden Kontext:
+- Dokumenttyp: ${docType}
+- Sektion: ${section}
+
+Verfügbare Platzhalter (verwende sie wo es sinnvoll ist; keine erfundenen Platzhalter — nur diese hier):
+${varsList || '(keine Platzhalter definiert)'}
+
+Beschreibung der gewünschten Vorlage:
+${brief}
+
+WICHTIG:
+- Antworte NUR mit dem reinen Vorlagen-Text, keine Erklärung, keine Code-Blöcke, kein Markdown drumherum.
+- Verwende die Platzhalter exakt im Format {{name.subname}}.
+- Schreibe in der Sie-Form, höflich und geschäftlich.
+- Halte den Text knapp und natürlich — keine Floskel-Schwalle.`;
+
+  const btn = document.getElementById('tpl_ai_btn');
+  const lbl = document.getElementById('tpl_ai_label');
+  if (btn) btn.disabled = true;
+  if (lbl) lbl.textContent = 'generiert…';
+  try {
+    const result = await askAI(prompt, { maxTokens: 1500 });
+    // Falls die KI doch Code-Block-Markdown drum macht, abstreifen
+    let cleaned = result.trim();
+    cleaned = cleaned.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/, '').trim();
+    ta.value = cleaned;
+    toast('Vorlage generiert', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+    if (lbl) lbl.textContent = 'Generieren';
+  }
 }
 
 /* ============================================================
