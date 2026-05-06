@@ -370,7 +370,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.9';
+const APP_VERSION = 'v2.0';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1381,14 +1381,17 @@ function renderCustomerContacts(customerId, contacts) {
     const ap = a.fields.is_primary ? 0 : 1;
     const bp = b.fields.is_primary ? 0 : 1;
     if (ap !== bp) return ap - bp;
-    return (a.fields.name || '').localeCompare(b.fields.name || '', 'de');
+    const an = (a.fields.last_name || a.fields.name || '').toLowerCase();
+    const bn = (b.fields.last_name || b.fields.name || '').toLowerCase();
+    return an.localeCompare(bn, 'de');
   });
   const list = sorted.length === 0
-    ? '<p class="text-xs text-ink-500 italic px-3 py-2">Noch keine Ansprechpartner.</p>'
-    : '<div class="space-y-2">' + sorted.map(c => contactRow(customerId, c)).join('') + '</div>';
+    ? '<p id="contactsEmpty" class="text-xs text-ink-500 italic px-3 py-2">Noch keine Ansprechpartner.</p>'
+    : '<div id="contactsList" class="space-y-2">' + sorted.map(c => `<div data-contact-row="${c.id}">${contactRow(customerId, c)}</div>`).join('') + '</div>';
   return `
     ${list}
-    <button type="button" onclick="openContactModal('${customerId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+    <div id="contactInlineFormWrap" class="mt-2"></div>
+    <button id="addContactBtn" type="button" onclick="showContactInlineForm('${customerId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
       <i data-lucide="plus" class="w-4 h-4"></i> Ansprechpartner hinzufügen
     </button>
   `;
@@ -1420,7 +1423,7 @@ function contactRow(customerId, c) {
         ${summary ? `<p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(summary)}</p>` : ''}
       </div>
       <div class="flex gap-1 shrink-0 ml-2">
-        <button type="button" onclick="openContactModal('${customerId}','${c.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
+        <button type="button" onclick="showContactInlineForm('${customerId}','${c.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
           <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
         </button>
         <button type="button" onclick="deleteContactInline('${customerId}','${c.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
@@ -1431,7 +1434,10 @@ function contactRow(customerId, c) {
   `;
 }
 
-async function openContactModal(customerId, contactId) {
+async function showContactInlineForm(customerId, contactId) {
+  // Verhindern dass beim Bearbeiten ein zweites Formular auftaucht
+  if (document.querySelector('#contactInlineFormWrap [data-contact-form]')) return;
+
   let f = {};
   let othersExist = false;
   try {
@@ -1439,10 +1445,10 @@ async function openContactModal(customerId, contactId) {
     if (contactId) f = all.find(r => r.id === contactId)?.fields || {};
     const peers = all.filter(c => (c.fields.customer_id || []).includes(customerId) && c.id !== contactId);
     othersExist = peers.length > 0;
-    // Default für neuen Kontakt: wenn noch keiner existiert → automatisch Hauptansprechpartner
     if (!contactId && !peers.some(c => c.fields.is_primary)) f.is_primary = true;
   } catch (e) {}
-  // Fallback: alten 'name'-Wert in Vor-/Nachname splitten, falls vorhanden
+
+  // Legacy-name in Vor-/Nachname splitten
   let firstName = f.first_name || '';
   let lastName  = f.last_name  || '';
   if (!firstName && !lastName && f.name) {
@@ -1451,97 +1457,118 @@ async function openContactModal(customerId, contactId) {
     else { firstName = parts.shift(); lastName = parts.join(' '); }
   }
   const gender = f.gender || '';
+  const fid = 'cif_' + (contactId || 'new');
 
-  openModal2(`
-    <form onsubmit="saveContact(event, '${customerId}', '${contactId || ''}')" class="p-6">
-      <h3 class="text-base font-bold mb-4 text-ink-900">${contactId ? 'Ansprechpartner bearbeiten' : 'Neuer Ansprechpartner'}</h3>
+  // Bearbeitete Zeile temporär ausblenden
+  if (contactId) {
+    const row = document.querySelector(`[data-contact-row="${contactId}"]`);
+    if (row) row.classList.add('hidden');
+  }
+  document.getElementById('addContactBtn')?.classList.add('hidden');
 
-      <div class="mb-3">
-        <span class="block text-sm font-medium text-ink-700 mb-1.5">Geschlecht</span>
-        <div class="flex gap-3">
-          <label class="flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg cursor-pointer flex-1 hover:bg-ink-50 ${gender==='männlich'?'bg-brand-50 border-brand-300':''}">
-            <input type="radio" name="gender" value="männlich" ${gender==='männlich'?'checked':''} class="w-4 h-4 text-brand-500 focus:ring-brand-500/30">
+  document.getElementById('contactInlineFormWrap').innerHTML = `
+    <div data-contact-form class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3"
+         onkeydown="if(event.key==='Enter'&&event.target.tagName!=='TEXTAREA'){event.preventDefault();saveContactInline('${customerId}','${contactId || ''}')}">
+      <p class="text-sm font-semibold text-brand-700">${contactId ? 'Ansprechpartner bearbeiten' : 'Neuer Ansprechpartner'}</p>
+
+      <div>
+        <span class="block text-xs font-medium text-ink-700 mb-1">Geschlecht</span>
+        <div class="flex gap-2">
+          <label class="flex items-center gap-2 px-3 py-1.5 bg-white border border-ink-200 rounded-lg cursor-pointer flex-1 hover:bg-ink-50 ${gender==='männlich'?'border-brand-400':''}">
+            <input type="radio" name="${fid}_gender" value="männlich" ${gender==='männlich'?'checked':''} class="w-3.5 h-3.5 text-brand-500">
             <span class="text-sm">männlich</span>
           </label>
-          <label class="flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg cursor-pointer flex-1 hover:bg-ink-50 ${gender==='weiblich'?'bg-brand-50 border-brand-300':''}">
-            <input type="radio" name="gender" value="weiblich" ${gender==='weiblich'?'checked':''} class="w-4 h-4 text-brand-500 focus:ring-brand-500/30">
+          <label class="flex items-center gap-2 px-3 py-1.5 bg-white border border-ink-200 rounded-lg cursor-pointer flex-1 hover:bg-ink-50 ${gender==='weiblich'?'border-brand-400':''}">
+            <input type="radio" name="${fid}_gender" value="weiblich" ${gender==='weiblich'?'checked':''} class="w-3.5 h-3.5 text-brand-500">
             <span class="text-sm">weiblich</span>
           </label>
         </div>
       </div>
 
-      <div class="grid grid-cols-2 gap-3 mb-3">
+      <div class="grid grid-cols-2 gap-2">
         <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Vorname</label>
-          <input name="first_name" value="${escapeHtml(firstName)}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <label class="block text-xs font-medium text-ink-700 mb-1">Vorname</label>
+          <input id="${fid}_first_name" value="${escapeHtml(firstName)}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Nachname <span class="text-red-500">*</span></label>
-          <input name="last_name" required value="${escapeHtml(lastName)}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-      </div>
-
-      <label class="block text-sm font-medium text-ink-700 mb-1">Funktion / Position</label>
-      <input name="role" value="${escapeHtml(f.role || '')}" placeholder="z.B. Geschäftsführung, Einkauf, Buchhaltung" class="w-full mb-3 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-
-      <div class="grid grid-cols-2 gap-3 mb-3">
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">E-Mail</label>
-          <input name="email" type="email" value="${escapeHtml(f.email || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Telefon</label>
-          <input name="phone" value="${escapeHtml(f.phone || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <label class="block text-xs font-medium text-ink-700 mb-1">Nachname <span class="text-red-500">*</span></label>
+          <input id="${fid}_last_name" value="${escapeHtml(lastName)}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
-      <label class="flex items-center gap-2 mb-5 mt-2">
-        <input type="checkbox" name="is_primary" ${f.is_primary ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
-        <span class="text-sm text-ink-900">Hauptansprechpartner ${othersExist ? '<span class="text-xs text-ink-500">(ersetzt den bisherigen)</span>' : ''}</span>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Funktion / Position</label>
+        <input id="${fid}_role" value="${escapeHtml(f.role || '')}" placeholder="z.B. Geschäftsführung, Einkauf, Buchhaltung" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">E-Mail</label>
+          <input id="${fid}_email" type="email" value="${escapeHtml(f.email || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Telefon</label>
+          <input id="${fid}_phone" value="${escapeHtml(f.phone || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+
+      <label class="flex items-center gap-2 pt-1">
+        <input type="checkbox" id="${fid}_is_primary" ${f.is_primary ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+        <span class="text-sm">Hauptansprechpartner ${othersExist ? '<span class="text-xs text-ink-500">(ersetzt den bisherigen)</span>' : ''}</span>
       </label>
 
-      <div class="flex justify-end gap-2">
-        <button type="button" onclick="closeModal2()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
-        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" onclick="cancelContactInline('${customerId}','${contactId || ''}')" class="px-3 py-1.5 text-sm rounded-lg border border-ink-200 bg-white hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="saveContactInline('${customerId}','${contactId || ''}')" class="px-3 py-1.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
       </div>
-    </form>
-  `);
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById(fid + (firstName ? '_last_name' : '_first_name'))?.focus(), 50);
 }
 
-async function saveContact(e, customerId, contactId) {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const firstName = (fd.get('first_name') || '').trim();
-  const lastName  = (fd.get('last_name')  || '').trim();
+function cancelContactInline(customerId, contactId) {
+  document.getElementById('contactInlineFormWrap').innerHTML = '';
+  document.getElementById('addContactBtn')?.classList.remove('hidden');
+  if (contactId) {
+    const row = document.querySelector(`[data-contact-row="${contactId}"]`);
+    if (row) row.classList.remove('hidden');
+  }
+}
+
+async function saveContactInline(customerId, contactId) {
+  const fid = 'cif_' + (contactId || 'new');
+  const $v = id => (document.getElementById(fid + '_' + id)?.value || '').trim();
+  const firstName = $v('first_name');
+  const lastName  = $v('last_name');
+  if (!lastName) return toast('Nachname fehlt', 'error');
+  const genderInput = document.querySelector(`input[name="${fid}_gender"]:checked`);
   const fields = {
     first_name: firstName,
     last_name:  lastName,
-    name:       [firstName, lastName].filter(Boolean).join(' '), // legacy/primary-Feld synchron halten
-    gender:     fd.get('gender') || '',
-    role:       (fd.get('role')  || '').trim(),
-    email:      (fd.get('email') || '').trim(),
-    phone:      (fd.get('phone') || '').trim(),
-    is_primary: fd.get('is_primary') === 'on'
+    name:       [firstName, lastName].filter(Boolean).join(' '),
+    role:       $v('role'),
+    email:      $v('email'),
+    phone:      $v('phone'),
+    is_primary: document.getElementById(fid + '_is_primary')?.checked || false
   };
-  if (!fields.last_name) return toast('Nachname fehlt', 'error');
-  if (!fields.gender) delete fields.gender; // Airtable mag keinen Leerstring für singleSelect
+  if (genderInput) fields.gender = genderInput.value;
   if (!contactId) fields.customer_id = [customerId];
+
   try {
     if (fields.is_primary) {
-      // andere Kontakte dieses Kunden auf is_primary=false setzen
       const all = await readData('Contact');
       const others = all.filter(c =>
         (c.fields.customer_id || []).includes(customerId) &&
         c.fields.is_primary &&
         c.id !== contactId
       );
-      for (const o of others) {
-        await updateData('Contact', o.id, { is_primary: false });
-      }
+      for (const o of others) await updateData('Contact', o.id, { is_primary: false });
     }
     if (contactId) await updateData('Contact', contactId, fields);
     else           await writeData('Contact', fields);
-    closeModal2();
+    document.getElementById('contactInlineFormWrap').innerHTML = '';
+    document.getElementById('addContactBtn')?.classList.remove('hidden');
     await refreshCustomerContactsSection(customerId);
     toast('Gespeichert', 'success');
   } catch (err) { toast(err.message, 'error'); }
