@@ -244,9 +244,12 @@
             <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
           </button>
           <div class="nav-items pl-2 mt-1 space-y-0.5 hidden">
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="anfragen">
+              <i data-lucide="inbox" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Anfragen</span>
+            </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
               <i data-lucide="file-text" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Angebote</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.2</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">soon</span>
             </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
               <i data-lucide="file-check-2" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Aufträge</span>
@@ -396,7 +399,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.8';
+const APP_VERSION = 'v2.9';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -521,6 +524,7 @@ function setCurrentCompany(companyId) {
   if (_currentRoute === 'lieferanten') renderSuppliers();
   if (_currentRoute === 'artikel')     renderArticles();
   if (_currentRoute === 'kontakte')    renderContactsList();
+  if (_currentRoute === 'anfragen')    renderInquiries();
 }
 
 function renderMandantenSwitcher() {
@@ -756,6 +760,18 @@ async function uploadFileToRecord(recordId, attachmentField, file) {
    ============================================================ */
 async function askAI(prompt, opts = {}) {
   if (!APP_KEYS.anthropicKey) throw new Error('KI nicht verfügbar (Anthropic-Key fehlt)');
+  // Multimodale Inhalte zusammenstellen: optional Bilder, dann Text
+  const content = [];
+  if (Array.isArray(opts.images)) {
+    for (const img of opts.images) {
+      if (!img?.data) continue;
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mediaType || 'image/png', data: img.data }
+      });
+    }
+  }
+  content.push({ type: 'text', text: prompt });
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -766,8 +782,8 @@ async function askAI(prompt, opts = {}) {
     },
     body: JSON.stringify({
       model: opts.model || 'claude-sonnet-4-5-20250929',
-      max_tokens: opts.maxTokens || 1024,
-      messages: [{ role: 'user', content: prompt }]
+      max_tokens: opts.maxTokens || 2048,
+      messages: [{ role: 'user', content: content.length === 1 ? content[0].text : content }]
     })
   });
   if (!res.ok) {
@@ -921,6 +937,9 @@ function openModal(html) {
 function closeModal() {
   document.getElementById('modalBackdrop').classList.add('hidden');
   document.getElementById('modalBox').innerHTML = '';
+  // Inquiry-spezifischer Cleanup: Spracherkennung stoppen, Bilder freigeben
+  if (typeof _inquirySpeech !== 'undefined' && _inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
+  if (typeof _inquiryImages !== 'undefined') _inquiryImages = [];
   if (_currentLock) {
     const lock = _currentLock;
     _currentLock = null;
@@ -950,6 +969,7 @@ function dispatchRoute(route) {
     case 'lieferanten':     renderSuppliers(); break;
     case 'artikel':         renderArticles(); break;
     case 'kontakte':        renderContactsList(); break;
+    case 'anfragen':        renderInquiries(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
     default:                renderWelcome();
@@ -2290,6 +2310,476 @@ async function toggleArticleArchive(id, archive) {
     await updateData('Article', id, { status: archive ? 'archiviert' : 'aktiv' });
     renderArticles();
     toast(archive ? 'Archiviert' : 'Reaktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   VERKAUF: ANFRAGEN (Inquiry)
+   ============================================================ */
+const _inquiryListState = { search: '', status: 'alle' };
+let _inquirySearchTimer = null;
+let _inquiryImages = []; // im Modal gehaltene Bilder { name, mediaType, base64 (ohne data: prefix), dataUrl (mit prefix für preview) }
+let _inquirySpeech = null; // Web-Speech-Recognition Instanz
+
+async function nextInquiryNo(companyId) {
+  const all = await readData('Inquiry');
+  const inCo = all.filter(i => (i.fields.company_id || []).includes(companyId));
+  let max = 1000;
+  inCo.forEach(i => {
+    const m = (i.fields.inquiry_no || '').match(/^AN-(\d+)$/);
+    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+  });
+  return 'AN-' + (max + 1);
+}
+
+async function renderInquiries() {
+  setPageTitle('Anfragen');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt. Bitte links eine Firma wählen.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Anfragen…</p>';
+
+  let all = [], allCustomers = [];
+  try {
+    [all, allCustomers] = await Promise.all([readData('Inquiry'), readData('Customer')]);
+  } catch (e) { toast(e.message, 'error'); }
+
+  const custMap = {};
+  allCustomers.forEach(c => { custMap[c.id] = c.fields; });
+
+  let list = all.filter(i => (i.fields.company_id || []).includes(cur.id));
+  if (_inquiryListState.status !== 'alle') {
+    list = list.filter(i => (i.fields.status || 'offen') === _inquiryListState.status);
+  }
+  const q = _inquiryListState.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter(i => {
+      const f = i.fields;
+      const cid = (f.customer_id || [])[0];
+      const cust = custMap[cid] || {};
+      return [f.inquiry_no, f.title, f.ticket_no, f.raw_text, f.ai_summary, cust.name1, cust.customer_no]
+        .some(v => (v || '').toString().toLowerCase().includes(q));
+    });
+  }
+  // Neueste zuerst (nach Auto-Inquiry-No-Nummer absteigend)
+  list.sort((a, b) => {
+    const an = parseInt((a.fields.inquiry_no || '').replace(/\D/g, ''), 10) || 0;
+    const bn = parseInt((b.fields.inquiry_no || '').replace(/\D/g, ''), 10) || 0;
+    return bn - an;
+  });
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-5xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-ink-900">Anfragen</h2>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
+        </div>
+        <button onclick="openInquiryModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i> Neue Anfrage
+        </button>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
+        <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
+          <div class="relative flex-1 min-w-[180px]">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>
+            <input type="search" value="${escapeHtml(_inquiryListState.search)}" placeholder="Suchen (Nr., Betreff, Ticket…)" oninput="onInquirySearchInput(this.value)"
+                   class="w-full pl-9 pr-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          <label class="text-xs text-ink-500">Status:</label>
+          <select onchange="_inquiryListState.status=this.value;renderInquiries()" class="text-sm border border-ink-200 rounded-lg px-2 py-2">
+            <option value="alle"            ${_inquiryListState.status==='alle'?'selected':''}>alle</option>
+            <option value="offen"           ${_inquiryListState.status==='offen'?'selected':''}>offen</option>
+            <option value="in_bearbeitung"  ${_inquiryListState.status==='in_bearbeitung'?'selected':''}>in Bearbeitung</option>
+            <option value="beantwortet"     ${_inquiryListState.status==='beantwortet'?'selected':''}>beantwortet</option>
+            <option value="abgelehnt"       ${_inquiryListState.status==='abgelehnt'?'selected':''}>abgelehnt</option>
+            <option value="archiviert"      ${_inquiryListState.status==='archiviert'?'selected':''}>archiviert</option>
+          </select>
+        </div>
+        <div class="divide-y divide-ink-100">
+          ${list.length === 0
+            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _inquiryListState.status !== 'alle' ? 'Keine Treffer.' : 'Noch keine Anfragen. Lege die erste an mit „+ Neue Anfrage".'}</div>`
+            : list.map(rec => inquiryRow(rec, custMap)).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function onInquirySearchInput(value) {
+  _inquiryListState.search = value;
+  clearTimeout(_inquirySearchTimer);
+  _inquirySearchTimer = setTimeout(() => _renderWithSearchFocus(renderInquiries), 200);
+}
+
+function inquiryStatusBadge(status) {
+  const map = {
+    'offen':           ['bg-blue-100 text-blue-700', 'offen'],
+    'in_bearbeitung':  ['bg-amber-100 text-amber-700', 'in Bearbeitung'],
+    'beantwortet':     ['bg-emerald-100 text-emerald-700', 'beantwortet'],
+    'abgelehnt':       ['bg-red-100 text-red-700', 'abgelehnt'],
+    'archiviert':      ['bg-ink-200 text-ink-600', 'archiviert']
+  };
+  const [cls, label] = map[status] || map['offen'];
+  return `<span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded ${cls}">${label}</span>`;
+}
+
+function inquiryRow(rec, custMap) {
+  const f = rec.fields || {};
+  const cid = (f.customer_id || [])[0];
+  const cust = custMap?.[cid];
+  const lockedByOther = isLockedByOther(rec);
+  const lockInfo = getLockInfo(rec);
+  const lockedBadge = lockedByOther
+    ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Wird gerade von ${escapeHtml(userLabel(lockInfo.userId))} bearbeitet"><i data-lucide="lock" class="w-3 h-3"></i> in Bearbeitung</span>`
+    : '';
+  const summary = f.ai_summary ? f.ai_summary.split('\n')[0].substring(0, 120) : '';
+  return `
+    <div class="flex items-start justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openInquiryModal('${rec.id}')">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="text-xs font-mono text-ink-500">${escapeHtml(f.inquiry_no || '–')}</span>
+          ${f.ticket_no ? `<span class="text-[10px] font-mono bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded">FT ${escapeHtml(f.ticket_no)}</span>` : ''}
+          ${inquiryStatusBadge(f.status || 'offen')}
+          ${lockedBadge}
+        </div>
+        <p class="font-medium text-ink-900 truncate mt-0.5">${escapeHtml(f.title || '— ohne Betreff —')}</p>
+        <p class="text-xs text-ink-500 mt-0.5 truncate">
+          ${cust ? escapeHtml(cust.name1 || '–') + (cust.customer_no ? ' · ' + escapeHtml(cust.customer_no) : '') : '<span class="text-ink-400">— Kunde nicht zugeordnet —</span>'}
+        </p>
+        ${summary ? `<p class="text-xs text-ink-600 mt-1 line-clamp-1">${escapeHtml(summary)}</p>` : ''}
+      </div>
+      <i data-lucide="chevron-right" class="w-4 h-4 text-ink-300 shrink-0 mt-1 ml-2"></i>
+    </div>
+  `;
+}
+
+async function openInquiryModal(id) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  let f = {};
+  let allCustomers = [], allContacts = [];
+  try {
+    [allCustomers, allContacts] = await Promise.all([readData('Customer'), readData('Contact')]);
+  } catch (e) { toast(e.message, 'error'); return; }
+
+  if (id) {
+    const all = await readData('Inquiry');
+    const rec = all.find(r => r.id === id);
+    f = rec?.fields || {};
+    const lockRes = await acquireLock('Inquiry', id, rec);
+    if (!lockRes.ok) {
+      toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
+      return;
+    }
+  } else {
+    f.inquiry_no = await nextInquiryNo(cur.id);
+    f.status = 'offen';
+    f.channel = 'Email';
+  }
+
+  // Bilder-State pro Modal-Öffnung leeren
+  _inquiryImages = [];
+  // Sprach-Recognition zurücksetzen
+  if (_inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
+
+  const customersInCompany = allCustomers
+    .filter(c => (c.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  const currentCustomerId = (f.customer_id || [])[0] || '';
+  const currentContactId  = (f.contact_id  || [])[0] || '';
+
+  const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  openModal(`
+    <form onsubmit="saveInquiry(event, '${id || ''}')" class="p-6">
+      <div class="flex items-baseline justify-between mb-4">
+        <h3 class="text-lg font-bold text-ink-900">${id ? 'Anfrage bearbeiten' : 'Neue Anfrage'}</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Anfrage-Nr.</label>
+          <input name="inquiry_no" value="${escapeHtml(f.inquiry_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Freshdesk-Ticket-Nr.</label>
+          <input name="ticket_no" value="${escapeHtml(f.ticket_no || '')}" placeholder="z.B. 12345" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Betreff <span class="text-red-500">*</span></label>
+          <input name="title" required value="${escapeHtml(f.title || '')}" placeholder="Kurze Beschreibung der Anfrage" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Kanal</label>
+          <select name="channel" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            ${['Email','Telefon','Web','Persönlich'].map(c => `<option value="${c}" ${(f.channel||'Email')===c?'selected':''}>${c}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+          <select name="status" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="offen"           ${(f.status||'offen')==='offen'?'selected':''}>offen</option>
+            <option value="in_bearbeitung"  ${f.status==='in_bearbeitung'?'selected':''}>in Bearbeitung</option>
+            <option value="beantwortet"     ${f.status==='beantwortet'?'selected':''}>beantwortet</option>
+            <option value="abgelehnt"       ${f.status==='abgelehnt'?'selected':''}>abgelehnt</option>
+            <option value="archiviert"      ${f.status==='archiviert'?'selected':''}>archiviert</option>
+          </select>
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Eingaben (alle Quellen werden in der KI-Analyse zusammengefasst)</h4>
+
+      <label class="block text-xs font-medium text-ink-700 mb-1">Anfragetext / Email-Body</label>
+      <textarea id="inq_raw_text" name="raw_text" rows="5" placeholder="Hier den Email-Text einfügen oder eintippen…" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.raw_text || '')}</textarea>
+
+      <div class="flex items-center justify-between mb-1">
+        <label class="block text-xs font-medium text-ink-700">Spracheingabe (deutsch)</label>
+        ${speechSupported
+          ? `<button id="inq_voice_btn" type="button" onclick="toggleInquiryVoice()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center gap-1">
+              <i data-lucide="mic" class="w-3.5 h-3.5"></i> <span id="inq_voice_label">Aufnehmen</span>
+            </button>`
+          : `<span class="text-xs text-ink-400 italic">Browser unterstützt keine Spracheingabe</span>`}
+      </div>
+      <textarea id="inq_voice_text" name="voice_text" rows="2" placeholder="Transkript erscheint hier — kann auch manuell ergänzt werden" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-3 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.voice_text || '')}</textarea>
+
+      <label class="block text-xs font-medium text-ink-700 mb-1">Bilder / Screenshots</label>
+      <div class="flex flex-wrap gap-2 mb-2" id="inq_images_preview"></div>
+      <label class="flex items-center justify-center gap-2 px-3 py-2 border-2 border-dashed border-ink-200 rounded-lg cursor-pointer hover:bg-ink-50 text-sm text-ink-600 mb-3">
+        <i data-lucide="image-plus" class="w-4 h-4"></i>
+        <span>Bilder auswählen</span>
+        <input type="file" accept="image/*" multiple class="hidden" onchange="addInquiryImages(this.files)">
+      </label>
+
+      <div class="flex justify-end mb-4">
+        <button type="button" id="inq_analyze_btn" onclick="analyzeInquiry()" class="bg-ink-900 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-800 flex items-center gap-2">
+          <i data-lucide="sparkles" class="w-4 h-4"></i> <span id="inq_analyze_label">Analysieren</span>
+        </button>
+      </div>
+
+      <h4 class="mt-2 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">KI-Zusammenfassung</h4>
+      <textarea id="inq_ai_summary" name="ai_summary" rows="8" placeholder="Hier erscheint die strukturierte Zusammenfassung nach „Analysieren". Du kannst sie bearbeiten." class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-4 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.ai_summary || '')}</textarea>
+
+      <h4 class="mt-2 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Zuordnung</h4>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Kunde</label>
+          <select name="customer_id" id="inq_customer_select" onchange="onInquiryCustomerChange()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— nicht zugeordnet —</option>
+            ${customersInCompany.map(c => `<option value="${c.id}" ${currentCustomerId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name1 || '–')}${c.fields.customer_no ? ' (' + escapeHtml(c.fields.customer_no) + ')' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
+          <select name="contact_id" id="inq_contact_select" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— nicht zugeordnet —</option>
+            ${allContacts.filter(c => (c.fields.customer_id || []).includes(currentCustomerId)).map(c => `<option value="${c.id}" ${currentContactId === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen</h4>
+      <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+
+      <div class="flex justify-end gap-2 flex-wrap">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </form>
+  `);
+}
+
+function onInquiryCustomerChange() {
+  const cid = document.getElementById('inq_customer_select')?.value;
+  // Refresh contact dropdown
+  const select = document.getElementById('inq_contact_select');
+  if (!select) return;
+  if (!cid) { select.innerHTML = '<option value="">— nicht zugeordnet —</option>'; return; }
+  readData('Contact').then(all => {
+    const list = all.filter(c => (c.fields.customer_id || []).includes(cid));
+    select.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
+      list.map(c => `<option value="${c.id}">${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
+  });
+}
+
+function addInquiryImages(files) {
+  if (!files || !files.length) return;
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue;
+    if (file.size > 8 * 1024 * 1024) { toast('Bild zu groß: ' + file.name + ' (max 8 MB)', 'warn'); continue; }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      const base64 = dataUrl.split(',')[1];
+      _inquiryImages.push({ name: file.name, mediaType: file.type, base64, dataUrl });
+      renderInquiryImagesPreview();
+    };
+    reader.readAsDataURL(file);
+  }
+}
+
+function removeInquiryImage(index) {
+  _inquiryImages.splice(index, 1);
+  renderInquiryImagesPreview();
+}
+
+function renderInquiryImagesPreview() {
+  const wrap = document.getElementById('inq_images_preview');
+  if (!wrap) return;
+  if (_inquiryImages.length === 0) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = _inquiryImages.map((img, i) => `
+    <div class="relative w-20 h-20 rounded-lg overflow-hidden border border-ink-200 bg-ink-50">
+      <img src="${img.dataUrl}" alt="${escapeHtml(img.name)}" class="w-full h-full object-cover">
+      <button type="button" onclick="removeInquiryImage(${i})" class="absolute top-0.5 right-0.5 w-5 h-5 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center" title="Entfernen">
+        <i data-lucide="x" class="w-3 h-3"></i>
+      </button>
+    </div>
+  `).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function toggleInquiryVoice() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) return toast('Browser unterstützt keine Spracheingabe', 'warn');
+  if (_inquirySpeech) {
+    try { _inquirySpeech.stop(); } catch(e){}
+    _inquirySpeech = null;
+    document.getElementById('inq_voice_label').textContent = 'Aufnehmen';
+    document.getElementById('inq_voice_btn').classList.remove('bg-red-50','border-red-300');
+    return;
+  }
+  const r = new SpeechRecognition();
+  r.lang = 'de-DE';
+  r.continuous = true;
+  r.interimResults = true;
+  let finalText = (document.getElementById('inq_voice_text')?.value || '').trim();
+  r.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        finalText = (finalText + ' ' + t).trim();
+      } else {
+        interim += t;
+      }
+    }
+    const ta = document.getElementById('inq_voice_text');
+    if (ta) ta.value = (finalText + (interim ? ' ' + interim : '')).trim();
+  };
+  r.onerror = (e) => { toast('Spracheingabe-Fehler: ' + e.error, 'error'); _inquirySpeech = null; document.getElementById('inq_voice_label').textContent = 'Aufnehmen'; };
+  r.onend = () => {
+    if (_inquirySpeech === r) {
+      _inquirySpeech = null;
+      const lbl = document.getElementById('inq_voice_label'); if (lbl) lbl.textContent = 'Aufnehmen';
+      document.getElementById('inq_voice_btn')?.classList.remove('bg-red-50','border-red-300');
+    }
+  };
+  r.start();
+  _inquirySpeech = r;
+  document.getElementById('inq_voice_label').textContent = 'Stoppen';
+  document.getElementById('inq_voice_btn').classList.add('bg-red-50','border-red-300');
+}
+
+async function analyzeInquiry() {
+  const rawText   = (document.getElementById('inq_raw_text')?.value   || '').trim();
+  const voiceText = (document.getElementById('inq_voice_text')?.value || '').trim();
+  const title     = (document.querySelector('#modalBox input[name="title"]')?.value || '').trim();
+  const ticketNo  = (document.querySelector('#modalBox input[name="ticket_no"]')?.value || '').trim();
+  if (!rawText && !voiceText && _inquiryImages.length === 0) {
+    return toast('Bitte erst Text, Sprache oder Bilder hinzufügen', 'warn');
+  }
+  if (!APP_KEYS.anthropicKey) {
+    return toast('KI nicht verfügbar — Anthropic-Key fehlt in den Projekt-Keys', 'error');
+  }
+  const btn = document.getElementById('inq_analyze_btn');
+  const lbl = document.getElementById('inq_analyze_label');
+  if (btn) btn.disabled = true;
+  if (lbl) lbl.textContent = 'analysiert…';
+
+  const promptParts = [
+    'Du bist Vertriebsassistent bei FLP Lift Parts (B2B-Großhandel für Aufzug-Ersatzteile in Deutschland).',
+    'Analysiere die folgende Kundenanfrage und gib eine strukturierte Zusammenfassung in deutscher Sprache zurück.',
+    '',
+    'Format der Antwort (genau dieses Schema, Markdown-Stil):',
+    '',
+    '**Zusammenfassung**',
+    '<2-3 Sätze: Was will der Kunde konkret?>',
+    '',
+    '**Kundenidentifikation**',
+    '- Firma: <Firmenname falls erkennbar, sonst „—">',
+    '- Email: <falls erkennbar>',
+    '- Telefon: <falls erkennbar>',
+    '- Adresse: <falls erkennbar>',
+    '',
+    '**Hauptansprechpartner**',
+    '- Name: <Vor- und Nachname>',
+    '- Funktion: <falls erkennbar>',
+    '- Email/Telefon: <falls erkennbar>',
+    '',
+    '**Angefragte Artikel / Leistungen**',
+    '- Menge | Hersteller | Modell/Bezeichnung | Bemerkung',
+    '<eine Zeile pro Position; falls nichts klar erkennbar: „— Keine konkreten Positionen erkennbar —">',
+    '',
+    '**Besondere Anforderungen**',
+    '<z.B. Liefertermin, Eilauftrag, Sondergrößen, Reklamation, Service. Falls keine: „— Keine —">',
+    '',
+    '---',
+    ''
+  ];
+  if (title)     promptParts.push('Betreff: ' + title);
+  if (ticketNo)  promptParts.push('Freshdesk-Ticket: ' + ticketNo);
+  if (rawText)   promptParts.push('\nText/Email:\n' + rawText);
+  if (voiceText) promptParts.push('\nSpracheingabe (transkribiert):\n' + voiceText);
+  if (_inquiryImages.length) promptParts.push('\n' + _inquiryImages.length + ' Bild' + (_inquiryImages.length === 1 ? '' : 'er') + ' anbei (siehe Anhang).');
+  const prompt = promptParts.join('\n');
+
+  try {
+    const summary = await askAI(prompt, {
+      images: _inquiryImages.map(i => ({ mediaType: i.mediaType, data: i.base64 })),
+      maxTokens: 2048
+    });
+    const ta = document.getElementById('inq_ai_summary');
+    if (ta) ta.value = summary;
+    toast('Analyse fertig', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+    if (lbl) lbl.textContent = 'Analysieren';
+  }
+}
+
+async function saveInquiry(e, id) {
+  e.preventDefault();
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  // Sprach-Recognition stoppen falls noch aktiv
+  if (_inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
+  const fd = new FormData(e.target);
+  const fields = {};
+  ['inquiry_no','title','ticket_no','channel','status','raw_text','voice_text','ai_summary','notes'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  const cidSel = (fd.get('customer_id') || '').trim();
+  const conSel = (fd.get('contact_id')  || '').trim();
+  fields.customer_id = cidSel ? [cidSel] : [];
+  fields.contact_id  = conSel ? [conSel] : [];
+  if (!fields.title) return toast('Betreff fehlt', 'error');
+  fields.status = fields.status || 'offen';
+  if (!id) fields.company_id = [cur.id];
+  if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
+  try {
+    if (id) await updateData('Inquiry', id, fields);
+    else    await writeData('Inquiry', fields);
+    if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
+    closeModal();
+    renderInquiries();
+    toast('Gespeichert', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
