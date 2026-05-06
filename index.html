@@ -372,7 +372,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.4';
+const APP_VERSION = 'v2.5';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1310,10 +1310,27 @@ async function renderCustomers() {
   if (window.lucide) lucide.createIcons();
 }
 
+// Hilfsfunktion: rendert + stellt danach Fokus + Cursor-Position des aktiven Such-Inputs wieder her
+async function _renderWithSearchFocus(renderFn) {
+  const active = document.activeElement;
+  const wasSearch = active?.tagName === 'INPUT' && active?.type === 'search';
+  const cursorPos = wasSearch ? active.selectionStart : null;
+  const inputId = wasSearch ? active.id : null;
+  await renderFn();
+  if (wasSearch) {
+    let inp = inputId ? document.getElementById(inputId) : null;
+    if (!inp) inp = document.querySelector('#pageContent input[type="search"]');
+    if (inp) {
+      inp.focus();
+      if (cursorPos != null) try { inp.setSelectionRange(cursorPos, cursorPos); } catch (e) {}
+    }
+  }
+}
+
 function onCustomerSearchInput(value) {
   _customerListState.search = value;
   clearTimeout(_customerSearchTimer);
-  _customerSearchTimer = setTimeout(() => renderCustomers(), 200);
+  _customerSearchTimer = setTimeout(() => _renderWithSearchFocus(renderCustomers), 200);
 }
 
 function customerRow(rec, primary) {
@@ -1594,7 +1611,7 @@ async function renderSuppliers() {
 function onSupplierSearchInput(value) {
   _supplierListState.search = value;
   clearTimeout(_supplierSearchTimer);
-  _supplierSearchTimer = setTimeout(() => renderSuppliers(), 200);
+  _supplierSearchTimer = setTimeout(() => _renderWithSearchFocus(renderSuppliers), 200);
 }
 
 function supplierRow(rec, primary) {
@@ -1815,13 +1832,17 @@ async function renderArticles() {
   }
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Artikel…</p>';
 
-  let all = [], allCategories = [];
+  let all = [], allCategories = [], allManufacturers = [];
   try {
-    [all, allCategories] = await Promise.all([readData('Article'), readData('Category')]);
+    [all, allCategories, allManufacturers] = await Promise.all([
+      readData('Article'), readData('Category'), readData('Manufacturer')
+    ]);
   } catch (e) { toast(e.message, 'error'); }
 
   const catMap = {};
   allCategories.forEach(c => { catMap[c.id] = c.fields; });
+  const manMap = {};
+  allManufacturers.forEach(m => { manMap[m.id] = m.fields; });
 
   let list = all.filter(a => (a.fields.company_id || []).includes(cur.id));
   if (!_articleListState.showArchived) list = list.filter(a => (a.fields.status || 'aktiv') !== 'archiviert');
@@ -1831,8 +1852,10 @@ async function renderArticles() {
     list = list.filter(a => {
       const f = a.fields;
       const catId = (f.category_id || [])[0];
+      const manId = (f.manufacturer_id || [])[0];
       const catName = catMap[catId]?.name || f.category || '';
-      return [f.name1, f.name2, f.article_no, f.description, catName, f.manufacturer, f.manufacturer_no]
+      const manName = manMap[manId]?.name || f.manufacturer || '';
+      return [f.name1, f.name2, f.article_no, f.description, catName, manName, f.manufacturer_no]
         .some(v => (v || '').toString().toLowerCase().includes(q));
     });
   }
@@ -1868,6 +1891,9 @@ async function renderArticles() {
           <button onclick="openCategoryManagement()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
             <i data-lucide="tags" class="w-4 h-4"></i> Kategorien
           </button>
+          <button onclick="openManufacturerManagement()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
+            <i data-lucide="factory" class="w-4 h-4"></i> Hersteller
+          </button>
           <button onclick="openArticleModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
             <i data-lucide="plus" class="w-4 h-4"></i> Neuer Artikel
           </button>
@@ -1894,7 +1920,7 @@ async function renderArticles() {
         <div class="divide-y divide-ink-100">
           ${list.length === 0
             ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _articleListState.showArchived ? 'Keine Treffer.' : 'Noch keine Artikel für diesen Mandanten. Lege den ersten an mit „+ Neuer Artikel".'}</div>`
-            : list.map(rec => articleRow(rec, catMap)).join('')}
+            : list.map(rec => articleRow(rec, catMap, manMap)).join('')}
         </div>
       </div>
     </div>
@@ -1905,15 +1931,17 @@ async function renderArticles() {
 function onArticleSearchInput(value) {
   _articleListState.search = value;
   clearTimeout(_articleSearchTimer);
-  _articleSearchTimer = setTimeout(() => renderArticles(), 200);
+  _articleSearchTimer = setTimeout(() => _renderWithSearchFocus(renderArticles), 200);
 }
 
-function articleRow(rec, catMap) {
+function articleRow(rec, catMap, manMap) {
   const f = rec.fields || {};
   const archived = f.status === 'archiviert';
   const catId = (f.category_id || [])[0];
+  const manId = (f.manufacturer_id || [])[0];
   const catName = catMap?.[catId]?.name || f.category || '';
-  const meta = [catName, f.manufacturer].filter(Boolean).join(' · ');
+  const manName = manMap?.[manId]?.name || f.manufacturer || '';
+  const meta = [catName, manName].filter(Boolean).join(' · ');
   const price = (f.sales_price !== undefined && f.sales_price !== null && f.sales_price !== '')
     ? formatPrice(f.sales_price) + ' € / ' + (f.unit || 'Stk')
     : '';
@@ -1955,10 +1983,10 @@ async function openArticleModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   let f = {};
-  let allArticles = [], allCategories = [], allArtSuppliers = [];
+  let allArticles = [], allCategories = [], allManufacturers = [], allArtSuppliers = [];
   try {
-    [allArticles, allCategories, allArtSuppliers] = await Promise.all([
-      readData('Article'), readData('Category'), readData('ArticleSupplier')
+    [allArticles, allCategories, allManufacturers, allArtSuppliers] = await Promise.all([
+      readData('Article'), readData('Category'), readData('Manufacturer'), readData('ArticleSupplier')
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
 
@@ -1979,15 +2007,21 @@ async function openArticleModal(id) {
 
   const articlesInCompany = allArticles.filter(a => (a.fields.company_id || []).includes(cur.id));
   const units = distinctValues(articlesInCompany, 'unit', ART_UNIT_DEFAULTS);
+
   const categoriesInCompany = allCategories
     .filter(c => (c.fields.company_id || []).includes(cur.id) && (c.fields.status || 'aktiv') === 'aktiv')
     .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
   const currentCategoryId = (f.category_id || [])[0] || '';
 
+  const manufacturersInCompany = allManufacturers
+    .filter(m => (m.fields.company_id || []).includes(cur.id) && (m.fields.status || 'aktiv') === 'aktiv')
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const currentManufacturerId = (f.manufacturer_id || [])[0] || '';
+
   const articleSuppliers = id ? allArtSuppliers.filter(j => (j.fields.article_id || []).includes(id)) : [];
 
   openModal(`
-    <form onsubmit="saveArticle(event, '${id || ''}')" class="p-6">
+    <form onsubmit="saveArticle(event, '${id || ''}', false)" class="p-6">
       <div class="flex items-baseline justify-between mb-4">
         <h3 class="text-lg font-bold text-ink-900">${id ? 'Artikel bearbeiten' : 'Neuer Artikel'}</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
@@ -2023,15 +2057,27 @@ async function openArticleModal(id) {
       <div class="grid grid-cols-2 gap-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Kategorie</label>
-          <select name="category_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-            <option value="">— ohne Kategorie —</option>
-            ${categoriesInCompany.map(c => `<option value="${c.id}" ${currentCategoryId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name || '–')}</option>`).join('')}
-          </select>
-          <p class="text-xs text-ink-500 mt-1">Verwaltung über „Kategorien"-Button in der Liste</p>
+          <div class="flex gap-1.5">
+            <select name="category_id" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              <option value="">— ohne Kategorie —</option>
+              ${categoriesInCompany.map(c => `<option value="${c.id}" ${currentCategoryId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name || '–')}</option>`).join('')}
+            </select>
+            <button type="button" onclick="openCategoryManagement(true)" class="px-2.5 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-ink-600" title="Kategorien verwalten">
+              <i data-lucide="settings-2" class="w-4 h-4"></i>
+            </button>
+          </div>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Hersteller</label>
-          <input name="manufacturer" value="${escapeHtml(f.manufacturer || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <div class="flex gap-1.5">
+            <select name="manufacturer_id" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              <option value="">— ohne Hersteller —</option>
+              ${manufacturersInCompany.map(m => `<option value="${m.id}" ${currentManufacturerId === m.id ? 'selected' : ''}>${escapeHtml(m.fields.name || '–')}</option>`).join('')}
+            </select>
+            <button type="button" onclick="openManufacturerManagement(true)" class="px-2.5 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-ink-600" title="Hersteller verwalten">
+              <i data-lucide="settings-2" class="w-4 h-4"></i>
+            </button>
+          </div>
         </div>
         <div class="col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Hersteller-Artikelnr.</label>
@@ -2039,10 +2085,19 @@ async function openArticleModal(id) {
         </div>
       </div>
 
-      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Verkaufspreis (netto)</h4>
-      <div class="grid grid-cols-3 gap-3">
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Preise (netto)</h4>
+      <div class="grid grid-cols-4 gap-3">
         <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Verkauf €</label>
+          <label class="block text-sm font-medium text-ink-700 mb-1">EK €</label>
+          <div class="flex gap-1">
+            <input id="art_purchase_price" name="purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="flex-1 min-w-0 px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <button type="button" onclick="copyDefaultSupplierPrice('${id || ''}')" class="px-2 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-ink-600 shrink-0" title="Übernehme Hauptlieferanten-EK">
+              <i data-lucide="arrow-down-to-line" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">VK €</label>
           <input name="sales_price" inputmode="decimal" value="${f.sales_price ?? ''}" placeholder="0,00" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
@@ -2062,47 +2117,88 @@ async function openArticleModal(id) {
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen</h4>
       <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
 
-      <div class="flex justify-end gap-2">
+      <div class="flex justify-end gap-2 flex-wrap">
         <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
-        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+        <button type="button" onclick="saveArticle(event, '${id || ''}', true)" class="px-3 py-2 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
       </div>
     </form>
   `);
 }
 
-async function saveArticle(e, id) {
-  e.preventDefault();
+async function saveArticle(e, id, keepOpen) {
+  if (e && e.preventDefault) e.preventDefault();
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
-  const fd = new FormData(e.target);
+  // Form-Element finden (entweder direkt das Submit-Form, oder das nächstgelegene Form vom Button)
+  const form = e?.target?.tagName === 'FORM' ? e.target : (e?.target?.closest?.('form') || document.querySelector('#modalBox form'));
+  if (!form) return;
+  const fd = new FormData(form);
   const fields = {
     name1:           (fd.get('name1') || '').trim(),
     name2:           (fd.get('name2') || '').trim(),
     article_no:      (fd.get('article_no') || '').trim(),
     description:     (fd.get('description') || '').trim(),
-    manufacturer:    (fd.get('manufacturer') || '').trim(),
     manufacturer_no: (fd.get('manufacturer_no') || '').trim(),
     unit:            (fd.get('unit') || '').trim(),
     status:          fd.get('status') || 'aktiv',
     notes:           (fd.get('notes') || '').trim()
   };
-  const sales = parseDecimal(fd.get('sales_price'));
-  const vat   = parseDecimal(fd.get('vat_rate'));
-  if (sales !== null) fields.sales_price = sales;
-  if (vat   !== null) fields.vat_rate    = vat;
+  const sales    = parseDecimal(fd.get('sales_price'));
+  const purchase = parseDecimal(fd.get('purchase_price'));
+  const vat      = parseDecimal(fd.get('vat_rate'));
+  if (sales    !== null) fields.sales_price    = sales;
+  if (purchase !== null) fields.purchase_price = purchase;
+  if (vat      !== null) fields.vat_rate       = vat;
   const catId = (fd.get('category_id') || '').trim();
-  fields.category_id = catId ? [catId] : [];
+  const manId = (fd.get('manufacturer_id') || '').trim();
+  fields.category_id     = catId ? [catId] : [];
+  fields.manufacturer_id = manId ? [manId] : [];
 
   if (!fields.name1) return toast('Name (Zeile 1) fehlt', 'error');
   if (!id) fields.company_id = [cur.id];
   if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
   try {
-    if (id) await updateData('Article', id, fields);
-    else    await writeData('Article', fields);
+    let savedId = id;
+    if (id) {
+      await updateData('Article', id, fields);
+    } else {
+      const created = await writeData('Article', fields);
+      savedId = created.id;
+    }
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
-    closeModal();
-    renderArticles();
-    toast('Gespeichert', 'success');
+    if (keepOpen) {
+      closeModal();
+      toast('Gespeichert — Modal bleibt offen', 'success');
+      // Nach dem Schließen das Modal wieder im Edit-Modus öffnen (löst neuen Lock aus)
+      setTimeout(() => openArticleModal(savedId), 60);
+    } else {
+      closeModal();
+      renderArticles();
+      toast('Gespeichert', 'success');
+    }
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function copyDefaultSupplierPrice(articleId) {
+  if (!articleId) {
+    toast('Bitte zuerst „Speichern" — danach steht der Hauptlieferant fest', 'warn');
+    return;
+  }
+  try {
+    const all = await readData('ArticleSupplier');
+    const def = all.find(j => (j.fields.article_id || []).includes(articleId) && j.fields.is_default);
+    if (!def) { toast('Kein Hauptlieferant zugeordnet', 'warn'); return; }
+    const price = def.fields.purchase_price;
+    if (price === undefined || price === null || price === '') {
+      toast('Hauptlieferant hat keinen EK-Preis', 'warn');
+      return;
+    }
+    const inp = document.getElementById('art_purchase_price');
+    if (inp) {
+      inp.value = price;
+      toast('EK übernommen: ' + formatPrice(price) + ' €', 'success');
+    }
   } catch (err) { toast(err.message, 'error'); }
 }
 
@@ -2315,112 +2411,143 @@ async function refreshArticleSuppliersSection(articleId) {
 }
 
 /* ============================================================
-   ARTIKEL: KATEGORIE-VERWALTUNG
+   ARTIKEL: KATEGORIE / HERSTELLER-VERWALTUNG (Lookup-Tabellen)
    ============================================================ */
-async function openCategoryManagement() {
+let _lookupMgmtUseModal2 = false;
+
+// Generischer Helper – funktioniert für Category + Manufacturer
+async function openLookupManagement(table, articleField, titleSing, titlePlur, useModal2 = false) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
-  await renderCategoryManagement();
+  _lookupMgmtUseModal2 = useModal2;
+  await renderLookupManagement(table, articleField, titleSing, titlePlur);
 }
 
-async function renderCategoryManagement() {
+async function renderLookupManagement(table, articleField, titleSing, titlePlur) {
   const cur = getCurrentCompany();
   let all = [], allArticles = [];
   try {
-    [all, allArticles] = await Promise.all([readData('Category'), readData('Article')]);
+    [all, allArticles] = await Promise.all([readData(table), readData('Article')]);
   } catch (e) { toast(e.message, 'error'); return; }
 
   const list = all
-    .filter(c => (c.fields.company_id || []).includes(cur.id))
+    .filter(r => (r.fields.company_id || []).includes(cur.id))
     .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
 
-  // Zähle Artikel pro Kategorie (im aktuellen Mandanten)
-  const usageByCat = {};
+  const usage = {};
   allArticles.forEach(a => {
     if (!(a.fields.company_id || []).includes(cur.id)) return;
-    (a.fields.category_id || []).forEach(cid => {
-      usageByCat[cid] = (usageByCat[cid] || 0) + 1;
-    });
+    (a.fields[articleField] || []).forEach(rid => { usage[rid] = (usage[rid] || 0) + 1; });
   });
 
   const rows = list.length === 0
-    ? '<p class="px-3 py-4 text-sm text-ink-500 italic text-center">Noch keine Kategorien für diesen Mandanten.</p>'
-    : list.map(c => {
-        const count = usageByCat[c.id] || 0;
+    ? `<p class="px-3 py-4 text-sm text-ink-500 italic text-center">Noch keine ${escapeHtml(titlePlur)} für diesen Mandanten.</p>`
+    : list.map(r => {
+        const count = usage[r.id] || 0;
+        const safeName = (r.fields.name || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
         return `
-          <div data-cat-row="${c.id}" class="flex items-center justify-between p-3 border-b border-ink-100 last:border-b-0">
+          <div class="flex items-center justify-between p-3 border-b border-ink-100 last:border-b-0">
             <div class="flex-1 min-w-0">
-              <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(c.fields.name || '–')}</p>
+              <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(r.fields.name || '–')}</p>
               <p class="text-xs text-ink-500">${count} Artikel</p>
             </div>
             <div class="flex gap-1 shrink-0">
-              <button type="button" onclick="renameCategory('${c.id}', '${escapeHtml((c.fields.name || '').replace(/'/g, "\\'"))}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Umbenennen"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
-              <button type="button" onclick="deleteCategory('${c.id}', ${count})" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+              <button type="button" onclick="renameLookup('${table}','${articleField}','${titleSing}','${titlePlur}','${r.id}','${safeName}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Umbenennen"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+              <button type="button" onclick="deleteLookup('${table}','${articleField}','${titleSing}','${titlePlur}','${r.id}', ${count})" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
             </div>
           </div>
         `;
       }).join('');
 
-  openModal(`
+  const html = `
     <div class="p-6">
       <div class="flex items-baseline justify-between mb-4">
-        <h3 class="text-lg font-bold text-ink-900">Kategorien verwalten</h3>
+        <h3 class="text-lg font-bold text-ink-900">${escapeHtml(titlePlur)} verwalten</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
-      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4">
+      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4 max-h-72 overflow-y-auto">
         ${rows}
       </div>
       <div class="flex gap-2">
-        <input id="newCatName" type="text" placeholder="Neue Kategorie…" onkeydown="if(event.key==='Enter'){event.preventDefault();addCategory()}" class="flex-1 px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        <button type="button" onclick="addCategory()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
+        <input id="newLookupName" type="text" placeholder="Neuer ${escapeHtml(titleSing)}…" onkeydown="if(event.key==='Enter'){event.preventDefault();addLookup('${table}','${articleField}','${titleSing}','${titlePlur}')}" class="flex-1 px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <button type="button" onclick="addLookup('${table}','${articleField}','${titleSing}','${titlePlur}')" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
           <i data-lucide="plus" class="w-4 h-4"></i> Hinzufügen
         </button>
       </div>
       <div class="flex justify-end mt-5">
-        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen</button>
+        <button type="button" onclick="${_lookupMgmtUseModal2 ? 'closeModal2()' : 'closeModal()'}" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen</button>
       </div>
     </div>
-  `);
-  setTimeout(() => document.getElementById('newCatName')?.focus(), 50);
+  `;
+  if (_lookupMgmtUseModal2) openModal2(html); else openModal(html);
+  setTimeout(() => document.getElementById('newLookupName')?.focus(), 50);
 }
 
-async function addCategory() {
+async function addLookup(table, articleField, titleSing, titlePlur) {
   const cur = getCurrentCompany();
-  const input = document.getElementById('newCatName');
+  const input = document.getElementById('newLookupName');
   const name = (input?.value || '').trim();
   if (!name) return toast('Name fehlt', 'error');
   try {
-    await writeData('Category', { name, company_id: [cur.id], status: 'aktiv' });
+    await writeData(table, { name, company_id: [cur.id], status: 'aktiv' });
     if (input) input.value = '';
-    await renderCategoryManagement();
-    toast('Kategorie angelegt', 'success');
+    await renderLookupManagement(table, articleField, titleSing, titlePlur);
+    if (table === 'Category')     await refreshArticleModalLookupDropdown('category_id');
+    if (table === 'Manufacturer') await refreshArticleModalLookupDropdown('manufacturer_id');
+    toast(titleSing + ' angelegt', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
-async function renameCategory(catId, currentName) {
-  const newName = prompt('Kategorie umbenennen:', currentName);
+async function renameLookup(table, articleField, titleSing, titlePlur, id, currentName) {
+  const newName = prompt(titleSing + ' umbenennen:', currentName);
   if (newName === null) return;
   const trimmed = newName.trim();
   if (!trimmed) return toast('Name fehlt', 'error');
   try {
-    await updateData('Category', catId, { name: trimmed });
-    await renderCategoryManagement();
+    await updateData(table, id, { name: trimmed });
+    await renderLookupManagement(table, articleField, titleSing, titlePlur);
+    if (table === 'Category')     await refreshArticleModalLookupDropdown('category_id');
+    if (table === 'Manufacturer') await refreshArticleModalLookupDropdown('manufacturer_id');
     toast('Umbenannt', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
-async function deleteCategory(catId, articleCount) {
+async function deleteLookup(table, articleField, titleSing, titlePlur, id, articleCount) {
   if (articleCount > 0) {
-    if (!confirm(`Diese Kategorie wird von ${articleCount} Artikel${articleCount===1?'':'n'} verwendet. Beim Löschen wird die Kategorie aus diesen Artikeln entfernt — die Artikel selbst bleiben. Wirklich löschen?`)) return;
+    if (!confirm(`Wird von ${articleCount} Artikel${articleCount===1?'':'n'} verwendet. Beim Löschen wird die Zuordnung dort entfernt — die Artikel selbst bleiben. Wirklich löschen?`)) return;
   } else {
-    if (!confirm('Diese Kategorie wirklich löschen?')) return;
+    if (!confirm('Wirklich löschen?')) return;
   }
   try {
-    await deleteData('Category', catId);
-    await renderCategoryManagement();
-    toast('Kategorie gelöscht', 'success');
+    await deleteData(table, id);
+    await renderLookupManagement(table, articleField, titleSing, titlePlur);
+    if (table === 'Category')     await refreshArticleModalLookupDropdown('category_id');
+    if (table === 'Manufacturer') await refreshArticleModalLookupDropdown('manufacturer_id');
+    toast(titleSing + ' gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
+
+// Aktualisiert ein Dropdown im darunterliegenden Article-Modal nach Lookup-Änderung
+async function refreshArticleModalLookupDropdown(fieldName) {
+  const select = document.querySelector('#modalBox select[name="' + fieldName + '"]');
+  if (!select) return;
+  const cur = getCurrentCompany();
+  if (!cur) return;
+  const table = fieldName === 'category_id' ? 'Category' : 'Manufacturer';
+  let all = [];
+  try { all = await readData(table); } catch (e) { return; }
+  const items = all
+    .filter(r => (r.fields.company_id || []).includes(cur.id) && (r.fields.status || 'aktiv') === 'aktiv')
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const currentValue = select.value;
+  const placeholder = fieldName === 'category_id' ? '— ohne Kategorie —' : '— ohne Hersteller —';
+  select.innerHTML = `<option value="">${placeholder}</option>` +
+    items.map(r => `<option value="${r.id}" ${currentValue === r.id ? 'selected' : ''}>${escapeHtml(r.fields.name || '–')}</option>`).join('');
+}
+
+// Convenience-Wrapper für Buttons
+function openCategoryManagement(useModal2 = false)     { return openLookupManagement('Category',     'category_id',     'Kategorie',  'Kategorien',  useModal2); }
+function openManufacturerManagement(useModal2 = false) { return openLookupManagement('Manufacturer', 'manufacturer_id', 'Hersteller', 'Hersteller',  useModal2); }
 
 /* ============================================================
    STAMMDATEN: ANSPRECHPARTNER (Contact)
@@ -2747,7 +2874,7 @@ async function renderContactsList() {
 function onContactListSearch(value) {
   _contactListState.search = value;
   clearTimeout(_contactSearchTimer);
-  _contactSearchTimer = setTimeout(() => renderContactsList(), 200);
+  _contactSearchTimer = setTimeout(() => _renderWithSearchFocus(renderContactsList), 200);
 }
 
 function allContactRow(c, owner) {
