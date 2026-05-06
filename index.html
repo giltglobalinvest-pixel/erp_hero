@@ -314,6 +314,13 @@
             <i data-lucide="menu" class="w-5 h-5"></i>
           </button>
           <h1 id="pageTitle" class="text-lg lg:text-xl font-semibold text-ink-900 flex-1 truncate">Übersicht</h1>
+          <span id="topbarVersion" class="hidden sm:inline-flex font-mono text-[11px] text-ink-500 bg-ink-100 rounded px-2 py-1" title="App-Version"></span>
+          <button onclick="location.reload()" class="h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 inline-flex items-center justify-center" title="Seite neu laden">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+          </button>
+          <button onclick="forceAppUpdate()" class="h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 inline-flex items-center justify-center" title="App-Update erzwingen (Cache leeren + Hard Reload)">
+            <i data-lucide="rocket" class="w-4 h-4"></i>
+          </button>
           <button id="searchBtn" class="hidden md:inline-flex h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 items-center justify-center" title="Suche">
             <i data-lucide="search" class="w-4 h-4"></i>
           </button>
@@ -361,7 +368,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.4';
+const APP_VERSION = 'v1.5';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1090,12 +1097,25 @@ function showApp() {
   document.getElementById('appShell').classList.remove('hidden');
   document.getElementById('sidebarUserName').textContent = APP_KEYS.user?.name || '–';
   document.getElementById('sidebarUserRole').textContent = APP_KEYS.user?.role || '';
+  document.getElementById('topbarVersion').textContent = APP_VERSION;
   if (APP_KEYS.user?.is_admin) document.getElementById('navAdmin')?.classList.remove('hidden');
   initNavSections();
   initNavRouting();
   renderMandantenSwitcher();
   renderWelcome();
   if (window.lucide) lucide.createIcons();
+}
+
+function forceAppUpdate() {
+  // Lokale Caches leeren (App-State, Update-Banner-Status etc.) + Hard-Reload mit Cache-Buster
+  try {
+    Object.keys(localStorage).forEach(k => {
+      if (k.startsWith('cache_')) localStorage.removeItem(k);
+    });
+  } catch (e) {}
+  const url = new URL(location.href);
+  url.searchParams.set('_v', Date.now().toString());
+  location.replace(url.toString());
 }
 
 // Klick außerhalb schließt das Mandanten-Menü
