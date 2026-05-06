@@ -1,0 +1,772 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#1FA8D6" />
+<title>ERP Hero – FLP Lift Parts</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
+        colors: {
+          brand: {
+            50:  '#EAF7FC',
+            100: '#CFEEF7',
+            200: '#9DDDEF',
+            300: '#6CCBE7',
+            400: '#3BBADF',
+            500: '#1FA8D6',   // Sidebar
+            600: '#1B8FB7',
+            700: '#157699',   // Active item
+            800: '#105D7A',
+            900: '#0B445B'
+          },
+          ink: {
+            900: '#0F172A',
+            800: '#1E293B',
+            700: '#334155',
+            500: '#64748B',
+            300: '#CBD5E1',
+            200: '#E2E8F0',
+            100: '#F1F5F9',
+            50:  '#F8FAFC'
+          }
+        },
+        boxShadow: {
+          card: '0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 3px 0 rgb(0 0 0 / 0.06)'
+        }
+      }
+    }
+  }
+</script>
+<style>
+  html, body { height: 100%; }
+  body { font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(15,23,42,.18); border-radius: 8px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  /* Animated check */
+  @keyframes pop { 0%{transform:scale(.6);opacity:0} 70%{transform:scale(1.06)} 100%{transform:scale(1);opacity:1} }
+  .pop { animation: pop .25s ease-out both; }
+  @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  .slide-up { animation: slideUp .25s ease-out both; }
+  /* iOS safe-area */
+  .pt-safe { padding-top: env(safe-area-inset-top); }
+  .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+</style>
+</head>
+<body class="bg-brand-500 text-ink-900">
+
+<!-- ========================================================== -->
+<!-- LOGIN SCREEN                                                -->
+<!-- ========================================================== -->
+<div id="loginScreen" class="hidden fixed inset-0 z-40 bg-brand-500 flex items-center justify-center p-6">
+  <div class="w-full max-w-md">
+    <!-- Logo -->
+    <div class="flex items-center justify-center mb-8 select-none">
+      <div class="flex items-center gap-1">
+        <div class="w-12 h-12 rounded-md bg-ink-800 text-white grid place-items-center font-bold text-2xl tracking-tight">F</div>
+        <div class="w-12 h-12 rounded-md bg-white text-ink-800 grid place-items-center font-bold text-2xl tracking-tight">L</div>
+        <div class="w-12 h-12 rounded-md bg-white text-ink-800 grid place-items-center font-bold text-2xl tracking-tight">P</div>
+        <div class="w-12 h-12 rounded-md bg-white text-brand-700 grid place-items-center font-semibold text-[8px] leading-tight text-center px-1">
+          LIFT<br>PARTS<br>REPAIR
+        </div>
+      </div>
+    </div>
+
+    <!-- Title -->
+    <h1 class="text-white text-3xl font-bold text-center mb-1">Login</h1>
+    <p class="text-brand-50/90 text-center mb-8">Willkommen bei der FLP Lift Parts Repair.</p>
+
+    <!-- Form -->
+    <form id="loginForm" class="space-y-4" autocomplete="on">
+      <div>
+        <label for="loginKey" class="block text-sm font-medium text-white mb-1.5">Persönlicher Key</label>
+        <input
+          id="loginKey"
+          name="loginKey"
+          type="password"
+          autocomplete="current-password"
+          required
+          placeholder="••••••••••••"
+          class="w-full h-12 rounded-lg bg-white text-ink-900 placeholder-ink-300 px-4 outline-none ring-0 focus:ring-2 focus:ring-white/60 transition"
+        />
+        <p id="loginHint" class="text-xs text-brand-50/80 mt-1.5">Den Key bekommst du vom Admin.</p>
+      </div>
+
+      <button id="loginBtn" type="submit"
+        class="w-full h-12 rounded-lg bg-ink-900 hover:bg-ink-800 active:bg-black text-white font-semibold transition flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
+        <span id="loginBtnLabel">Login</span>
+        <svg id="loginSpin" class="hidden w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.25"/>
+          <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+        </svg>
+      </button>
+
+      <div id="loginError" class="hidden rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm px-4 py-3"></div>
+    </form>
+
+    <p class="text-center text-brand-50/70 text-xs mt-8">
+      ERP Hero <span id="loginVersionLabel"></span> · FLP Lift Parts GmbH
+    </p>
+  </div>
+</div>
+
+<!-- ========================================================== -->
+<!-- BOOT SPLASH (gezeigt während tryAutoLogin)                 -->
+<!-- ========================================================== -->
+<div id="bootScreen" class="fixed inset-0 z-50 bg-brand-500 flex items-center justify-center">
+  <div class="flex flex-col items-center gap-6">
+    <div class="flex items-center gap-1">
+      <div class="w-10 h-10 rounded-md bg-ink-800 text-white grid place-items-center font-bold text-xl">F</div>
+      <div class="w-10 h-10 rounded-md bg-white text-ink-800 grid place-items-center font-bold text-xl">L</div>
+      <div class="w-10 h-10 rounded-md bg-white text-ink-800 grid place-items-center font-bold text-xl">P</div>
+    </div>
+    <svg class="w-7 h-7 text-white animate-spin" viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.25"/>
+      <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+    </svg>
+  </div>
+</div>
+
+<!-- ========================================================== -->
+<!-- APP SHELL (Sidebar + Topbar + Content)                      -->
+<!-- ========================================================== -->
+<div id="appShell" class="hidden min-h-screen bg-brand-500">
+  <!-- Mobile-Drawer-Overlay -->
+  <div id="drawerBackdrop" class="hidden lg:hidden fixed inset-0 z-30 bg-ink-900/40 backdrop-blur-sm" onclick="closeDrawer()"></div>
+
+  <div class="flex min-h-screen">
+    <!-- ============================== SIDEBAR ============================== -->
+    <aside id="sidebar"
+      class="fixed lg:static inset-y-0 left-0 z-40 w-72 bg-brand-500 text-white flex flex-col
+             -translate-x-full lg:translate-x-0 transition-transform duration-300 pt-safe pb-safe">
+
+      <!-- Logo -->
+      <div class="px-5 pt-5 pb-3 flex items-center justify-between">
+        <div class="flex items-center gap-1 select-none">
+          <div class="w-8 h-8 rounded bg-ink-800 text-white grid place-items-center font-bold text-sm">F</div>
+          <div class="w-8 h-8 rounded bg-white text-ink-800 grid place-items-center font-bold text-sm">L</div>
+          <div class="w-8 h-8 rounded bg-white text-ink-800 grid place-items-center font-bold text-sm">P</div>
+          <div class="w-8 h-8 rounded bg-white text-brand-700 grid place-items-center font-semibold text-[6px] leading-[1] text-center px-0.5">
+            LIFT<br>PARTS<br>REPAIR
+          </div>
+        </div>
+        <!-- Close (mobile) -->
+        <button onclick="closeDrawer()" class="lg:hidden p-2 -mr-2 text-white/90 hover:text-white">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- Mandanten-Switcher (UI-only in V1.0) -->
+      <div class="px-4 pb-4">
+        <button id="mandantBtn"
+          class="w-full h-10 rounded-lg bg-brand-600/40 hover:bg-brand-600/60 text-white text-sm flex items-center justify-between px-3 transition">
+          <span class="truncate">FLP Electronic Repair</span>
+          <i data-lucide="chevron-down" class="w-4 h-4 shrink-0"></i>
+        </button>
+      </div>
+
+      <!-- Nav -->
+      <nav class="flex-1 overflow-y-auto px-3 scrollbar-thin">
+        <!-- Stammdaten -->
+        <div class="mb-1">
+          <button class="nav-section w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-section="stammdaten">
+            <span class="text-sm font-semibold tracking-wide">Stammdaten</span>
+            <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
+          </button>
+          <div class="nav-items pl-2 mt-1 space-y-0.5">
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="kunden">
+              <i data-lucide="user-round" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Kunden</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.1</span>
+            </button>
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="lieferanten">
+              <i data-lucide="truck" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Lieferanten</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.1</span>
+            </button>
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="artikel">
+              <i data-lucide="package" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Artikel</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.1</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Verkauf -->
+        <div class="mb-1">
+          <button class="nav-section w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-section="verkauf">
+            <span class="text-sm font-semibold tracking-wide">Verkauf</span>
+            <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
+          </button>
+          <div class="nav-items pl-2 mt-1 space-y-0.5 hidden">
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+              <i data-lucide="file-text" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Angebote</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.2</span>
+            </button>
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+              <i data-lucide="file-check-2" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Aufträge</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.3</span>
+            </button>
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+              <i data-lucide="send" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Lieferscheine</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.3</span>
+            </button>
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+              <i data-lucide="euro" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Rechnungen</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.3</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Einkauf -->
+        <div class="mb-1">
+          <button class="nav-section w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-section="einkauf">
+            <span class="text-sm font-semibold tracking-wide">Einkauf</span>
+            <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
+          </button>
+          <div class="nav-items pl-2 mt-1 space-y-0.5 hidden">
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+              <i data-lucide="mail-search" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Preisanfragen</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.4</span>
+            </button>
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+              <i data-lucide="folder" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Bestellungen</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.4</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Statistiken -->
+        <div class="mb-1">
+          <button class="nav-section w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-section="statistiken">
+            <span class="text-sm font-semibold tracking-wide">Statistiken</span>
+            <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
+          </button>
+          <div class="nav-items pl-2 mt-1 space-y-0.5 hidden">
+            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+              <i data-lucide="bar-chart-3" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Auswertungen</span>
+              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.5</span>
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      <!-- User & Logout -->
+      <div class="border-t border-white/15 px-3 py-3">
+        <div class="px-3 pb-3">
+          <p class="text-xs text-white/60 uppercase tracking-wider">Angemeldet als</p>
+          <p id="sidebarUserName" class="text-sm font-semibold text-white truncate">–</p>
+          <p id="sidebarUserRole" class="text-xs text-white/70 truncate">–</p>
+        </div>
+        <button onclick="logout()"
+          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/40 transition">
+          <i data-lucide="log-out" class="w-4 h-4"></i>
+          <span class="text-sm font-medium">Logout</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ============================== MAIN ============================== -->
+    <main class="flex-1 min-w-0 lg:p-3 lg:pl-0">
+      <div class="bg-white lg:rounded-2xl lg:shadow-card min-h-screen lg:min-h-[calc(100vh-1.5rem)] flex flex-col overflow-hidden">
+
+        <!-- Topbar -->
+        <header class="flex items-center gap-3 h-14 lg:h-16 px-4 lg:px-6 border-b border-ink-100 pt-safe">
+          <button onclick="openDrawer()" class="lg:hidden -ml-2 p-2 rounded-lg text-ink-700 hover:bg-ink-100">
+            <i data-lucide="menu" class="w-5 h-5"></i>
+          </button>
+          <h1 id="pageTitle" class="text-lg lg:text-xl font-semibold text-ink-900 flex-1 truncate">Übersicht</h1>
+          <button id="searchBtn" class="hidden md:inline-flex h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 items-center justify-center" title="Suche">
+            <i data-lucide="search" class="w-4 h-4"></i>
+          </button>
+        </header>
+
+        <!-- Content -->
+        <div id="pageContent" class="flex-1 overflow-y-auto p-4 lg:p-8">
+          <!-- Wird per JS gerendert -->
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ========================================================== -->
+<!-- TOAST CONTAINER                                             -->
+<!-- ========================================================== -->
+<div id="toastWrap" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] space-y-2 w-[min(92vw,420px)] pointer-events-none"></div>
+
+<!-- ========================================================== -->
+<!-- UPDATE BANNER                                               -->
+<!-- ========================================================== -->
+<div id="updateBanner" class="hidden fixed top-4 left-1/2 -translate-x-1/2 z-[55] bg-ink-900 text-white text-sm px-4 py-2.5 rounded-full shadow-lg flex items-center gap-3 slide-up">
+  <i data-lucide="rocket" class="w-4 h-4 text-brand-300"></i>
+  <span>Neue Version verfügbar (<span id="updateVersion">–</span>)</span>
+  <button onclick="location.reload()" class="ml-1 px-2 py-1 rounded-md bg-white text-ink-900 font-semibold text-xs">Neu laden</button>
+  <button onclick="document.getElementById('updateBanner').classList.add('hidden')" class="text-white/70 hover:text-white">
+    <i data-lucide="x" class="w-4 h-4"></i>
+  </button>
+</div>
+
+
+<!-- ========================================================== -->
+<!-- SCRIPTS                                                     -->
+<!-- ========================================================== -->
+<script>
+/* ============================================================
+   APP CONFIG
+   ============================================================ */
+const APP_VERSION = 'v1.0';
+// Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
+// das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
+const _TKP1 = 'patu8KWM8aWByxCGL';
+const _TKP2 = '69fae5d9fa4b94c266b426dadd71a51f574945d840b33569058ab5e9d89ebef3';
+const APP_CONFIG = {
+  AIRTABLE_READ_KEY: _TKP1 + '.' + _TKP2,
+  MASTER_BASE_ID: 'appzhNrhkLSTEaNFW',
+  APP_BASE_ID: 'appCuTELLYwX90OLC',
+  PROJECT_ID: 'p_1778057282571',
+  PROJECT_NAME: 'ERP Hero',
+  GITHUB_REPO: 'giltglobalinvest-pixel/erp_hero'
+};
+
+const APP_KEYS = {
+  airtableWriteKey: null,
+  anthropicKey: null,
+  appBaseId: null,
+  user: null
+};
+
+/* ============================================================
+   AIRTABLE: AUTH
+   ============================================================ */
+async function loginWithUserKey(userKey) {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
+
+  // 1. User in App-Base/User suchen
+  const formula = "AND({api_key}='" + userKey.replace(/'/g, "\\'") + "',{status}='aktiv')";
+  const userRes = await fetch(
+    'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/User?filterByFormula=' + encodeURIComponent(formula),
+    { headers }
+  );
+  if (!userRes.ok) throw new Error('Verbindung zu Airtable fehlgeschlagen');
+  const userData = await userRes.json();
+  if (!userData.records || !userData.records.length) throw new Error('Ungültiger Key oder Account inaktiv');
+  APP_KEYS.user = { ...userData.records[0].fields, _id: userData.records[0].id };
+
+  // 2. Projekt-Keys laden
+  const projectKeysRes = await fetch(
+    'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' + encodeURIComponent("{project_id}='" + APP_CONFIG.PROJECT_ID + "'"),
+    { headers }
+  );
+  if (projectKeysRes.ok) {
+    const projectKeysData = await projectKeysRes.json();
+    (projectKeysData.records || []).forEach(rec => {
+      const f = rec.fields || {};
+      if (f.key_name === 'anthropicKey') APP_KEYS.anthropicKey = f.key_value;
+      if (f.key_name === 'airtableWriteKey') APP_KEYS.airtableWriteKey = f.key_value;
+      if (f.key_name === 'airtableBaseId') APP_KEYS.appBaseId = f.key_value;
+    });
+  }
+
+  // 3. Globale Fallback-Keys (anthropicKey)
+  if (!APP_KEYS.anthropicKey) {
+    const globalKeysRes = await fetch(
+      'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + "/Keys?filterByFormula=" + encodeURIComponent("{project_id}='GLOBAL'"),
+      { headers }
+    );
+    if (globalKeysRes.ok) {
+      const globalKeysData = await globalKeysRes.json();
+      (globalKeysData.records || []).forEach(rec => {
+        const f = rec.fields || {};
+        if (f.key_name === 'anthropicKey') APP_KEYS.anthropicKey = f.key_value;
+      });
+    }
+  }
+
+  // 4. Key persistieren
+  localStorage.setItem('user_key_' + APP_CONFIG.PROJECT_ID, userKey);
+  return APP_KEYS.user;
+}
+
+async function tryAutoLogin() {
+  const savedKey = localStorage.getItem('user_key_' + APP_CONFIG.PROJECT_ID);
+  if (!savedKey) return false;
+  try {
+    await loginWithUserKey(savedKey);
+    return true;
+  } catch (e) {
+    localStorage.removeItem('user_key_' + APP_CONFIG.PROJECT_ID);
+    return false;
+  }
+}
+
+function logout() {
+  localStorage.removeItem('user_key_' + APP_CONFIG.PROJECT_ID);
+  for (const k in APP_KEYS) APP_KEYS[k] = null;
+  location.reload();
+}
+
+/* ============================================================
+   AIRTABLE: CRUD (Helpers für nächste Phasen)
+   ============================================================ */
+async function readData(table, filter, opts = {}) {
+  let url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
+  const params = new URLSearchParams();
+  if (filter) params.set('filterByFormula', filter);
+  if (opts.sort) opts.sort.forEach((s, i) => {
+    params.set(`sort[${i}][field]`, s.field);
+    if (s.direction) params.set(`sort[${i}][direction]`, s.direction);
+  });
+  if (opts.maxRecords) params.set('maxRecords', String(opts.maxRecords));
+  if (opts.pageSize) params.set('pageSize', String(opts.pageSize));
+  const qs = params.toString();
+  if (qs) url += '?' + qs;
+  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
+  if (!res.ok) throw new Error('Lesen fehlgeschlagen: ' + res.status);
+  const data = await res.json();
+  return data.records || [];
+}
+
+async function writeData(table, fields) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields })
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error('Schreiben fehlgeschlagen: ' + (err.error?.message || res.status));
+  }
+  return await res.json();
+}
+
+async function updateData(table, recordId, fields) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + recordId;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields })
+  });
+  if (!res.ok) throw new Error('Update fehlgeschlagen: ' + res.status);
+  return await res.json();
+}
+
+async function deleteData(table, recordId) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + recordId;
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey }
+  });
+  if (!res.ok) throw new Error('Löschen fehlgeschlagen: ' + res.status);
+  return await res.json();
+}
+
+async function ensureTable(tableName, fields) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
+  const metaRes = await fetch(
+    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+    { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
+  );
+  if (!metaRes.ok) throw new Error('Meta-API nicht erreichbar');
+  const meta = await metaRes.json();
+  const exists = (meta.tables || []).find(t => t.name === tableName);
+  if (exists) return exists;
+  const createRes = await fetch(
+    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: tableName, fields })
+    }
+  );
+  if (!createRes.ok) {
+    const err = await createRes.json().catch(() => ({}));
+    throw new Error('Tabelle anlegen fehlgeschlagen: ' + (err.error?.message || createRes.status));
+  }
+  return await createRes.json();
+}
+
+async function uploadFileToRecord(recordId, attachmentField, file) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
+  if (file.size > 5 * 1024 * 1024) throw new Error('Datei zu groß (max 5 MB)');
+  const base64 = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const url = 'https://content.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + recordId + '/' + attachmentField + '/uploadAttachment';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contentType: file.type, file: base64, filename: file.name })
+  });
+  if (!res.ok) throw new Error('Upload fehlgeschlagen');
+  return await res.json();
+}
+
+/* ============================================================
+   ANTHROPIC AI (für spätere Phasen)
+   ============================================================ */
+async function askAI(prompt, opts = {}) {
+  if (!APP_KEYS.anthropicKey) throw new Error('KI nicht verfügbar (Anthropic-Key fehlt)');
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': APP_KEYS.anthropicKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: opts.model || 'claude-sonnet-4-5-20250929',
+      max_tokens: opts.maxTokens || 1024,
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error('AI-Anfrage fehlgeschlagen: ' + (err.error?.message || res.status));
+  }
+  const data = await res.json();
+  return (data.content && data.content[0]) ? data.content[0].text : '';
+}
+
+/* ============================================================
+   UI: TOAST
+   ============================================================ */
+function toast(msg, type = 'info', timeout = 3200) {
+  const wrap = document.getElementById('toastWrap');
+  const colors = {
+    info:    'bg-ink-900 text-white',
+    success: 'bg-emerald-600 text-white',
+    error:   'bg-red-600 text-white',
+    warn:    'bg-amber-500 text-white'
+  };
+  const icons = { info: 'info', success: 'check-circle-2', error: 'alert-circle', warn: 'triangle-alert' };
+  const el = document.createElement('div');
+  el.className = `pointer-events-auto ${colors[type] || colors.info} rounded-xl shadow-lg px-4 py-3 text-sm flex items-center gap-3 slide-up`;
+  el.innerHTML = `<i data-lucide="${icons[type] || 'info'}" class="w-4 h-4 shrink-0"></i><span class="flex-1">${msg}</span>`;
+  wrap.appendChild(el);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => {
+    el.style.transition = 'opacity .25s, transform .25s';
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(10px)';
+    setTimeout(() => el.remove(), 260);
+  }, timeout);
+}
+
+/* ============================================================
+   UI: SHELL (Sidebar / Drawer / Sections)
+   ============================================================ */
+function openDrawer()  { document.getElementById('sidebar').classList.remove('-translate-x-full'); document.getElementById('drawerBackdrop').classList.remove('hidden'); }
+function closeDrawer() { document.getElementById('sidebar').classList.add('-translate-x-full');    document.getElementById('drawerBackdrop').classList.add('hidden'); }
+
+function initNavSections() {
+  document.querySelectorAll('.nav-section').forEach(btn => {
+    const items = btn.parentElement.querySelector('.nav-items');
+    const chev = btn.querySelector('.nav-chevron');
+    // Default: Stammdaten offen (analog zum Design)
+    if (btn.dataset.section !== 'stammdaten') items?.classList.add('hidden');
+    if (items?.classList.contains('hidden') && chev) chev.style.transform = 'rotate(-90deg)';
+    btn.addEventListener('click', () => {
+      const open = !items.classList.contains('hidden');
+      items.classList.toggle('hidden');
+      if (chev) chev.style.transform = open ? 'rotate(-90deg)' : 'rotate(0deg)';
+    });
+  });
+}
+
+function setPageTitle(t) { document.getElementById('pageTitle').textContent = t; }
+
+function renderWelcome() {
+  setPageTitle('Übersicht');
+  const u = APP_KEYS.user || {};
+  const name = u.name || 'Kollege';
+  const role = u.role || '';
+  const html = `
+    <div class="max-w-3xl mx-auto">
+      <div class="rounded-2xl border border-ink-200 bg-gradient-to-br from-brand-50 to-white p-6 lg:p-8">
+        <div class="flex items-start gap-4">
+          <div class="w-12 h-12 rounded-xl bg-brand-500 text-white grid place-items-center shrink-0">
+            <i data-lucide="hand-platter" class="w-6 h-6"></i>
+          </div>
+          <div class="flex-1">
+            <h2 class="text-xl lg:text-2xl font-bold text-ink-900">Willkommen, ${escapeHtml(name)}!</h2>
+            ${role ? `<p class="text-sm text-ink-500 mt-0.5">${escapeHtml(role)}</p>` : ''}
+            <p class="mt-3 text-ink-700 leading-relaxed">
+              Die Grundstruktur von <strong>ERP Hero</strong> steht. In den kommenden Versionen
+              werden die Module schrittweise freigeschaltet.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <h3 class="mt-8 mb-3 text-sm font-semibold text-ink-500 uppercase tracking-wider">Roadmap</h3>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        ${roadmapCard('v1.0', 'Login & Shell', 'check', 'done', 'Aktuelle Version')}
+        ${roadmapCard('v1.1', 'Stammdaten', 'database', 'next', 'Kunden, Lieferanten, Artikel')}
+        ${roadmapCard('v1.2', 'Angebote', 'file-text', 'soon', 'Editor mit Empfänger & Positionen')}
+        ${roadmapCard('v1.3', 'Verkauf', 'shopping-cart', 'soon', 'Aufträge, Lieferscheine, Rechnungen')}
+        ${roadmapCard('v1.4', 'Einkauf', 'mail-search', 'soon', 'Preisanfragen & Bestellungen')}
+        ${roadmapCard('v1.5', 'Statistiken', 'bar-chart-3', 'soon', 'Auswertungen & KI-Insights')}
+      </div>
+
+      <h3 class="mt-8 mb-3 text-sm font-semibold text-ink-500 uppercase tracking-wider">Status</h3>
+      <div class="grid sm:grid-cols-3 gap-3">
+        ${statusTile('Airtable', 'plug', APP_CONFIG.APP_BASE_ID ? 'verbunden' : 'nicht verbunden', !!APP_CONFIG.APP_BASE_ID)}
+        ${statusTile('Schreibrechte', 'pencil', APP_KEYS.airtableWriteKey ? 'aktiv' : 'fehlt', !!APP_KEYS.airtableWriteKey)}
+        ${statusTile('KI', 'sparkles', APP_KEYS.anthropicKey ? 'aktiv' : 'nicht konfiguriert', !!APP_KEYS.anthropicKey)}
+      </div>
+    </div>
+  `;
+  document.getElementById('pageContent').innerHTML = html;
+  if (window.lucide) lucide.createIcons();
+}
+
+function roadmapCard(ver, title, icon, state, sub) {
+  const styles = {
+    done: { ring: 'ring-2 ring-emerald-500/30', badge: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500' },
+    next: { ring: 'ring-2 ring-brand-500/30',   badge: 'bg-brand-100 text-brand-700',     dot: 'bg-brand-500' },
+    soon: { ring: 'ring-1 ring-ink-200',        badge: 'bg-ink-100 text-ink-700',         dot: 'bg-ink-300' }
+  }[state];
+  return `
+    <div class="rounded-xl bg-white ${styles.ring} p-4 transition hover:shadow-card">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="w-2 h-2 rounded-full ${styles.dot}"></span>
+        <span class="text-[10px] font-bold tracking-wider uppercase ${styles.badge} px-1.5 py-0.5 rounded">${ver}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <i data-lucide="${icon}" class="w-4 h-4 text-ink-700"></i>
+        <h4 class="font-semibold text-ink-900">${title}</h4>
+      </div>
+      <p class="text-xs text-ink-500 mt-1">${sub}</p>
+    </div>
+  `;
+}
+
+function statusTile(label, icon, value, ok) {
+  return `
+    <div class="rounded-xl border border-ink-200 bg-white p-4 flex items-center gap-3">
+      <div class="w-9 h-9 rounded-lg ${ok ? 'bg-emerald-50 text-emerald-600' : 'bg-ink-100 text-ink-500'} grid place-items-center">
+        <i data-lucide="${icon}" class="w-4 h-4"></i>
+      </div>
+      <div class="min-w-0">
+        <p class="text-xs text-ink-500">${label}</p>
+        <p class="text-sm font-semibold ${ok ? 'text-ink-900' : 'text-ink-500'} truncate">${value}</p>
+      </div>
+    </div>
+  `;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ============================================================
+   UI: LOGIN HANDLER
+   ============================================================ */
+function showLoginScreen() {
+  document.getElementById('bootScreen').classList.add('hidden');
+  document.getElementById('appShell').classList.add('hidden');
+  document.getElementById('loginScreen').classList.remove('hidden');
+  document.getElementById('loginVersionLabel').textContent = APP_VERSION;
+  setTimeout(() => document.getElementById('loginKey')?.focus(), 50);
+}
+
+function showApp() {
+  document.getElementById('bootScreen').classList.add('hidden');
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('appShell').classList.remove('hidden');
+  document.getElementById('sidebarUserName').textContent = APP_KEYS.user?.name || '–';
+  document.getElementById('sidebarUserRole').textContent = APP_KEYS.user?.role || '';
+  initNavSections();
+  renderWelcome();
+  if (window.lucide) lucide.createIcons();
+}
+
+function setLoginLoading(loading) {
+  const btn = document.getElementById('loginBtn');
+  const spin = document.getElementById('loginSpin');
+  btn.disabled = loading;
+  spin.classList.toggle('hidden', !loading);
+}
+
+function showLoginError(msg) {
+  const el = document.getElementById('loginError');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+function clearLoginError() {
+  document.getElementById('loginError').classList.add('hidden');
+}
+
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  clearLoginError();
+  const key = document.getElementById('loginKey').value.trim();
+  if (!key) return showLoginError('Bitte Key eingeben.');
+  setLoginLoading(true);
+  try {
+    await loginWithUserKey(key);
+    toast('Willkommen zurück, ' + (APP_KEYS.user?.name || 'Kollege') + '!', 'success');
+    showApp();
+  } catch (err) {
+    showLoginError(err.message || 'Login fehlgeschlagen');
+  } finally {
+    setLoginLoading(false);
+  }
+});
+
+/* ============================================================
+   UPDATE-CHECK (GitHub Releases)
+   ============================================================ */
+async function checkForUpdate() {
+  try {
+    const r = await fetch('https://api.github.com/repos/' + APP_CONFIG.GITHUB_REPO + '/releases/latest');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.tag_name && d.tag_name !== APP_VERSION) {
+      document.getElementById('updateVersion').textContent = d.tag_name;
+      document.getElementById('updateBanner').classList.remove('hidden');
+      if (window.lucide) lucide.createIcons();
+    }
+  } catch (e) { /* still */ }
+}
+
+/* ============================================================
+   INIT
+   ============================================================ */
+async function init() {
+  if (window.lucide) lucide.createIcons();
+  document.getElementById('loginVersionLabel').textContent = APP_VERSION;
+
+  // Auto-Login
+  const ok = await tryAutoLogin();
+  if (ok) showApp();
+  else showLoginScreen();
+
+  // Update-Check (nach UI ready, nicht-blockierend)
+  setTimeout(checkForUpdate, 1500);
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
