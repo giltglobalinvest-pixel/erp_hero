@@ -346,7 +346,7 @@
 <div id="updateBanner" class="hidden fixed top-4 left-1/2 -translate-x-1/2 z-[55] bg-ink-900 text-white text-sm px-4 py-2.5 rounded-full shadow-lg flex items-center gap-3 slide-up">
   <i data-lucide="rocket" class="w-4 h-4 text-brand-300"></i>
   <span>Neue Version verfügbar (<span id="updateVersion">–</span>)</span>
-  <button onclick="location.reload()" class="ml-1 px-2 py-1 rounded-md bg-white text-ink-900 font-semibold text-xs">Neu laden</button>
+  <button onclick="forceAppUpdate()" class="ml-1 px-2 py-1 rounded-md bg-white text-ink-900 font-semibold text-xs">Aktualisieren</button>
   <button onclick="document.getElementById('updateBanner').classList.add('hidden')" class="text-white/70 hover:text-white">
     <i data-lucide="x" class="w-4 h-4"></i>
   </button>
@@ -367,7 +367,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.6';
+const APP_VERSION = 'v1.7';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1358,15 +1358,15 @@ function showApp() {
 }
 
 function forceAppUpdate() {
-  // Lokale Caches leeren (App-State, Update-Banner-Status etc.) + Hard-Reload mit Cache-Buster
+  toast('Lade neueste Version…', 'info', 1500);
+  // Loader-Cache + alle App-Caches leeren, damit auch der Offline-Fallback keine alte Version zeigt
   try {
     Object.keys(localStorage).forEach(k => {
-      if (k.startsWith('cache_')) localStorage.removeItem(k);
+      if (k.startsWith('app_cache_') || k.startsWith('cache_')) localStorage.removeItem(k);
     });
   } catch (e) {}
-  const url = new URL(location.href);
-  url.searchParams.set('_v', Date.now().toString());
-  location.replace(url.toString());
+  // Über loader.html: zieht index.html direkt von raw.githubusercontent.com → umgeht GitHub-Pages-CDN komplett
+  setTimeout(() => location.replace('loader.html?t=' + Date.now()), 250);
 }
 
 // Klick außerhalb schließt das Mandanten-Menü
@@ -1411,15 +1411,17 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
 });
 
 /* ============================================================
-   UPDATE-CHECK (GitHub Releases)
+   UPDATE-CHECK (raw.githubusercontent.com — bypasst GitHub-Pages-CDN)
    ============================================================ */
 async function checkForUpdate() {
   try {
-    const r = await fetch('https://api.github.com/repos/' + APP_CONFIG.GITHUB_REPO + '/releases/latest');
+    const url = 'https://raw.githubusercontent.com/' + APP_CONFIG.GITHUB_REPO + '/main/index.html?t=' + Date.now();
+    const r = await fetch(url, { cache: 'no-store' });
     if (!r.ok) return;
-    const d = await r.json();
-    if (d.tag_name && d.tag_name !== APP_VERSION) {
-      document.getElementById('updateVersion').textContent = d.tag_name;
+    const text = await r.text();
+    const m = text.match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+    if (m && m[1] !== APP_VERSION) {
+      document.getElementById('updateVersion').textContent = m[1];
       document.getElementById('updateBanner').classList.remove('hidden');
       if (window.lucide) lucide.createIcons();
     }
@@ -1438,8 +1440,11 @@ async function init() {
   if (ok) showApp();
   else showLoginScreen();
 
-  // Update-Check (nach UI ready, nicht-blockierend)
+  // Update-Check: einmal nach UI ready, dann alle 3 Min + bei Tab-Wechsel/Fokus
   setTimeout(checkForUpdate, 1500);
+  setInterval(checkForUpdate, 3 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
+  window.addEventListener('focus', checkForUpdate);
 }
 
 document.addEventListener('DOMContentLoaded', init);
