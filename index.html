@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.19';
+const APP_VERSION = 'v2.20';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -933,8 +933,12 @@ function escapeHtml(s) {
 /* ============================================================
    MODAL
    ============================================================ */
-function openModal(html) {
-  document.getElementById('modalBox').innerHTML = html;
+function openModal(html, opts) {
+  const box = document.getElementById('modalBox');
+  // Reset Klassen, optional weite Variante zulassen
+  const maxW = (opts && opts.maxWidth) || 'max-w-lg';
+  box.className = 'w-full ' + maxW + ' bg-white rounded-2xl shadow-card max-h-[88vh] overflow-y-auto';
+  box.innerHTML = html;
   document.getElementById('modalBackdrop').classList.remove('hidden');
   if (window.lucide) lucide.createIcons();
 }
@@ -1395,7 +1399,7 @@ async function toggleUserStatus(id, currentlyInactive) {
 const _templateListState = { docType: 'alle' };
 
 const TEMPLATE_DOCTYPES = ['Angebot','Auftrag','Rechnung','Lieferschein','Artikel','E-Mail','Allgemein'];
-const TEMPLATE_SECTIONS = ['Einleitung','Beschreibung','Schlusstext','Body','Allgemein'];
+const TEMPLATE_SECTIONS = ['Einleitung','Schlusstext'];
 
 async function renderAdminTextemplates() {
   setPageTitle('Textvorlagen');
@@ -1414,14 +1418,19 @@ async function renderAdminTextemplates() {
   }
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-4xl mx-auto">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h2 class="text-xl font-bold text-ink-900">Textvorlagen</h2>
           <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
         </div>
-        <button onclick="openTemplateModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i> Neue Vorlage
-        </button>
+        <div class="flex gap-2">
+          <button onclick="openCustomFieldsModal()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
+            <i data-lucide="braces" class="w-4 h-4"></i> Variablen
+          </button>
+          <button onclick="openTemplateModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+            <i data-lucide="plus" class="w-4 h-4"></i> Neue Vorlage
+          </button>
+        </div>
       </div>
       <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
@@ -1473,8 +1482,7 @@ function templateRow(rec) {
 // Default-Vorlagen-Inhalt nach Sektion (wenn neue Vorlage angelegt wird)
 function defaultTemplateContent(docType, section) {
   if (docType === 'Angebot') {
-    if (section === 'Einleitung') return 'Sehr {{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage. Wir freuen uns, Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen.\n\nDas Angebot ist gültig bis zum {{angebot.gueltig_bis}}.';
-    if (section === 'Beschreibung') return 'Bitte beachten Sie:\n- Liefertermin nach Auftragsbestätigung\n- Es gelten unsere allgemeinen Geschäftsbedingungen\n- Lieferbedingungen: {{angebot.lieferung}}\n- Zahlungsbedingungen: {{angebot.zahlungsziel}}';
+    if (section === 'Einleitung') return 'Sehr {{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage. Wir freuen uns, Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen.\n\nDas Angebot ist gültig bis zum {{angebot.gueltig_bis}}.\n\nLieferbedingungen: {{angebot.lieferung}}\nZahlungsbedingungen: {{angebot.zahlungsziel}}';
     if (section === 'Schlusstext') return 'Wir hoffen, dass Ihnen unser Angebot zusagt und freuen uns auf Ihren Auftrag.\n\nMit freundlichen Grüßen\n\n{{user.name}}\n{{firma.name}}';
   }
   return '';
@@ -1563,11 +1571,23 @@ async function openTemplateModal(id) {
   updateTemplateVariablesPanel();
 }
 
-function updateTemplateVariablesPanel() {
+async function updateTemplateVariablesPanel() {
   const docType = document.getElementById('tpl_doc_type')?.value || 'Angebot';
-  const vars = TEMPLATE_VARIABLES[docType] || [];
+  const sysVars = TEMPLATE_VARIABLES[docType] || [];
   const panel = document.getElementById('tpl_vars_panel');
   if (!panel) return;
+  // Custom-Variablen (CustomField) für diesen Doc-Typ + Mandant nachladen
+  const cur = getCurrentCompany();
+  let customVars = [];
+  try {
+    const all = await readData('CustomField');
+    customVars = all
+      .filter(cf => (cf.fields.company_id || []).includes(cur.id) &&
+                    (cf.fields.doc_type || '') === docType &&
+                    (cf.fields.status || 'aktiv') === 'aktiv')
+      .map(cf => ({ name: cf.fields.name, label: (cf.fields.label || cf.fields.name) + ' (custom)' }));
+  } catch (e) {}
+  const vars = [...sysVars, ...customVars];
   if (vars.length === 0) {
     panel.innerHTML = '<p class="text-xs text-ink-500 italic">Für diesen Dokumenttyp sind noch keine Variablen definiert.</p>';
     return;
@@ -1634,6 +1654,110 @@ async function deleteTemplate(id) {
   try {
     await deleteData('Textemplate', id);
     renderAdminTextemplates();
+    toast('Gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   ADMIN: VARIABLEN (CustomField)
+   ============================================================ */
+let _cfMgmtDocType = 'Angebot';
+
+async function openCustomFieldsModal() {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  await renderCustomFieldsModal();
+}
+
+async function renderCustomFieldsModal() {
+  const cur = getCurrentCompany();
+  let all = [];
+  try { all = await readData('CustomField'); } catch (e) { toast(e.message, 'error'); return; }
+  const list = all
+    .filter(cf => (cf.fields.company_id || []).includes(cur.id) && (cf.fields.doc_type || '') === _cfMgmtDocType)
+    .sort((a, b) => (a.fields.label || a.fields.name || '').localeCompare(b.fields.label || b.fields.name || '', 'de'));
+  const rows = list.length === 0
+    ? '<p class="px-3 py-4 text-sm text-ink-500 italic text-center">Noch keine Variablen für diesen Doc-Typ.</p>'
+    : list.map(cf => {
+        const f = cf.fields;
+        return `
+          <div class="flex items-center justify-between p-3 border-b border-ink-100 last:border-b-0">
+            <div class="flex-1 min-w-0">
+              <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(f.label || f.name || '–')}</p>
+              <p class="text-xs text-ink-500 font-mono">{{${escapeHtml(f.name || '')}}}</p>
+            </div>
+            <div class="flex gap-1 shrink-0">
+              <button type="button" onclick="editCustomField('${cf.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+              <button type="button" onclick="deleteCustomField('${cf.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-baseline justify-between mb-2">
+        <h3 class="text-lg font-bold text-ink-900">Variablen verwalten</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+      <p class="text-xs text-ink-500 mb-3">Variablen werden in Textvorlagen als <code class="text-xs bg-ink-100 px-1 rounded">{{name}}</code> verwendet. Werte werden im jeweiligen Dokument (z.B. Angebot) befüllt.</p>
+      <div class="flex items-center gap-2 mb-3">
+        <label class="text-xs text-ink-500">Doc-Typ:</label>
+        <select onchange="_cfMgmtDocType=this.value;renderCustomFieldsModal()" class="text-sm border border-ink-200 rounded-lg px-2 py-1.5">
+          ${TEMPLATE_DOCTYPES.map(d => `<option value="${d}" ${_cfMgmtDocType===d?'selected':''}>${d}</option>`).join('')}
+        </select>
+      </div>
+      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4 max-h-72 overflow-y-auto">${rows}</div>
+      <button type="button" onclick="addCustomField()" class="w-full flex items-center justify-center gap-2 px-3 py-2.5 border border-dashed border-ink-300 rounded-lg text-sm text-brand-600 hover:bg-brand-50">
+        <i data-lucide="plus" class="w-4 h-4"></i> Neue Variable hinzufügen
+      </button>
+      <div class="flex justify-end mt-5">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen</button>
+      </div>
+    </div>
+  `);
+}
+
+async function addCustomField() {
+  const name = prompt('Platzhalter-Name (ohne Klammern, z.B. „rabatt_zusatz" — Kleinbuchstaben/Zahlen/Unterstriche):');
+  if (!name) return;
+  const sanitized = name.trim().toLowerCase().replace(/[^a-z0-9_.]/g, '_').replace(/_+/g, '_');
+  if (!sanitized) return toast('Name ungültig', 'error');
+  const label = prompt('Anzeigename (z.B. „Rabatt-Zusatz"):', sanitized) || sanitized;
+  const cur = getCurrentCompany();
+  try {
+    await writeData('CustomField', {
+      name: sanitized,
+      label: label.trim(),
+      doc_type: _cfMgmtDocType,
+      company_id: [cur.id],
+      status: 'aktiv'
+    });
+    await renderCustomFieldsModal();
+    toast('Variable angelegt', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function editCustomField(id) {
+  let f = {};
+  try {
+    const all = await readData('CustomField');
+    f = all.find(r => r.id === id)?.fields || {};
+  } catch (e) {}
+  const newLabel = prompt('Anzeigename:', f.label || f.name || '');
+  if (newLabel === null) return;
+  try {
+    await updateData('CustomField', id, { label: newLabel.trim() });
+    await renderCustomFieldsModal();
+    toast('Aktualisiert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteCustomField(id) {
+  if (!confirm('Diese Variable wirklich löschen? Vorhandene Platzhalter in Vorlagen oder Dokumenten bleiben als Text erhalten.')) return;
+  try {
+    await deleteData('CustomField', id);
+    await renderCustomFieldsModal();
     toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -3778,6 +3902,14 @@ function substituteVariables(text, docType, ctx) {
       try { out = out.split(placeholder).join(String(v.resolve(ctx) ?? '')); } catch(e) {}
     }
   });
+  // Custom-Variablen aus ctx.customFields nachrücken (vom Admin definiert + per Doc gefüllt)
+  const cf = ctx?.customFields || {};
+  Object.keys(cf).forEach(k => {
+    const placeholder = '{{' + k + '}}';
+    if (out.includes(placeholder)) {
+      out = out.split(placeholder).join(String(cf[k] ?? ''));
+    }
+  });
   return out;
 }
 
@@ -3898,6 +4030,40 @@ function quoteRow(rec, custMap) {
   `;
 }
 
+function parseQuoteCustomValues(json) {
+  if (!json) return {};
+  try { return JSON.parse(json) || {}; } catch (e) { return {}; }
+}
+
+function customFieldsSection(defs, currentValues) {
+  if (!defs || defs.length === 0) return '';
+  return `
+    <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Individuelle Felder</h4>
+    <div class="grid grid-cols-2 gap-3">
+      ${defs.map(d => {
+        const name = d.fields.name || '';
+        const label = d.fields.label || name;
+        const val = currentValues[name] ?? '';
+        return `
+          <div>
+            <label class="block text-sm font-medium text-ink-700 mb-1">${escapeHtml(label)} <span class="text-ink-400 font-mono text-xs">{{${escapeHtml(name)}}}</span></label>
+            <input data-cv-name="${escapeHtml(name)}" value="${escapeHtml(val)}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function collectCustomValues() {
+  const obj = {};
+  document.querySelectorAll('#modalBox [data-cv-name]').forEach(el => {
+    const name = el.getAttribute('data-cv-name');
+    if (name) obj[name] = el.value || '';
+  });
+  return obj;
+}
+
 function quoteTemplatePicker(fieldName, sectionLabel) {
   const tpls = (window._quoteTemplates || []).filter(t => (t.fields.section || '') === sectionLabel);
   if (tpls.length === 0) return '<span class="text-xs text-ink-400 italic">— keine Vorlage —</span>';
@@ -3946,7 +4112,8 @@ async function buildQuoteVariableContext() {
       delivery_terms: (fd.get('delivery_terms') || '').trim()
     },
     customer, contact, company,
-    user: APP_KEYS.user || {}
+    user: APP_KEYS.user || {},
+    customFields: collectCustomValues()
   };
 }
 
@@ -3967,10 +4134,10 @@ function onTemplatePicked(selectEl, fieldName, docType) {
 async function openQuoteModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
-  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [];
   try {
-    [allCustomers, allContacts, allTemplates, allCompanies] = await Promise.all([
-      readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company')
+    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields] = await Promise.all([
+      readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company'), readData('CustomField')
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
   // Template-Cache für die Vorlagen-Picker
@@ -3981,6 +4148,12 @@ async function openQuoteModal(id) {
   );
   // Company-Cache für Variablen-Substitution
   window._quoteCompanyCache = allCompanies.find(c => c.id === cur.id)?.fields || { name: cur.name };
+  // Custom Fields für Angebot, dieser Mandant
+  window._quoteCustomFields = allCustomFields.filter(cf =>
+    (cf.fields.company_id || []).includes(cur.id) &&
+    (cf.fields.doc_type === 'Angebot') &&
+    (cf.fields.status || 'aktiv') === 'aktiv'
+  ).sort((a,b) => (a.fields.label || a.fields.name || '').localeCompare(b.fields.label || b.fields.name || '', 'de'));
 
   if (id) {
     const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
@@ -4070,17 +4243,10 @@ async function openQuoteModal(id) {
         </div>
         <div class="col-span-2">
           <div class="flex items-center justify-between mb-1">
-            <label class="text-sm font-medium text-ink-700">Einleitung (Seite 1)</label>
+            <label class="text-sm font-medium text-ink-700">Einleitung</label>
             ${quoteTemplatePicker('description', 'Einleitung')}
           </div>
           <textarea name="description" rows="3" placeholder="Anrede + Einleitung — z.B. „Sehr geehrte Damen und Herren, …"" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
-        </div>
-        <div class="col-span-2">
-          <div class="flex items-center justify-between mb-1">
-            <label class="text-sm font-medium text-ink-700">Beschreibung (Seite 2)</label>
-            ${quoteTemplatePicker('body_text', 'Beschreibung')}
-          </div>
-          <textarea name="body_text" rows="5" placeholder="Detailbeschreibung, Hinweise zum Angebot, Bedingungen…" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.body_text || '')}</textarea>
         </div>
       </div>
 
@@ -4091,8 +4257,15 @@ async function openQuoteModal(id) {
         ${quoteSumsHtml(sums)}
       </div>
 
-      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen / Nachtext</h4>
-      <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+      <div class="mt-5">
+        <div class="flex items-center justify-between mb-1">
+          <label class="text-sm font-medium text-ink-700">Schlusstext</label>
+          ${quoteTemplatePicker('notes', 'Schlusstext')}
+        </div>
+        <textarea name="notes" rows="3" placeholder="z.B. Grußformel + Bankverbindung + Hinweise" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+      </div>
+
+      ${customFieldsSection(window._quoteCustomFields, parseQuoteCustomValues(f.custom_values))}
 
       <div class="flex justify-end gap-2 flex-wrap">
         <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
@@ -4102,11 +4275,14 @@ async function openQuoteModal(id) {
     </form>
   `);
 
+  // Modal auf breite Variante umstellen (Desktop sieht mehr)
+  document.getElementById('modalBox')?.classList.replace('max-w-lg', 'max-w-5xl');
+
   // Bei neuem Angebot: Standardvorlagen automatisch einfügen (nur wenn Felder leer)
   if (!id) {
     setTimeout(async () => {
       await applyDefaultTemplate('description', 'Einleitung');
-      await applyDefaultTemplate('body_text', 'Beschreibung');
+      await applyDefaultTemplate('notes', 'Schlusstext');
     }, 80);
   }
 }
@@ -4153,7 +4329,7 @@ function onQuoteCustomerChange(value) {
     // 3) Standardvorlagen mit aktuellem Kunden-Kontext nach-substituieren (sofern Felder noch leer)
     setTimeout(() => {
       applyDefaultTemplate('description', 'Einleitung');
-      applyDefaultTemplate('body_text', 'Beschreibung');
+      applyDefaultTemplate('notes', 'Schlusstext');
     }, 50);
   }
 }
@@ -4427,9 +4603,12 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','body_text','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
+  // Individuelle Felder als JSON
+  const cv = collectCustomValues();
+  fields.custom_values = Object.keys(cv).length ? JSON.stringify(cv) : '';
   const cidSel = (fd.get('customer_id') || '').trim();
   const conSel = (fd.get('contact_id')  || '').trim();
   fields.customer_id = cidSel ? [cidSel] : [];
