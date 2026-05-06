@@ -194,10 +194,9 @@
             <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
           </button>
           <div class="nav-items pl-2 mt-1 space-y-0.5">
-            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="kunden">
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="kunden">
               <i data-lucide="user-round" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Kunden</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.1</span>
             </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="lieferanten">
               <i data-lucide="truck" class="w-4 h-4"></i>
@@ -368,7 +367,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.5';
+const APP_VERSION = 'v1.6';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -487,6 +486,8 @@ function setCurrentCompany(companyId) {
   document.getElementById('mandantMenu')?.classList.add('hidden');
   renderMandantenSwitcher();
   toast('Mandant gewechselt: ' + getCurrentCompany().name, 'success');
+  // Datenviews neu rendern
+  if (_currentRoute === 'kunden') renderCustomers();
 }
 
 function renderMandantenSwitcher() {
@@ -806,10 +807,13 @@ function closeModal() {
 /* ============================================================
    ROUTING (Sidebar Nav-Items)
    ============================================================ */
+let _currentRoute = 'welcome';
 function dispatchRoute(route) {
+  _currentRoute = route;
   closeDrawer();
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('bg-brand-700', b.dataset.route === route));
   switch (route) {
+    case 'kunden':          renderCustomers(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
     default:                renderWelcome();
@@ -1077,6 +1081,253 @@ async function toggleUserStatus(id, currentlyInactive) {
     await updateData('User', id, { status: currentlyInactive ? 'aktiv' : 'inaktiv' });
     renderAdminUsers();
     toast(currentlyInactive ? 'Aktiviert' : 'Deaktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   STAMMDATEN: KUNDEN
+   ============================================================ */
+const _customerListState = { search: '', sort: 'name', showArchived: false };
+let _customerSearchTimer = null;
+
+async function nextCustomerNo(companyId) {
+  const all = await readData('Customer');
+  const inCo = all.filter(c => (c.fields.company_id || []).includes(companyId));
+  let max = 1000;
+  inCo.forEach(c => {
+    const m = (c.fields.customer_no || '').match(/^K-(\d+)$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > max) max = n;
+    }
+  });
+  return 'K-' + (max + 1);
+}
+
+async function renderCustomers() {
+  setPageTitle('Kunden');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto">
+        <div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">
+          Kein Mandant ausgewählt. Bitte links eine Firma wählen.
+        </div>
+      </div>
+    `;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Kunden…</p>';
+
+  let all = [];
+  try { all = await readData('Customer'); } catch (e) { toast(e.message, 'error'); }
+
+  let list = all.filter(c => (c.fields.company_id || []).includes(cur.id));
+  if (!_customerListState.showArchived) list = list.filter(c => (c.fields.status || 'aktiv') !== 'archiviert');
+
+  const q = _customerListState.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter(c => {
+      const f = c.fields;
+      return [f.name1, f.name2, f.customer_no, f.city, f.contact_name, f.email]
+        .some(v => (v || '').toLowerCase().includes(q));
+    });
+  }
+
+  const sortKey = _customerListState.sort;
+  list.sort((a, b) => {
+    if (sortKey === 'customer_no') {
+      const av = parseInt((a.fields.customer_no || '').replace(/\D/g, ''), 10) || 0;
+      const bv = parseInt((b.fields.customer_no || '').replace(/\D/g, ''), 10) || 0;
+      return av - bv;
+    }
+    const av = (a.fields[sortKey === 'city' ? 'city' : 'name1'] || '').toLowerCase();
+    const bv = (b.fields[sortKey === 'city' ? 'city' : 'name1'] || '').toLowerCase();
+    return av.localeCompare(bv, 'de');
+  });
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-5xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-ink-900">Kunden</h2>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
+        </div>
+        <button onclick="openCustomerModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i> Neuer Kunde
+        </button>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
+        <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
+          <div class="relative flex-1 min-w-[180px]">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>
+            <input id="customerSearch" type="search" value="${escapeHtml(_customerListState.search)}" placeholder="Suchen…" oninput="onCustomerSearchInput(this.value)"
+                   class="w-full pl-9 pr-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          <label class="text-xs text-ink-500">Sortierung:</label>
+          <select onchange="_customerListState.sort=this.value;renderCustomers()" class="text-sm border border-ink-200 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="name" ${sortKey==='name'?'selected':''}>Name</option>
+            <option value="customer_no" ${sortKey==='customer_no'?'selected':''}>Kundennr.</option>
+            <option value="city" ${sortKey==='city'?'selected':''}>Ort</option>
+          </select>
+          <label class="flex items-center gap-2 text-xs text-ink-700 ml-1">
+            <input type="checkbox" ${_customerListState.showArchived?'checked':''} onchange="_customerListState.showArchived=this.checked;renderCustomers()" class="w-4 h-4 rounded border-ink-300">
+            <span>auch archivierte</span>
+          </label>
+        </div>
+        <div class="divide-y divide-ink-100">
+          ${list.length === 0
+            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _customerListState.showArchived ? 'Keine Treffer.' : 'Noch keine Kunden für diesen Mandanten. Lege den ersten an mit „+ Neuer Kunde".'}</div>`
+            : list.map(customerRow).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function onCustomerSearchInput(value) {
+  _customerListState.search = value;
+  clearTimeout(_customerSearchTimer);
+  _customerSearchTimer = setTimeout(() => renderCustomers(), 200);
+}
+
+function customerRow(rec) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const cityZip = [f.zip, f.city].filter(Boolean).join(' ');
+  const contact = [f.contact_name, f.email].filter(Boolean).join(' · ');
+  return `
+    <div class="flex items-center justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openCustomerModal('${rec.id}')">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="text-xs font-mono text-ink-500">${escapeHtml(f.customer_no || '–')}</span>
+          <p class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'} truncate">${escapeHtml(f.name1 || '–')}</p>
+          ${archived ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-ink-200 text-ink-600 px-1.5 py-0.5 rounded">archiviert</span>' : ''}
+        </div>
+        ${f.name2 ? `<p class="text-sm text-ink-500 truncate">${escapeHtml(f.name2)}</p>` : ''}
+        <p class="text-xs text-ink-500 mt-0.5 truncate">
+          ${cityZip ? escapeHtml(cityZip) : '<span class="text-ink-400">— keine Adresse —</span>'}${contact ? ' · ' + escapeHtml(contact) : ''}
+        </p>
+      </div>
+      <div class="flex gap-1 shrink-0 ml-2" onclick="event.stopPropagation()">
+        <button onclick="openCustomerModal('${rec.id}')" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten">
+          <i data-lucide="pencil" class="w-4 h-4"></i>
+        </button>
+        <button onclick="toggleCustomerArchive('${rec.id}', ${!archived})" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="${archived ? 'Reaktivieren' : 'Archivieren'}">
+          <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function openCustomerModal(id) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  let f = {};
+  if (id) {
+    const all = await readData('Customer');
+    f = all.find(r => r.id === id)?.fields || {};
+  } else {
+    f.customer_no = await nextCustomerNo(cur.id);
+    f.country = 'Deutschland';
+    f.status = 'aktiv';
+  }
+  openModal(`
+    <form onsubmit="saveCustomer(event, '${id || ''}')" class="p-6">
+      <div class="flex items-baseline justify-between mb-4">
+        <h3 class="text-lg font-bold text-ink-900">${id ? 'Kunde bearbeiten' : 'Neuer Kunde'}</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Name (Zeile 1) <span class="text-red-500">*</span></label>
+          <input name="name1" required value="${escapeHtml(f.name1 || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Name (Zeile 2)</label>
+          <input name="name2" value="${escapeHtml(f.name2 || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Kundennummer</label>
+          <input name="customer_no" value="${escapeHtml(f.customer_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+          <select name="status" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="aktiv" ${(f.status||'aktiv')==='aktiv'?'selected':''}>aktiv</option>
+            <option value="archiviert" ${f.status==='archiviert'?'selected':''}>archiviert</option>
+          </select>
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Adresse</h4>
+      <div class="grid grid-cols-12 gap-3">
+        <div class="col-span-12"><input name="street" placeholder="Straße + Nr." value="${escapeHtml(f.street || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div class="col-span-3"><input name="zip" placeholder="PLZ" value="${escapeHtml(f.zip || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div class="col-span-9"><input name="city" placeholder="Ort" value="${escapeHtml(f.city || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div class="col-span-12"><input name="country" placeholder="Land" value="${escapeHtml(f.country || 'Deutschland')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Ansprechpartner</h4>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2"><input name="contact_name" placeholder="Name" value="${escapeHtml(f.contact_name || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div><input name="email" type="email" placeholder="E-Mail" value="${escapeHtml(f.email || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div><input name="phone" placeholder="Telefon" value="${escapeHtml(f.phone || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div class="col-span-2"><input name="website" placeholder="Website" value="${escapeHtml(f.website || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Buchhaltung</h4>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">USt-IdNr</label>
+          <input name="vat_id" value="${escapeHtml(f.vat_id || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
+          <input name="payment_terms" placeholder="14 Tage netto" value="${escapeHtml(f.payment_terms || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen</h4>
+      <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveCustomer(e, id) {
+  e.preventDefault();
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  const fd = new FormData(e.target);
+  const fields = {};
+  ['name1','name2','customer_no','street','zip','city','country','contact_name','email','phone','website','vat_id','payment_terms','status','notes'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  if (!fields.name1) return toast('Name (Zeile 1) fehlt', 'error');
+  fields.status = fields.status || 'aktiv';
+  if (!id) fields.company_id = [cur.id];
+  try {
+    if (id) await updateData('Customer', id, fields);
+    else    await writeData('Customer', fields);
+    closeModal();
+    renderCustomers();
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleCustomerArchive(id, archive) {
+  try {
+    await updateData('Customer', id, { status: archive ? 'archiviert' : 'aktiv' });
+    renderCustomers();
+    toast(archive ? 'Archiviert' : 'Reaktiviert', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
