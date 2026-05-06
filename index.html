@@ -399,7 +399,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.10';
+const APP_VERSION = 'v2.11';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -937,9 +937,10 @@ function openModal(html) {
 function closeModal() {
   document.getElementById('modalBackdrop').classList.add('hidden');
   document.getElementById('modalBox').innerHTML = '';
-  // Inquiry-spezifischer Cleanup: Spracherkennung stoppen, Bilder freigeben
+  // Inquiry-spezifischer Cleanup: Spracherkennung stoppen, Bilder + Wizard-State freigeben
   if (typeof _inquirySpeech !== 'undefined' && _inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
   if (typeof _inquiryImages !== 'undefined') _inquiryImages = [];
+  if (typeof _inquiryWizard !== 'undefined') _inquiryWizard = null;
   if (_currentLock) {
     const lock = _currentLock;
     _currentLock = null;
@@ -2378,7 +2379,7 @@ async function renderInquiries() {
           <h2 class="text-xl font-bold text-ink-900">Anfragen</h2>
           <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
         </div>
-        <button onclick="openInquiryModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+        <button onclick="openInquiryWizard()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i> Neue Anfrage
         </button>
       </div>
@@ -2780,6 +2781,341 @@ async function saveInquiry(e, id) {
     closeModal();
     renderInquiries();
     toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   ANFRAGEN: WIZARD (Mobile-friendly, 3 Schritte)
+   ============================================================ */
+let _inquiryWizard = null;
+
+function _inquiryAiPrompt(data) {
+  const parts = [
+    'Du bist Vertriebsassistent bei FLP Lift Parts (B2B-Großhandel für Aufzug-Ersatzteile in Deutschland).',
+    'Analysiere die folgende Kundenanfrage und gib eine strukturierte Zusammenfassung in deutscher Sprache zurück.',
+    '',
+    'Format der Antwort (genau dieses Schema, Markdown-Stil):',
+    '',
+    '**Zusammenfassung**',
+    '<2-3 Sätze: Was will der Kunde konkret?>',
+    '',
+    '**Kundenidentifikation**',
+    '- Firma: <Firmenname falls erkennbar, sonst „—">',
+    '- Email: <falls erkennbar>',
+    '- Telefon: <falls erkennbar>',
+    '- Adresse: <falls erkennbar>',
+    '',
+    '**Hauptansprechpartner**',
+    '- Name: <Vor- und Nachname>',
+    '- Funktion: <falls erkennbar>',
+    '- Email/Telefon: <falls erkennbar>',
+    '',
+    '**Angefragte Artikel / Leistungen**',
+    '- Menge | Hersteller | Modell/Bezeichnung | Bemerkung',
+    '<eine Zeile pro Position; falls nichts klar erkennbar: „— Keine konkreten Positionen erkennbar —">',
+    '',
+    '**Besondere Anforderungen**',
+    '<z.B. Liefertermin, Eilauftrag, Sondergrößen, Reklamation, Service. Falls keine: „— Keine —">',
+    '',
+    '---',
+    ''
+  ];
+  if (data.title)     parts.push('Betreff: ' + data.title);
+  if (data.ticket_no) parts.push('Freshdesk-Ticket: ' + data.ticket_no);
+  if (data.raw_text)  parts.push('\nText/Email:\n' + data.raw_text);
+  if (data.voice_text)parts.push('\nSpracheingabe (transkribiert):\n' + data.voice_text);
+  if (_inquiryImages.length) parts.push('\n' + _inquiryImages.length + ' Bild' + (_inquiryImages.length === 1 ? '' : 'er') + ' anbei (siehe Anhang).');
+  return parts.join('\n');
+}
+
+async function openInquiryWizard() {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  let customers = [], contacts = [];
+  try {
+    [customers, contacts] = await Promise.all([readData('Customer'), readData('Contact')]);
+  } catch (e) { toast(e.message, 'error'); return; }
+  _inquiryImages = [];
+  if (_inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
+  _inquiryWizard = {
+    step: 1,
+    totalSteps: 3,
+    customers,
+    contacts,
+    data: {
+      inquiry_no: await nextInquiryNo(cur.id),
+      title: '', ticket_no: '', channel: 'Email', status: 'offen',
+      raw_text: '', voice_text: '', ai_summary: '',
+      customer_id: '', contact_id: '', notes: ''
+    }
+  };
+  renderInquiryWizardStep();
+}
+
+function renderInquiryWizardStep() {
+  const w = _inquiryWizard;
+  const cur = getCurrentCompany();
+  const dots = Array.from({length: w.totalSteps}, (_, i) =>
+    `<div class="h-1.5 flex-1 rounded-full ${i < w.step ? 'bg-brand-500' : 'bg-ink-200'}"></div>`
+  ).join('');
+  const stepTitles = ['Inhalt erfassen', 'KI-Analyse', 'Zuordnung & Speichern'];
+  const stepHtml   = w.step === 1 ? inqWizStep1() : w.step === 2 ? inqWizStep2() : inqWizStep3();
+  const isLast = w.step === w.totalSteps;
+  const isFirst = w.step === 1;
+
+  openModal(`
+    <div class="p-5 sm:p-6">
+      <div class="flex items-baseline justify-between mb-1">
+        <h3 class="text-lg font-bold text-ink-900">Neue Anfrage</h3>
+        <span class="text-xs font-mono text-ink-500">${escapeHtml(w.data.inquiry_no)}</span>
+      </div>
+      <p class="text-xs text-ink-500 mb-3">${escapeHtml(cur.name)} · Schritt ${w.step}/${w.totalSteps} · ${escapeHtml(stepTitles[w.step-1])}</p>
+      <div class="flex gap-1.5 mb-5">${dots}</div>
+      ${stepHtml}
+      <div class="flex justify-between gap-2 mt-5 pt-4 border-t border-ink-100">
+        <button type="button" onclick="${isFirst ? 'closeModal()' : 'inqWizBack()'}" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center gap-1.5">
+          <i data-lucide="${isFirst ? 'x' : 'arrow-left'}" class="w-4 h-4"></i>
+          ${isFirst ? 'Abbrechen' : 'Zurück'}
+        </button>
+        <button type="button" onclick="${isLast ? 'inqWizSave()' : 'inqWizNext()'}" class="px-4 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5 font-medium">
+          ${isLast ? 'Speichern' : 'Weiter'}
+          <i data-lucide="${isLast ? 'check' : 'arrow-right'}" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  `);
+  if (w.step === 1) renderInquiryImagesPreview();
+}
+
+function inqWizStep1() {
+  const w = _inquiryWizard;
+  const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  return `
+    <div class="space-y-3">
+      <div>
+        <label class="block text-sm font-medium text-ink-700 mb-1">Betreff <span class="text-red-500">*</span></label>
+        <input id="iw_title" value="${escapeHtml(w.data.title)}" placeholder="Kurz: worum geht's?" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Freshdesk-Ticket</label>
+          <input id="iw_ticket_no" value="${escapeHtml(w.data.ticket_no)}" placeholder="z.B. 12345" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Kanal</label>
+          <select id="iw_channel" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+            ${['Email','Telefon','Web','Persönlich'].map(c => `<option value="${c}" ${w.data.channel===c?'selected':''}>${c}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Anfragetext / Email-Body</label>
+        <textarea id="inq_raw_text" rows="4" placeholder="Hier den Text einfügen oder eintippen…" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(w.data.raw_text)}</textarea>
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-1">
+          <label class="text-xs font-medium text-ink-700">Spracheingabe</label>
+          ${speechSupported
+            ? `<button id="inq_voice_btn" type="button" onclick="toggleInquiryVoice()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center gap-1"><i data-lucide="mic" class="w-3.5 h-3.5"></i> <span id="inq_voice_label">Aufnehmen</span></button>`
+            : `<span class="text-xs text-ink-400 italic">Browser unterstützt keine Spracheingabe</span>`}
+        </div>
+        <textarea id="inq_voice_text" rows="2" placeholder="Transkript erscheint hier" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(w.data.voice_text)}</textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Bilder / Screenshots</label>
+        <div class="flex flex-wrap gap-2 mb-2" id="inq_images_preview"></div>
+        <label class="flex items-center justify-center gap-2 px-3 py-3 border-2 border-dashed border-ink-200 rounded-lg cursor-pointer hover:bg-ink-50 text-sm text-ink-600">
+          <i data-lucide="image-plus" class="w-4 h-4"></i>
+          <span>Bilder auswählen</span>
+          <input type="file" accept="image/*" multiple class="hidden" onchange="addInquiryImages(this.files)">
+        </label>
+      </div>
+    </div>
+  `;
+}
+
+function inqWizStep2() {
+  const w = _inquiryWizard;
+  const hasInput = (w.data.raw_text || '').trim() || (w.data.voice_text || '').trim() || _inquiryImages.length > 0;
+  return `
+    <div class="space-y-3">
+      <p class="text-sm text-ink-600">Die KI fasst Text + Sprache + Bilder strukturiert zusammen. Du kannst die Antwort danach bearbeiten.</p>
+      ${!hasInput ? '<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">Du hast keine Eingaben gemacht — gehe zurück oder überspringe diesen Schritt mit „Weiter".</div>' : ''}
+      <div class="flex justify-center">
+        <button type="button" id="inq_analyze_btn" onclick="analyzeInquiryWizard()" class="bg-ink-900 text-white rounded-lg px-4 py-3 text-sm font-medium hover:bg-ink-800 flex items-center gap-2 ${!hasInput ? 'opacity-50 cursor-not-allowed' : ''}" ${!hasInput ? 'disabled' : ''}>
+          <i data-lucide="sparkles" class="w-4 h-4"></i>
+          <span id="inq_analyze_label">${w.data.ai_summary ? 'Erneut analysieren' : 'Mit KI analysieren'}</span>
+        </button>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Zusammenfassung</label>
+        <textarea id="iw_ai_summary" rows="12" placeholder="Hier erscheint die KI-Zusammenfassung. Du kannst sie auch direkt eintippen oder bearbeiten." class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(w.data.ai_summary)}</textarea>
+      </div>
+    </div>
+  `;
+}
+
+function inqWizStep3() {
+  const w = _inquiryWizard;
+  const cur = getCurrentCompany();
+  const customersInCompany = (w.customers || [])
+    .filter(c => (c.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  const contactsForCustomer = w.data.customer_id
+    ? (w.contacts || []).filter(c => (c.fields.customer_id || []).includes(w.data.customer_id))
+    : [];
+  return `
+    <div class="space-y-3">
+      <div>
+        <label class="block text-sm font-medium text-ink-700 mb-1">Kunde</label>
+        <select id="iw_customer_id" onchange="onInqWizCustomerChange()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <option value="">— nicht zugeordnet —</option>
+          ${customersInCompany.map(c => `<option value="${c.id}" ${w.data.customer_id === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name1 || '–')}${c.fields.customer_no ? ' (' + escapeHtml(c.fields.customer_no) + ')' : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
+        <select id="iw_contact_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <option value="">— nicht zugeordnet —</option>
+          ${contactsForCustomer.map(c => `<option value="${c.id}" ${w.data.contact_id === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+        <select id="iw_status" class="w-full px-3 py-2 border border-ink-200 rounded-lg">
+          <option value="offen"           ${w.data.status==='offen'?'selected':''}>offen</option>
+          <option value="in_bearbeitung"  ${w.data.status==='in_bearbeitung'?'selected':''}>in Bearbeitung</option>
+          <option value="beantwortet"     ${w.data.status==='beantwortet'?'selected':''}>beantwortet</option>
+          <option value="abgelehnt"       ${w.data.status==='abgelehnt'?'selected':''}>abgelehnt</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-ink-700 mb-1">Notizen</label>
+        <textarea id="iw_notes" rows="2" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(w.data.notes)}</textarea>
+      </div>
+      <div class="bg-ink-50 rounded-lg p-3 text-xs space-y-1 mt-4">
+        <p class="font-semibold text-ink-700 mb-1">Übersicht</p>
+        <p class="text-ink-600"><span class="font-medium">Betreff:</span> ${escapeHtml(w.data.title || '—')}</p>
+        ${w.data.ticket_no ? `<p class="text-ink-600"><span class="font-medium">Ticket:</span> FT ${escapeHtml(w.data.ticket_no)}</p>` : ''}
+        <p class="text-ink-600"><span class="font-medium">Eingaben:</span>
+          ${(w.data.raw_text || '').length > 0 ? 'Text ✓ ' : ''}
+          ${(w.data.voice_text || '').length > 0 ? 'Sprache ✓ ' : ''}
+          ${_inquiryImages.length > 0 ? _inquiryImages.length + ' Bild' + (_inquiryImages.length === 1 ? '' : 'er') + ' ✓' : ''}
+          ${!(w.data.raw_text || w.data.voice_text || _inquiryImages.length) ? '—' : ''}
+        </p>
+        <p class="text-ink-600"><span class="font-medium">KI-Analyse:</span> ${(w.data.ai_summary || '').length > 0 ? '✓ vorhanden' : '— keine —'}</p>
+      </div>
+    </div>
+  `;
+}
+
+function _saveCurrentInqWizStep() {
+  const w = _inquiryWizard;
+  if (w.step === 1) {
+    w.data.title     = (document.getElementById('iw_title')?.value     || '').trim();
+    w.data.ticket_no = (document.getElementById('iw_ticket_no')?.value || '').trim();
+    w.data.channel   = document.getElementById('iw_channel')?.value     || w.data.channel;
+    w.data.raw_text  = (document.getElementById('inq_raw_text')?.value || '').trim();
+    w.data.voice_text= (document.getElementById('inq_voice_text')?.value|| '').trim();
+  } else if (w.step === 2) {
+    w.data.ai_summary = (document.getElementById('iw_ai_summary')?.value || '').trim();
+  } else if (w.step === 3) {
+    w.data.customer_id = document.getElementById('iw_customer_id')?.value || '';
+    w.data.contact_id  = document.getElementById('iw_contact_id')?.value  || '';
+    w.data.status      = document.getElementById('iw_status')?.value     || w.data.status;
+    w.data.notes       = (document.getElementById('iw_notes')?.value     || '').trim();
+  }
+}
+
+function inqWizNext() {
+  const w = _inquiryWizard;
+  if (w.step === 1) {
+    const title = (document.getElementById('iw_title')?.value || '').trim();
+    if (!title) return toast('Betreff fehlt', 'error');
+  }
+  _saveCurrentInqWizStep();
+  if (_inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
+  if (w.step < w.totalSteps) { w.step++; renderInquiryWizardStep(); }
+}
+
+function inqWizBack() {
+  const w = _inquiryWizard;
+  _saveCurrentInqWizStep();
+  if (_inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
+  if (w.step > 1) { w.step--; renderInquiryWizardStep(); }
+}
+
+function onInqWizCustomerChange() {
+  const w = _inquiryWizard;
+  const cid = document.getElementById('iw_customer_id')?.value || '';
+  w.data.customer_id = cid;
+  w.data.contact_id = '';
+  const select = document.getElementById('iw_contact_id');
+  if (!select) return;
+  if (!cid) { select.innerHTML = '<option value="">— nicht zugeordnet —</option>'; return; }
+  const list = (w.contacts || []).filter(c => (c.fields.customer_id || []).includes(cid));
+  select.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
+    list.map(c => `<option value="${c.id}">${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
+}
+
+async function analyzeInquiryWizard() {
+  const w = _inquiryWizard;
+  _saveCurrentInqWizStep();
+  if (!w.data.raw_text && !w.data.voice_text && _inquiryImages.length === 0) {
+    return toast('Bitte erst Text, Sprache oder Bilder hinzufügen', 'warn');
+  }
+  if (!APP_KEYS.anthropicKey) {
+    return toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error');
+  }
+  const btn = document.getElementById('inq_analyze_btn');
+  const lbl = document.getElementById('inq_analyze_label');
+  if (btn) btn.disabled = true;
+  if (lbl) lbl.textContent = 'analysiert…';
+  try {
+    const summary = await askAI(_inquiryAiPrompt(w.data), {
+      images: _inquiryImages.map(i => ({ mediaType: i.mediaType, data: i.base64 })),
+      maxTokens: 2048
+    });
+    w.data.ai_summary = summary;
+    const ta = document.getElementById('iw_ai_summary');
+    if (ta) ta.value = summary;
+    if (lbl) lbl.textContent = 'Erneut analysieren';
+    toast('Analyse fertig', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function inqWizSave() {
+  const w = _inquiryWizard;
+  _saveCurrentInqWizStep();
+  if (!w.data.title) {
+    toast('Betreff fehlt — bitte zurück zu Schritt 1', 'error');
+    return;
+  }
+  const cur = getCurrentCompany();
+  const fields = {
+    inquiry_no: w.data.inquiry_no,
+    title:      w.data.title,
+    ticket_no:  w.data.ticket_no,
+    channel:    w.data.channel,
+    status:     w.data.status,
+    raw_text:   w.data.raw_text,
+    voice_text: w.data.voice_text,
+    ai_summary: w.data.ai_summary,
+    notes:      w.data.notes,
+    company_id: [cur.id]
+  };
+  if (w.data.customer_id) fields.customer_id = [w.data.customer_id];
+  if (w.data.contact_id)  fields.contact_id  = [w.data.contact_id];
+  try {
+    if (_inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
+    await writeData('Inquiry', fields);
+    closeModal();
+    renderInquiries();
+    toast('Anfrage angelegt', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
