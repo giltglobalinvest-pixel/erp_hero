@@ -202,10 +202,9 @@
               <i data-lucide="contact-round" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Kontakte</span>
             </button>
-            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="lieferanten">
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="lieferanten">
               <i data-lucide="truck" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Lieferanten</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.1</span>
             </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="artikel">
               <i data-lucide="package" class="w-4 h-4"></i>
@@ -374,7 +373,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.1';
+const APP_VERSION = 'v2.2';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -495,8 +494,9 @@ function setCurrentCompany(companyId) {
   renderMandantenSwitcher();
   toast('Mandant gewechselt: ' + getCurrentCompany().name, 'success');
   // Datenviews neu rendern
-  if (_currentRoute === 'kunden')   renderCustomers();
-  if (_currentRoute === 'kontakte') renderContactsList();
+  if (_currentRoute === 'kunden')      renderCustomers();
+  if (_currentRoute === 'lieferanten') renderSuppliers();
+  if (_currentRoute === 'kontakte')    renderContactsList();
 }
 
 function renderMandantenSwitcher() {
@@ -923,6 +923,7 @@ function dispatchRoute(route) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('bg-brand-700', b.dataset.route === route));
   switch (route) {
     case 'kunden':          renderCustomers(); break;
+    case 'lieferanten':     renderSuppliers(); break;
     case 'kontakte':        renderContactsList(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
@@ -1427,7 +1428,7 @@ async function openCustomerModal(id) {
       </div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Ansprechpartner</h4>
-      <div id="customerContactsWrap">${renderCustomerContacts(id || '', contacts)}</div>
+      <div id="entityContactsWrap">${renderEntityContacts('customer', id || '', contacts)}</div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Buchhaltung</h4>
       <div class="grid grid-cols-2 gap-3">
@@ -1485,11 +1486,291 @@ async function toggleCustomerArchive(id, archive) {
 }
 
 /* ============================================================
+   STAMMDATEN: LIEFERANTEN
+   ============================================================ */
+const _supplierListState = { search: '', sort: 'name', showArchived: false };
+let _supplierSearchTimer = null;
+
+async function nextSupplierNo(companyId) {
+  const all = await readData('Supplier');
+  const inCo = all.filter(s => (s.fields.company_id || []).includes(companyId));
+  let max = 1000;
+  inCo.forEach(s => {
+    const m = (s.fields.supplier_no || '').match(/^L-(\d+)$/);
+    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+  });
+  return 'L-' + (max + 1);
+}
+
+async function renderSuppliers() {
+  setPageTitle('Lieferanten');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt. Bitte links eine Firma wählen.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Lieferanten…</p>';
+
+  let all = [], allContacts = [];
+  try {
+    [all, allContacts] = await Promise.all([readData('Supplier'), readData('Contact')]);
+  } catch (e) { toast(e.message, 'error'); }
+
+  const primaryBySup = {};
+  allContacts.forEach(c => {
+    if (c.fields.is_primary) {
+      const sid = (c.fields.supplier_id || [])[0];
+      if (sid && !primaryBySup[sid]) primaryBySup[sid] = c.fields;
+    }
+  });
+
+  let list = all.filter(s => (s.fields.company_id || []).includes(cur.id));
+  if (!_supplierListState.showArchived) list = list.filter(s => (s.fields.status || 'aktiv') !== 'archiviert');
+
+  const q = _supplierListState.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter(s => {
+      const f = s.fields;
+      const primary = primaryBySup[s.id];
+      return [f.name1, f.name2, f.supplier_no, f.city, f.email, primary?.first_name, primary?.last_name, primary?.name, primary?.email]
+        .some(v => (v || '').toLowerCase().includes(q));
+    });
+  }
+
+  const sortKey = _supplierListState.sort;
+  list.sort((a, b) => {
+    if (sortKey === 'supplier_no') {
+      const av = parseInt((a.fields.supplier_no || '').replace(/\D/g, ''), 10) || 0;
+      const bv = parseInt((b.fields.supplier_no || '').replace(/\D/g, ''), 10) || 0;
+      return av - bv;
+    }
+    const av = (a.fields[sortKey === 'city' ? 'city' : 'name1'] || '').toLowerCase();
+    const bv = (b.fields[sortKey === 'city' ? 'city' : 'name1'] || '').toLowerCase();
+    return av.localeCompare(bv, 'de');
+  });
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-5xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-ink-900">Lieferanten</h2>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
+        </div>
+        <button onclick="openSupplierModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i> Neuer Lieferant
+        </button>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
+        <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
+          <div class="relative flex-1 min-w-[180px]">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>
+            <input type="search" value="${escapeHtml(_supplierListState.search)}" placeholder="Suchen…" oninput="onSupplierSearchInput(this.value)"
+                   class="w-full pl-9 pr-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          <label class="text-xs text-ink-500">Sortierung:</label>
+          <select onchange="_supplierListState.sort=this.value;renderSuppliers()" class="text-sm border border-ink-200 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="name" ${sortKey==='name'?'selected':''}>Name</option>
+            <option value="supplier_no" ${sortKey==='supplier_no'?'selected':''}>Lieferantennr.</option>
+            <option value="city" ${sortKey==='city'?'selected':''}>Ort</option>
+          </select>
+          <label class="flex items-center gap-2 text-xs text-ink-700 ml-1">
+            <input type="checkbox" ${_supplierListState.showArchived?'checked':''} onchange="_supplierListState.showArchived=this.checked;renderSuppliers()" class="w-4 h-4 rounded border-ink-300">
+            <span>auch archivierte</span>
+          </label>
+        </div>
+        <div class="divide-y divide-ink-100">
+          ${list.length === 0
+            ? `<div class="p-10 text-center text-ink-500 text-sm">${q || _supplierListState.showArchived ? 'Keine Treffer.' : 'Noch keine Lieferanten für diesen Mandanten. Lege den ersten an mit „+ Neuer Lieferant".'}</div>`
+            : list.map(rec => supplierRow(rec, primaryBySup[rec.id])).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function onSupplierSearchInput(value) {
+  _supplierListState.search = value;
+  clearTimeout(_supplierSearchTimer);
+  _supplierSearchTimer = setTimeout(() => renderSuppliers(), 200);
+}
+
+function supplierRow(rec, primary) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  const cityZip = [f.zip, f.city].filter(Boolean).join(' ');
+  const contactSummary = primary
+    ? (contactSalutation(primary) ? contactSalutation(primary) + ' ' : '') + contactDisplayName(primary) + (primary.role ? ' (' + primary.role + ')' : '')
+    : '';
+  const lockedByOther = isLockedByOther(rec);
+  const lockInfo = getLockInfo(rec);
+  const lockedBadge = lockedByOther
+    ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Wird gerade von ${escapeHtml(userLabel(lockInfo.userId))} bearbeitet"><i data-lucide="lock" class="w-3 h-3"></i> in Bearbeitung</span>`
+    : '';
+  return `
+    <div class="flex items-center justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openSupplierModal('${rec.id}')">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="text-xs font-mono text-ink-500">${escapeHtml(f.supplier_no || '–')}</span>
+          <p class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'} truncate">${escapeHtml(f.name1 || '–')}</p>
+          ${archived ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-ink-200 text-ink-600 px-1.5 py-0.5 rounded">archiviert</span>' : ''}
+          ${lockedBadge}
+        </div>
+        ${f.name2 ? `<p class="text-sm text-ink-500 truncate">${escapeHtml(f.name2)}</p>` : ''}
+        <p class="text-xs text-ink-500 mt-0.5 truncate">
+          ${cityZip ? escapeHtml(cityZip) : '<span class="text-ink-400">— keine Adresse —</span>'}${contactSummary ? ' · ' + escapeHtml(contactSummary) : ''}
+        </p>
+      </div>
+      <div class="flex gap-1 shrink-0 ml-2" onclick="event.stopPropagation()">
+        <button onclick="openSupplierModal('${rec.id}')" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten">
+          <i data-lucide="pencil" class="w-4 h-4"></i>
+        </button>
+        <button onclick="toggleSupplierArchive('${rec.id}', ${!archived})" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="${archived ? 'Reaktivieren' : 'Archivieren'}">
+          <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function openSupplierModal(id) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  let f = {};
+  let contacts = [];
+  if (id) {
+    const [allSup, allCont] = await Promise.all([readData('Supplier'), readData('Contact')]);
+    const rec = allSup.find(r => r.id === id);
+    f = rec?.fields || {};
+    contacts = allCont.filter(c => (c.fields.supplier_id || []).includes(id));
+    const lockRes = await acquireLock('Supplier', id, rec);
+    if (!lockRes.ok) {
+      toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
+      return;
+    }
+  } else {
+    f.supplier_no = await nextSupplierNo(cur.id);
+    f.country = 'Deutschland';
+    f.status = 'aktiv';
+  }
+  openModal(`
+    <form onsubmit="saveSupplier(event, '${id || ''}')" class="p-6">
+      <div class="flex items-baseline justify-between mb-4">
+        <h3 class="text-lg font-bold text-ink-900">${id ? 'Lieferant bearbeiten' : 'Neuer Lieferant'}</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Name (Zeile 1) <span class="text-red-500">*</span></label>
+          <input name="name1" required value="${escapeHtml(f.name1 || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Name (Zeile 2)</label>
+          <input name="name2" value="${escapeHtml(f.name2 || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Lieferantennummer</label>
+          <input name="supplier_no" value="${escapeHtml(f.supplier_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+          <select name="status" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="aktiv" ${(f.status||'aktiv')==='aktiv'?'selected':''}>aktiv</option>
+            <option value="archiviert" ${f.status==='archiviert'?'selected':''}>archiviert</option>
+          </select>
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Adresse</h4>
+      <div class="grid grid-cols-12 gap-3">
+        <div class="col-span-12"><input name="street" placeholder="Straße + Nr." value="${escapeHtml(f.street || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div class="col-span-3"><input name="zip" placeholder="PLZ" value="${escapeHtml(f.zip || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div class="col-span-9"><input name="city" placeholder="Ort" value="${escapeHtml(f.city || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+        <div class="col-span-12"><input name="country" placeholder="Land" value="${escapeHtml(f.country || 'Deutschland')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30"></div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Kontakt (Firma)</h4>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Telefon</label>
+          <input name="phone" value="${escapeHtml(f.phone || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">E-Mail</label>
+          <input name="email" type="email" value="${escapeHtml(f.email || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Website</label>
+          <input name="website" placeholder="https://…" value="${escapeHtml(f.website || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Ansprechpartner</h4>
+      <div id="entityContactsWrap">${renderEntityContacts('supplier', id || '', contacts)}</div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Buchhaltung</h4>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">USt-IdNr</label>
+          <input name="vat_id" value="${escapeHtml(f.vat_id || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
+          <input name="payment_terms" placeholder="14 Tage netto" value="${escapeHtml(f.payment_terms || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen</h4>
+      <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveSupplier(e, id) {
+  e.preventDefault();
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  const fd = new FormData(e.target);
+  const fields = {};
+  ['name1','name2','supplier_no','street','zip','city','country','email','phone','website','vat_id','payment_terms','status','notes'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  if (!fields.name1) return toast('Name (Zeile 1) fehlt', 'error');
+  fields.status = fields.status || 'aktiv';
+  if (!id) fields.company_id = [cur.id];
+  if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
+  try {
+    if (id) await updateData('Supplier', id, fields);
+    else    await writeData('Supplier', fields);
+    if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
+    closeModal();
+    renderSuppliers();
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleSupplierArchive(id, archive) {
+  try {
+    await updateData('Supplier', id, { status: archive ? 'archiviert' : 'aktiv' });
+    renderSuppliers();
+    toast(archive ? 'Archiviert' : 'Reaktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
    STAMMDATEN: ANSPRECHPARTNER (Contact)
    ============================================================ */
-function renderCustomerContacts(customerId, contacts) {
-  if (!customerId) {
-    return '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Speichere zuerst den Kunden — danach kannst du Ansprechpartner hinzufügen.</p>';
+function renderEntityContacts(entity, entityId, contacts) {
+  if (!entityId) {
+    const word = entity === 'supplier' ? 'Lieferanten' : 'Kunden';
+    return `<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Speichere zuerst den ${word} — danach kannst du Ansprechpartner hinzufügen.</p>`;
   }
   const sorted = [...contacts].sort((a, b) => {
     const ap = a.fields.is_primary ? 0 : 1;
@@ -1501,11 +1782,11 @@ function renderCustomerContacts(customerId, contacts) {
   });
   const list = sorted.length === 0
     ? '<p id="contactsEmpty" class="text-xs text-ink-500 italic px-3 py-2">Noch keine Ansprechpartner.</p>'
-    : '<div id="contactsList" class="space-y-2">' + sorted.map(c => `<div data-contact-row="${c.id}">${contactRow(customerId, c)}</div>`).join('') + '</div>';
+    : '<div id="contactsList" class="space-y-2">' + sorted.map(c => `<div data-contact-row="${c.id}">${contactRow(entity, entityId, c)}</div>`).join('') + '</div>';
   return `
     ${list}
     <div id="contactInlineFormWrap" class="mt-2"></div>
-    <button id="addContactBtn" type="button" onclick="showContactInlineForm('${customerId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+    <button id="addContactBtn" type="button" onclick="showContactInlineForm('${entity}','${entityId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
       <i data-lucide="plus" class="w-4 h-4"></i> Ansprechpartner hinzufügen
     </button>
   `;
@@ -1522,7 +1803,7 @@ function contactSalutation(f) {
   return '';
 }
 
-function contactRow(customerId, c) {
+function contactRow(entity, entityId, c) {
   const f = c.fields || {};
   const summary = [f.email, f.phone, f.mobile].filter(Boolean).join(' · ');
   const sal = contactSalutation(f);
@@ -1537,10 +1818,10 @@ function contactRow(customerId, c) {
         ${summary ? `<p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(summary)}</p>` : ''}
       </div>
       <div class="flex gap-1 shrink-0 ml-2">
-        <button type="button" onclick="showContactInlineForm('${customerId}','${c.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
+        <button type="button" onclick="showContactInlineForm('${entity}','${entityId}','${c.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
           <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
         </button>
-        <button type="button" onclick="deleteContactInline('${customerId}','${c.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
+        <button type="button" onclick="deleteContactInline('${entity}','${entityId}','${c.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
           <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
         </button>
       </div>
@@ -1548,16 +1829,17 @@ function contactRow(customerId, c) {
   `;
 }
 
-async function showContactInlineForm(customerId, contactId) {
+async function showContactInlineForm(entity, entityId, contactId) {
   // Verhindern dass beim Bearbeiten ein zweites Formular auftaucht
   if (document.querySelector('#contactInlineFormWrap [data-contact-form]')) return;
 
+  const linkField = entity + '_id';
   let f = {};
   let othersExist = false;
   try {
     const all = await readData('Contact');
     if (contactId) f = all.find(r => r.id === contactId)?.fields || {};
-    const peers = all.filter(c => (c.fields.customer_id || []).includes(customerId) && c.id !== contactId);
+    const peers = all.filter(c => (c.fields[linkField] || []).includes(entityId) && c.id !== contactId);
     othersExist = peers.length > 0;
     if (!contactId && !peers.some(c => c.fields.is_primary)) f.is_primary = true;
   } catch (e) {}
@@ -1582,7 +1864,7 @@ async function showContactInlineForm(customerId, contactId) {
 
   document.getElementById('contactInlineFormWrap').innerHTML = `
     <div data-contact-form class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3"
-         onkeydown="if(event.key==='Enter'&&event.target.tagName!=='TEXTAREA'){event.preventDefault();saveContactInline('${customerId}','${contactId || ''}')}">
+         onkeydown="if(event.key==='Enter'&&event.target.tagName!=='TEXTAREA'){event.preventDefault();saveContactInline('${entity}','${entityId}','${contactId || ''}')}">
       <p class="text-sm font-semibold text-brand-700">${contactId ? 'Ansprechpartner bearbeiten' : 'Neuer Ansprechpartner'}</p>
 
       <div>
@@ -1637,8 +1919,8 @@ async function showContactInlineForm(customerId, contactId) {
       </label>
 
       <div class="flex justify-end gap-2 pt-1">
-        <button type="button" onclick="cancelContactInline('${customerId}','${contactId || ''}')" class="px-3 py-1.5 text-sm rounded-lg border border-ink-200 bg-white hover:bg-ink-50">Abbrechen</button>
-        <button type="button" onclick="saveContactInline('${customerId}','${contactId || ''}')" class="px-3 py-1.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+        <button type="button" onclick="cancelContactInline('${entity}','${entityId}','${contactId || ''}')" class="px-3 py-1.5 text-sm rounded-lg border border-ink-200 bg-white hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="saveContactInline('${entity}','${entityId}','${contactId || ''}')" class="px-3 py-1.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
       </div>
     </div>
   `;
@@ -1646,7 +1928,7 @@ async function showContactInlineForm(customerId, contactId) {
   setTimeout(() => document.getElementById(fid + (firstName ? '_last_name' : '_first_name'))?.focus(), 50);
 }
 
-function cancelContactInline(customerId, contactId) {
+function cancelContactInline(entity, entityId, contactId) {
   document.getElementById('contactInlineFormWrap').innerHTML = '';
   document.getElementById('addContactBtn')?.classList.remove('hidden');
   if (contactId) {
@@ -1655,7 +1937,8 @@ function cancelContactInline(customerId, contactId) {
   }
 }
 
-async function saveContactInline(customerId, contactId) {
+async function saveContactInline(entity, entityId, contactId) {
+  const linkField = entity + '_id';
   const fid = 'cif_' + (contactId || 'new');
   const $v = id => (document.getElementById(fid + '_' + id)?.value || '').trim();
   const firstName = $v('first_name');
@@ -1673,13 +1956,13 @@ async function saveContactInline(customerId, contactId) {
     is_primary: document.getElementById(fid + '_is_primary')?.checked || false
   };
   if (genderInput) fields.gender = genderInput.value;
-  if (!contactId) fields.customer_id = [customerId];
+  if (!contactId) fields[linkField] = [entityId];
 
   try {
     if (fields.is_primary) {
       const all = await readData('Contact');
       const others = all.filter(c =>
-        (c.fields.customer_id || []).includes(customerId) &&
+        (c.fields[linkField] || []).includes(entityId) &&
         c.fields.is_primary &&
         c.id !== contactId
       );
@@ -1689,16 +1972,16 @@ async function saveContactInline(customerId, contactId) {
     else           await writeData('Contact', fields);
     document.getElementById('contactInlineFormWrap').innerHTML = '';
     document.getElementById('addContactBtn')?.classList.remove('hidden');
-    await refreshCustomerContactsSection(customerId);
+    await refreshEntityContactsSection(entity, entityId);
     toast('Gespeichert', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
-async function deleteContactInline(customerId, contactId) {
+async function deleteContactInline(entity, entityId, contactId) {
   if (!confirm('Diesen Ansprechpartner wirklich löschen?')) return;
   try {
     await deleteData('Contact', contactId);
-    await refreshCustomerContactsSection(customerId);
+    await refreshEntityContactsSection(entity, entityId);
     toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -1719,28 +2002,40 @@ async function renderContactsList() {
   }
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Kontakte…</p>';
 
-  let customers = [], contacts = [];
+  let customers = [], suppliers = [], contacts = [];
   try {
-    [customers, contacts] = await Promise.all([readData('Customer'), readData('Contact')]);
+    [customers, suppliers, contacts] = await Promise.all([readData('Customer'), readData('Supplier'), readData('Contact')]);
   } catch (e) { toast(e.message, 'error'); }
 
   const custInCompany = customers.filter(c => (c.fields.company_id || []).includes(cur.id));
+  const supInCompany  = suppliers.filter(s => (s.fields.company_id || []).includes(cur.id));
+  const custMap = {}; custInCompany.forEach(c => { custMap[c.id] = c.fields; });
+  const supMap  = {}; supInCompany.forEach (s => { supMap[s.id]  = s.fields; });
   const custIds = new Set(custInCompany.map(c => c.id));
-  const custMap = {};
-  custInCompany.forEach(c => { custMap[c.id] = c.fields; });
+  const supIds  = new Set(supInCompany.map(s => s.id));
 
   let list = contacts.filter(c => {
     const cid = (c.fields.customer_id || [])[0];
-    return cid && custIds.has(cid);
+    const sid = (c.fields.supplier_id || [])[0];
+    return (cid && custIds.has(cid)) || (sid && supIds.has(sid));
   });
+
+  const ownerOf = c => {
+    const cid = (c.fields.customer_id || [])[0];
+    const sid = (c.fields.supplier_id || [])[0];
+    if (cid && custMap[cid]) return { type: 'customer', id: cid, rec: custMap[cid] };
+    if (sid && supMap[sid])  return { type: 'supplier', id: sid, rec: supMap[sid] };
+    return null;
+  };
 
   const q = _contactListState.search.trim().toLowerCase();
   if (q) {
     list = list.filter(c => {
       const f = c.fields;
-      const cid = (f.customer_id || [])[0];
-      const cust = custMap[cid] || {};
-      return [f.first_name, f.last_name, f.name, f.email, f.phone, f.mobile, f.role, cust.name1, cust.name2, cust.customer_no]
+      const o = ownerOf(c);
+      const ownerFields = o?.rec || {};
+      return [f.first_name, f.last_name, f.name, f.email, f.phone, f.mobile, f.role,
+              ownerFields.name1, ownerFields.name2, ownerFields.customer_no, ownerFields.supplier_no]
         .some(v => (v || '').toLowerCase().includes(q));
     });
   }
@@ -1748,9 +2043,9 @@ async function renderContactsList() {
   const sortKey = _contactListState.sort;
   list.sort((a, b) => {
     if (sortKey === 'customer') {
-      const ac = (custMap[(a.fields.customer_id || [])[0]]?.name1 || '').toLowerCase();
-      const bc = (custMap[(b.fields.customer_id || [])[0]]?.name1 || '').toLowerCase();
-      const cmp = ac.localeCompare(bc, 'de');
+      const ao = ownerOf(a)?.rec?.name1 || '';
+      const bo = ownerOf(b)?.rec?.name1 || '';
+      const cmp = ao.toLowerCase().localeCompare(bo.toLowerCase(), 'de');
       if (cmp !== 0) return cmp;
     }
     const av = (a.fields[sortKey === 'first_name' ? 'first_name' : 'last_name'] || a.fields.name || '').toLowerCase();
@@ -1777,13 +2072,13 @@ async function renderContactsList() {
           <select onchange="_contactListState.sort=this.value;renderContactsList()" class="text-sm border border-ink-200 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500/30">
             <option value="last_name"  ${sortKey==='last_name'?'selected':''}>Nachname</option>
             <option value="first_name" ${sortKey==='first_name'?'selected':''}>Vorname</option>
-            <option value="customer"   ${sortKey==='customer'?'selected':''}>Kunde</option>
+            <option value="customer"   ${sortKey==='customer'?'selected':''}>Kunde / Lieferant</option>
           </select>
         </div>
         <div class="divide-y divide-ink-100">
           ${list.length === 0
-            ? `<div class="p-10 text-center text-ink-500 text-sm">${q ? 'Keine Treffer.' : 'Noch keine Kontakte. Lege sie über einen Kunden an.'}</div>`
-            : list.map(c => allContactRow(c, custMap[(c.fields.customer_id || [])[0]])).join('')}
+            ? `<div class="p-10 text-center text-ink-500 text-sm">${q ? 'Keine Treffer.' : 'Noch keine Kontakte. Lege sie über einen Kunden oder Lieferanten an.'}</div>`
+            : list.map(c => allContactRow(c, ownerOf(c))).join('')}
         </div>
       </div>
     </div>
@@ -1797,36 +2092,49 @@ function onContactListSearch(value) {
   _contactSearchTimer = setTimeout(() => renderContactsList(), 200);
 }
 
-function allContactRow(c, cust) {
+function allContactRow(c, owner) {
   const f = c.fields || {};
-  const cid = (f.customer_id || [])[0];
   const sal = contactSalutation(f);
   const fullName = (sal ? sal + ' ' : '') + contactDisplayName(f);
   const summary = [f.email, f.phone, f.mobile].filter(Boolean).join(' · ');
-  const custLabel = cust ? (cust.customer_no ? cust.customer_no + ' · ' : '') + (cust.name1 || '–') : '— ohne Kunde —';
+  const ownerNo = owner?.rec?.customer_no || owner?.rec?.supplier_no || '';
+  const ownerName = owner?.rec?.name1 || '–';
+  const ownerLabel = owner ? (ownerNo ? ownerNo + ' · ' : '') + ownerName : '— ohne Zuordnung —';
+  const typeBadge = owner?.type === 'customer'
+    ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">Kunde</span>'
+    : owner?.type === 'supplier'
+      ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">Lieferant</span>'
+      : '';
+  const onClick = owner?.type === 'customer'
+    ? `openCustomerModal('${owner.id}')`
+    : owner?.type === 'supplier'
+      ? `openSupplierModal('${owner.id}')`
+      : '';
   return `
-    <div class="flex items-center justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openCustomerModal('${cid}')">
+    <div class="flex items-center justify-between p-4 hover:bg-ink-50 transition ${onClick ? 'cursor-pointer' : ''}" ${onClick ? `onclick="${onClick}"` : ''}>
       <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2 flex-wrap">
           ${f.is_primary ? '<i data-lucide="star" class="w-3.5 h-3.5 text-amber-500" style="fill:currentColor"></i>' : ''}
           <p class="font-medium text-ink-900 truncate">${escapeHtml(fullName)}</p>
           ${f.role ? `<span class="text-xs text-ink-500">· ${escapeHtml(f.role)}</span>` : ''}
+          ${typeBadge}
         </div>
-        <p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(custLabel)}</p>
+        <p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(ownerLabel)}</p>
         ${summary ? `<p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(summary)}</p>` : ''}
       </div>
-      <i data-lucide="chevron-right" class="w-4 h-4 text-ink-300 shrink-0"></i>
+      ${onClick ? '<i data-lucide="chevron-right" class="w-4 h-4 text-ink-300 shrink-0"></i>' : ''}
     </div>
   `;
 }
 
-async function refreshCustomerContactsSection(customerId) {
-  const wrap = document.getElementById('customerContactsWrap');
+async function refreshEntityContactsSection(entity, entityId) {
+  const wrap = document.getElementById('entityContactsWrap');
   if (!wrap) return;
+  const linkField = entity + '_id';
   try {
     const all = await readData('Contact');
-    const contacts = all.filter(c => (c.fields.customer_id || []).includes(customerId));
-    wrap.innerHTML = renderCustomerContacts(customerId, contacts);
+    const contacts = all.filter(c => (c.fields[linkField] || []).includes(entityId));
+    wrap.innerHTML = renderEntityContacts(entity, entityId, contacts);
     if (window.lucide) lucide.createIcons();
   } catch (e) { toast(e.message, 'error'); }
 }
