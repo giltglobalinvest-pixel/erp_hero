@@ -198,6 +198,10 @@
               <i data-lucide="user-round" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Kunden</span>
             </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="kontakte">
+              <i data-lucide="contact-round" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Kontakte</span>
+            </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed" data-route="lieferanten">
               <i data-lucide="truck" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Lieferanten</span>
@@ -370,7 +374,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.0';
+const APP_VERSION = 'v2.1';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -390,7 +394,8 @@ const APP_KEYS = {
   appBaseId: null,
   user: null,
   companies: [],
-  currentCompanyId: null
+  currentCompanyId: null,
+  usersById: {}
 };
 
 /* ============================================================
@@ -440,8 +445,8 @@ async function loginWithUserKey(userKey) {
     }
   }
 
-  // 4. Firmen laden (gefiltert auf user.allowed_companies, Admin sieht alle)
-  await loadCompanies();
+  // 4. Firmen + User-Cache (für Lock-Anzeige) laden
+  await Promise.all([loadCompanies(), loadUsersCache()]);
 
   // 5. Key persistieren
   localStorage.setItem('user_key_' + APP_CONFIG.PROJECT_ID, userKey);
@@ -490,7 +495,8 @@ function setCurrentCompany(companyId) {
   renderMandantenSwitcher();
   toast('Mandant gewechselt: ' + getCurrentCompany().name, 'success');
   // Datenviews neu rendern
-  if (_currentRoute === 'kunden') renderCustomers();
+  if (_currentRoute === 'kunden')   renderCustomers();
+  if (_currentRoute === 'kontakte') renderContactsList();
 }
 
 function renderMandantenSwitcher() {
@@ -513,6 +519,92 @@ function renderMandantenSwitcher() {
 function toggleMandantenMenu() {
   document.getElementById('mandantMenu')?.classList.toggle('hidden');
 }
+
+/* ============================================================
+   USER-CACHE (für Lock-Anzeige)
+   ============================================================ */
+async function loadUsersCache() {
+  try {
+    const all = await readData('User');
+    const map = {};
+    all.forEach(u => { map[u.id] = u.fields; });
+    APP_KEYS.usersById = map;
+  } catch (e) { APP_KEYS.usersById = {}; }
+}
+
+function userLabel(userId) {
+  if (!userId) return '';
+  if (userId === APP_KEYS.user?._id) return 'dir';
+  return APP_KEYS.usersById[userId]?.name || 'einem anderen Benutzer';
+}
+
+/* ============================================================
+   RECORD LOCKING
+   ============================================================ */
+const LOCK_TTL_MS = 5 * 60 * 1000;     // 5 Minuten
+const LOCK_REFRESH_MS = 2 * 60 * 1000; // alle 2 Minuten verlängern
+let _currentLock = null;
+let _lockRefreshTimer = null;
+
+function getLockInfo(record) {
+  const f = record?.fields || {};
+  if (!f.lock_user_id || !f.lock_until) return null;
+  const until = Date.parse(f.lock_until);
+  if (!isFinite(until) || until < Date.now()) return null;
+  return { userId: f.lock_user_id, until };
+}
+
+function isLockedByOther(record) {
+  const lock = getLockInfo(record);
+  return !!(lock && lock.userId !== APP_KEYS.user?._id);
+}
+
+async function acquireLock(table, recordId, currentRecord) {
+  const lock = getLockInfo(currentRecord);
+  if (lock && lock.userId !== APP_KEYS.user?._id) {
+    return { ok: false, lockedBy: userLabel(lock.userId) };
+  }
+  const until = new Date(Date.now() + LOCK_TTL_MS).toISOString();
+  await updateData(table, recordId, { lock_user_id: APP_KEYS.user._id, lock_until: until });
+  startLockHeartbeat(table, recordId);
+  return { ok: true };
+}
+
+async function releaseLock(table, recordId) {
+  stopLockHeartbeat();
+  if (!APP_KEYS.user) return;
+  try { await updateData(table, recordId, { lock_user_id: '', lock_until: '' }); } catch (e) {}
+}
+
+function startLockHeartbeat(table, recordId) {
+  stopLockHeartbeat();
+  _currentLock = { table, recordId };
+  _lockRefreshTimer = setInterval(async () => {
+    try {
+      await updateData(table, recordId, { lock_until: new Date(Date.now() + LOCK_TTL_MS).toISOString() });
+    } catch (e) {}
+  }, LOCK_REFRESH_MS);
+}
+
+function stopLockHeartbeat() {
+  if (_lockRefreshTimer) clearInterval(_lockRefreshTimer);
+  _lockRefreshTimer = null;
+}
+
+// Lock auch bei Tab-Schließen freigeben (Best-Effort)
+window.addEventListener('beforeunload', () => {
+  if (!_currentLock || !APP_KEYS.airtableWriteKey) return;
+  try {
+    const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(_currentLock.table) + '/' + _currentLock.recordId;
+    navigator.sendBeacon && navigator.sendBeacon(url); // beacon kann kein PATCH → Best-Effort sync fetch
+    fetch(url, {
+      method: 'PATCH',
+      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { lock_user_id: '', lock_until: '' } }),
+      keepalive: true
+    });
+  } catch (e) {}
+});
 
 async function tryAutoLogin() {
   const savedKey = localStorage.getItem('user_key_' + APP_CONFIG.PROJECT_ID);
@@ -805,6 +897,11 @@ function openModal(html) {
 function closeModal() {
   document.getElementById('modalBackdrop').classList.add('hidden');
   document.getElementById('modalBox').innerHTML = '';
+  if (_currentLock) {
+    const lock = _currentLock;
+    _currentLock = null;
+    releaseLock(lock.table, lock.recordId);
+  }
 }
 function openModal2(html) {
   document.getElementById('modalBox2').innerHTML = html;
@@ -826,6 +923,7 @@ function dispatchRoute(route) {
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('bg-brand-700', b.dataset.route === route));
   switch (route) {
     case 'kunden':          renderCustomers(); break;
+    case 'kontakte':        renderContactsList(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
     default:                renderWelcome();
@@ -1223,6 +1321,11 @@ function customerRow(rec, primary) {
   const contactSummary = primary
     ? (contactSalutation(primary) ? contactSalutation(primary) + ' ' : '') + contactDisplayName(primary) + (primary.role ? ' (' + primary.role + ')' : '')
     : '';
+  const lockedByOther = isLockedByOther(rec);
+  const lockInfo = getLockInfo(rec);
+  const lockedBadge = lockedByOther
+    ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Wird gerade von ${escapeHtml(userLabel(lockInfo.userId))} bearbeitet"><i data-lucide="lock" class="w-3 h-3"></i> in Bearbeitung</span>`
+    : '';
   return `
     <div class="flex items-center justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openCustomerModal('${rec.id}')">
       <div class="min-w-0 flex-1">
@@ -1230,6 +1333,7 @@ function customerRow(rec, primary) {
           <span class="text-xs font-mono text-ink-500">${escapeHtml(f.customer_no || '–')}</span>
           <p class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'} truncate">${escapeHtml(f.name1 || '–')}</p>
           ${archived ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-ink-200 text-ink-600 px-1.5 py-0.5 rounded">archiviert</span>' : ''}
+          ${lockedBadge}
         </div>
         ${f.name2 ? `<p class="text-sm text-ink-500 truncate">${escapeHtml(f.name2)}</p>` : ''}
         <p class="text-xs text-ink-500 mt-0.5 truncate">
@@ -1255,8 +1359,15 @@ async function openCustomerModal(id) {
   let contacts = [];
   if (id) {
     const [allCust, allCont] = await Promise.all([readData('Customer'), readData('Contact')]);
-    f = allCust.find(r => r.id === id)?.fields || {};
+    const rec = allCust.find(r => r.id === id);
+    f = rec?.fields || {};
     contacts = allCont.filter(c => (c.fields.customer_id || []).includes(id));
+    // Lock akquirieren
+    const lockRes = await acquireLock('Customer', id, rec);
+    if (!lockRes.ok) {
+      toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
+      return;
+    }
   } else {
     f.customer_no = await nextCustomerNo(cur.id);
     f.country = 'Deutschland';
@@ -1353,9 +1464,12 @@ async function saveCustomer(e, id) {
   if (!fields.name1) return toast('Name (Zeile 1) fehlt', 'error');
   fields.status = fields.status || 'aktiv';
   if (!id) fields.company_id = [cur.id];
+  // Lock beim Speichern direkt freigeben (im selben PATCH)
+  if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
   try {
     if (id) await updateData('Customer', id, fields);
     else    await writeData('Customer', fields);
+    if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
     closeModal();
     renderCustomers();
     toast('Gespeichert', 'success');
@@ -1410,7 +1524,7 @@ function contactSalutation(f) {
 
 function contactRow(customerId, c) {
   const f = c.fields || {};
-  const summary = [f.email, f.phone].filter(Boolean).join(' · ');
+  const summary = [f.email, f.phone, f.mobile].filter(Boolean).join(' · ');
   const sal = contactSalutation(f);
   return `
     <div class="flex items-center justify-between p-3 bg-ink-50 rounded-lg border border-ink-100">
@@ -1501,14 +1615,19 @@ async function showContactInlineForm(customerId, contactId) {
         <input id="${fid}_role" value="${escapeHtml(f.role || '')}" placeholder="z.B. Geschäftsführung, Einkauf, Buchhaltung" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
       </div>
 
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">E-Mail</label>
+        <input id="${fid}_email" type="email" value="${escapeHtml(f.email || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+
       <div class="grid grid-cols-2 gap-2">
-        <div>
-          <label class="block text-xs font-medium text-ink-700 mb-1">E-Mail</label>
-          <input id="${fid}_email" type="email" value="${escapeHtml(f.email || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Telefon</label>
           <input id="${fid}_phone" value="${escapeHtml(f.phone || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Mobil</label>
+          <input id="${fid}_mobile" value="${escapeHtml(f.mobile || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
@@ -1550,6 +1669,7 @@ async function saveContactInline(customerId, contactId) {
     role:       $v('role'),
     email:      $v('email'),
     phone:      $v('phone'),
+    mobile:     $v('mobile'),
     is_primary: document.getElementById(fid + '_is_primary')?.checked || false
   };
   if (genderInput) fields.gender = genderInput.value;
@@ -1581,6 +1701,123 @@ async function deleteContactInline(customerId, contactId) {
     await refreshCustomerContactsSection(customerId);
     toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   STAMMDATEN: ALLE KONTAKTE (mandantenweite Übersicht)
+   ============================================================ */
+const _contactListState = { search: '', sort: 'last_name' };
+let _contactSearchTimer = null;
+
+async function renderContactsList() {
+  setPageTitle('Kontakte');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt. Bitte links eine Firma wählen.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Kontakte…</p>';
+
+  let customers = [], contacts = [];
+  try {
+    [customers, contacts] = await Promise.all([readData('Customer'), readData('Contact')]);
+  } catch (e) { toast(e.message, 'error'); }
+
+  const custInCompany = customers.filter(c => (c.fields.company_id || []).includes(cur.id));
+  const custIds = new Set(custInCompany.map(c => c.id));
+  const custMap = {};
+  custInCompany.forEach(c => { custMap[c.id] = c.fields; });
+
+  let list = contacts.filter(c => {
+    const cid = (c.fields.customer_id || [])[0];
+    return cid && custIds.has(cid);
+  });
+
+  const q = _contactListState.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter(c => {
+      const f = c.fields;
+      const cid = (f.customer_id || [])[0];
+      const cust = custMap[cid] || {};
+      return [f.first_name, f.last_name, f.name, f.email, f.phone, f.mobile, f.role, cust.name1, cust.name2, cust.customer_no]
+        .some(v => (v || '').toLowerCase().includes(q));
+    });
+  }
+
+  const sortKey = _contactListState.sort;
+  list.sort((a, b) => {
+    if (sortKey === 'customer') {
+      const ac = (custMap[(a.fields.customer_id || [])[0]]?.name1 || '').toLowerCase();
+      const bc = (custMap[(b.fields.customer_id || [])[0]]?.name1 || '').toLowerCase();
+      const cmp = ac.localeCompare(bc, 'de');
+      if (cmp !== 0) return cmp;
+    }
+    const av = (a.fields[sortKey === 'first_name' ? 'first_name' : 'last_name'] || a.fields.name || '').toLowerCase();
+    const bv = (b.fields[sortKey === 'first_name' ? 'first_name' : 'last_name'] || b.fields.name || '').toLowerCase();
+    return av.localeCompare(bv, 'de');
+  });
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-5xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-xl font-bold text-ink-900">Kontakte</h2>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
+        </div>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
+        <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
+          <div class="relative flex-1 min-w-[180px]">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>
+            <input type="search" value="${escapeHtml(_contactListState.search)}" placeholder="Suchen…" oninput="onContactListSearch(this.value)"
+                   class="w-full pl-9 pr-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          <label class="text-xs text-ink-500">Sortierung:</label>
+          <select onchange="_contactListState.sort=this.value;renderContactsList()" class="text-sm border border-ink-200 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="last_name"  ${sortKey==='last_name'?'selected':''}>Nachname</option>
+            <option value="first_name" ${sortKey==='first_name'?'selected':''}>Vorname</option>
+            <option value="customer"   ${sortKey==='customer'?'selected':''}>Kunde</option>
+          </select>
+        </div>
+        <div class="divide-y divide-ink-100">
+          ${list.length === 0
+            ? `<div class="p-10 text-center text-ink-500 text-sm">${q ? 'Keine Treffer.' : 'Noch keine Kontakte. Lege sie über einen Kunden an.'}</div>`
+            : list.map(c => allContactRow(c, custMap[(c.fields.customer_id || [])[0]])).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function onContactListSearch(value) {
+  _contactListState.search = value;
+  clearTimeout(_contactSearchTimer);
+  _contactSearchTimer = setTimeout(() => renderContactsList(), 200);
+}
+
+function allContactRow(c, cust) {
+  const f = c.fields || {};
+  const cid = (f.customer_id || [])[0];
+  const sal = contactSalutation(f);
+  const fullName = (sal ? sal + ' ' : '') + contactDisplayName(f);
+  const summary = [f.email, f.phone, f.mobile].filter(Boolean).join(' · ');
+  const custLabel = cust ? (cust.customer_no ? cust.customer_no + ' · ' : '') + (cust.name1 || '–') : '— ohne Kunde —';
+  return `
+    <div class="flex items-center justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openCustomerModal('${cid}')">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          ${f.is_primary ? '<i data-lucide="star" class="w-3.5 h-3.5 text-amber-500" style="fill:currentColor"></i>' : ''}
+          <p class="font-medium text-ink-900 truncate">${escapeHtml(fullName)}</p>
+          ${f.role ? `<span class="text-xs text-ink-500">· ${escapeHtml(f.role)}</span>` : ''}
+        </div>
+        <p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(custLabel)}</p>
+        ${summary ? `<p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(summary)}</p>` : ''}
+      </div>
+      <i data-lucide="chevron-right" class="w-4 h-4 text-ink-300 shrink-0"></i>
+    </div>
+  `;
 }
 
 async function refreshCustomerContactsSection(customerId) {
