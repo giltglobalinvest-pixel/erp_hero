@@ -10,9 +10,9 @@
 <meta name="apple-mobile-web-app-title" content="ERP Hero" />
 <meta name="format-detection" content="telephone=no" />
 <title>ERP Hero – FLP Lift Parts</title>
-<!-- Apple-Touch-Icon: Inline-SVG als initialer Wert; wird beim Laden via Canvas durch echtes PNG ersetzt -->
-<link id="appleTouchIcon" rel="apple-touch-icon" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' fill='%23FFFFFF'/%3E%3Crect x='20' y='60' width='42' height='60' fill='%23575756'/%3E%3Crect x='69' y='60' width='42' height='60' fill='%23007EAC'/%3E%3Crect x='118' y='60' width='42' height='60' fill='%23007EAC'/%3E%3Ctext x='41' y='100' font-family='Arial' font-weight='900' font-size='40' fill='white' text-anchor='middle' dominant-baseline='middle'%3EF%3C/text%3E%3Ctext x='90' y='100' font-family='Arial' font-weight='900' font-size='40' fill='white' text-anchor='middle' dominant-baseline='middle'%3EL%3C/text%3E%3Ctext x='139' y='100' font-family='Arial' font-weight='900' font-size='40' fill='white' text-anchor='middle' dominant-baseline='middle'%3EP%3C/text%3E%3C/svg%3E" />
-<link id="appFavicon" rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' fill='%23FFFFFF'/%3E%3Crect x='20' y='60' width='42' height='60' fill='%23575756'/%3E%3Crect x='69' y='60' width='42' height='60' fill='%23007EAC'/%3E%3Crect x='118' y='60' width='42' height='60' fill='%23007EAC'/%3E%3C/svg%3E" />
+<!-- Apple-Touch-Icon: Inline-SVG-Maskottchen als initialer Wert; wird beim Laden via Canvas durch echtes PNG ersetzt -->
+<link id="appleTouchIcon" rel="apple-touch-icon" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' fill='%23FFFFFF'/%3E%3Cpath d='M 30 130 L 15 178 L 70 165 L 110 165 L 165 178 L 150 130 Z' fill='%23DC2626'/%3E%3Cellipse cx='90' cy='195' rx='55' ry='35' fill='%231FA8D6'/%3E%3Crect x='80' y='130' width='20' height='15' fill='%23F4C795'/%3E%3Ccircle cx='90' cy='100' r='38' fill='%23F4C795'/%3E%3Cpath d='M 60 95 Q 60 88 70 88 L 110 88 Q 120 88 120 95 L 120 102 Q 120 108 110 108 L 70 108 Q 60 108 60 102 Z' fill='%230F172A'/%3E%3Cellipse cx='76' cy='98' rx='6' ry='5' fill='%23FFFFFF'/%3E%3Cellipse cx='104' cy='98' rx='6' ry='5' fill='%23FFFFFF'/%3E%3Ccircle cx='77' cy='99' r='2.5' fill='%230F172A'/%3E%3Ccircle cx='105' cy='99' r='2.5' fill='%230F172A'/%3E%3Cpath d='M 80 120 Q 90 128 100 120' stroke='%231F2937' stroke-width='3' stroke-linecap='round' fill='none'/%3E%3Cpath d='M 50 80 Q 50 50 90 50 Q 130 50 130 80 L 130 87 L 50 87 Z' fill='%231FA8D6'/%3E%3Cellipse cx='115' cy='86' rx='35' ry='6' fill='%23157699'/%3E%3Ctext x='90' y='76' font-family='Impact,Arial,sans-serif' font-weight='900' font-size='22' fill='%23FFFFFF' text-anchor='middle'%3EFLP%3C/text%3E%3C/svg%3E" />
+<link id="appFavicon" rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' fill='%23FFFFFF'/%3E%3Ccircle cx='90' cy='100' r='38' fill='%23F4C795'/%3E%3Cpath d='M 50 80 Q 50 50 90 50 Q 130 50 130 80 L 130 87 L 50 87 Z' fill='%231FA8D6'/%3E%3Cellipse cx='115' cy='86' rx='35' ry='6' fill='%23157699'/%3E%3Ctext x='90' y='76' font-family='Impact,Arial,sans-serif' font-weight='900' font-size='22' fill='%23FFFFFF' text-anchor='middle'%3EFLP%3C/text%3E%3C/svg%3E" />
 <link id="appManifest" rel="manifest" />
 
 <script src="https://cdn.tailwindcss.com"></script>
@@ -396,7 +396,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.6';
+const APP_VERSION = 'v2.7';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -3046,62 +3046,77 @@ async function checkForUpdate() {
 }
 
 /* ============================================================
-   PWA: APP-ICON (Canvas → PNG, ersetzt Inline-SVG-Default)
+   PWA: APP-ICON (FLP Hero-Maskottchen, SVG → Canvas → PNG)
    ============================================================ */
-function drawAppIcon(size) {
-  const cv = document.createElement('canvas');
-  cv.width = size; cv.height = size;
-  const ctx = cv.getContext('2d');
-  // weißer Hintergrund (iOS rundet die Ecken automatisch)
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, size, size);
-  // 3 Quadrate F · L · P
-  const sqW = Math.round(size * 0.235);
-  const sqH = Math.round(size * 0.335);
-  const gap = Math.round(size * 0.02);
-  const totalW = sqW * 3 + gap * 2;
-  const startX = Math.round((size - totalW) / 2);
-  const y = Math.round((size - sqH) / 2);
-  const colors = ['#575756', '#007EAC', '#007EAC'];
-  const letters = ['F', 'L', 'P'];
-  ctx.font = '900 ' + Math.round(sqH * 0.65) + 'px Arial Black, Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i < 3; i++) {
-    const x = startX + i * (sqW + gap);
-    ctx.fillStyle = colors[i];
-    ctx.fillRect(x, y, sqW, sqH);
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillText(letters[i], x + sqW / 2, y + sqH / 2 + 1);
-  }
-  return cv.toDataURL('image/png');
+function _heroSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
+    <rect width="180" height="180" fill="#FFFFFF"/>
+    <path d="M 30 130 L 15 178 L 70 165 L 110 165 L 165 178 L 150 130 Z" fill="#DC2626"/>
+    <ellipse cx="90" cy="195" rx="55" ry="35" fill="#1FA8D6"/>
+    <rect x="80" y="130" width="20" height="15" fill="#F4C795"/>
+    <circle cx="90" cy="100" r="38" fill="#F4C795"/>
+    <path d="M 60 95 Q 60 88 70 88 L 110 88 Q 120 88 120 95 L 120 102 Q 120 108 110 108 L 70 108 Q 60 108 60 102 Z" fill="#0F172A"/>
+    <ellipse cx="76" cy="98" rx="6" ry="5" fill="#FFFFFF"/>
+    <ellipse cx="104" cy="98" rx="6" ry="5" fill="#FFFFFF"/>
+    <circle cx="77" cy="99" r="2.5" fill="#0F172A"/>
+    <circle cx="105" cy="99" r="2.5" fill="#0F172A"/>
+    <path d="M 80 120 Q 90 128 100 120" stroke="#1F2937" stroke-width="3" stroke-linecap="round" fill="none"/>
+    <path d="M 50 80 Q 50 50 90 50 Q 130 50 130 80 L 130 87 L 50 87 Z" fill="#1FA8D6"/>
+    <ellipse cx="115" cy="86" rx="35" ry="6" fill="#157699"/>
+  </svg>`;
 }
 
-function setupPwaAssets() {
-  try {
-    const apple = drawAppIcon(180);
-    const fav   = drawAppIcon(64);
-    const i192  = drawAppIcon(192);
-    const i512  = drawAppIcon(512);
-    document.getElementById('appleTouchIcon')?.setAttribute('href', apple);
-    const favLink = document.getElementById('appFavicon');
-    if (favLink) { favLink.setAttribute('type', 'image/png'); favLink.setAttribute('href', fav); }
-    const manifest = {
-      name: 'ERP Hero',
-      short_name: 'ERP Hero',
-      description: 'FLP Lift Parts ERP',
-      start_url: location.pathname,
-      scope: location.pathname,
-      display: 'standalone',
-      background_color: '#1FA8D6',
-      theme_color: '#1FA8D6',
-      icons: [
-        { src: i192, sizes: '192x192', type: 'image/png', purpose: 'any' },
-        { src: i512, sizes: '512x512', type: 'image/png', purpose: 'any' }
-      ]
+function drawAppIcon(size) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const cv = document.createElement('canvas');
+        cv.width = size; cv.height = size;
+        const ctx = cv.getContext('2d');
+        ctx.drawImage(img, 0, 0, size, size);
+        // FLP-Schriftzug auf der Cap separat per Canvas zeichnen — funktioniert browser-übergreifend zuverlässiger als <text> in SVG-zu-PNG
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '900 ' + Math.round(size * 0.115) + 'px Impact, "Arial Black", Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('FLP', size * 0.5, size * 0.40);
+        resolve(cv.toDataURL('image/png'));
+      } catch (e) { resolve(null); }
     };
-    const url = 'data:application/json;base64,' + btoa(unescape(encodeURIComponent(JSON.stringify(manifest))));
-    document.getElementById('appManifest')?.setAttribute('href', url);
+    img.onerror = () => resolve(null);
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(_heroSvg());
+  });
+}
+
+async function setupPwaAssets() {
+  try {
+    const [apple, fav, i192, i512] = await Promise.all([
+      drawAppIcon(180), drawAppIcon(64), drawAppIcon(192), drawAppIcon(512)
+    ]);
+    if (apple) document.getElementById('appleTouchIcon')?.setAttribute('href', apple);
+    if (fav) {
+      const f = document.getElementById('appFavicon');
+      if (f) { f.setAttribute('type', 'image/png'); f.setAttribute('href', fav); }
+    }
+    if (i192 && i512) {
+      const manifest = {
+        name: 'ERP Hero',
+        short_name: 'ERP Hero',
+        description: 'FLP Lift Parts ERP',
+        start_url: location.pathname,
+        scope: location.pathname,
+        display: 'standalone',
+        background_color: '#1FA8D6',
+        theme_color: '#1FA8D6',
+        icons: [
+          { src: i192, sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: i512, sizes: '512x512', type: 'image/png', purpose: 'any' }
+        ]
+      };
+      const url = 'data:application/json;base64,' + btoa(unescape(encodeURIComponent(JSON.stringify(manifest))));
+      document.getElementById('appManifest')?.setAttribute('href', url);
+    }
   } catch (e) { /* still */ }
 }
 
