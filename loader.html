@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="ERP Hero">
+<title>ERP Hero</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{height:100%;font-family:-apple-system,system-ui,Segoe UI,Roboto,sans-serif;}
+body{display:flex;align-items:center;justify-content:center;background:#0d0d0d;color:#fff;}
+.loader{text-align:center;padding:30px;max-width:420px;width:100%;}
+.icon{font-size:64px;margin-bottom:18px;}
+.title{font-size:22px;font-weight:700;margin-bottom:6px;}
+.sub{font-size:13px;color:#888;margin-bottom:24px;}
+.spinner{width:36px;height:36px;border:3px solid #333;border-top-color:#00e676;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 16px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.status{font-family:monospace;font-size:11px;color:#666;}
+.err{color:#ff5252;background:#2a1010;padding:12px 16px;border-radius:8px;border:1px solid #5a2020;margin-top:12px;font-size:12px;text-align:left;line-height:1.5;}
+.btn{display:inline-block;margin:8px 4px 0;padding:10px 20px;background:#00e676;color:#0d0d0d;border:none;border-radius:8px;font-weight:700;cursor:pointer;text-decoration:none;font-size:13px;font-family:inherit;}
+.btn.gray{background:#888;color:#fff;}
+</style>
+</head>
+<body>
+<div class="loader" id="loader">
+<div class="icon">📋</div>
+<div class="title">ERP Hero</div>
+<div class="sub">Lade neueste Version...</div>
+<div class="spinner"></div>
+<div class="status" id="status">Verbinde...</div>
+</div>
+<script>
+(async function(){
+var REPO='giltglobalinvest-pixel/erp_hero';
+var FILENAME='index.html';
+var POLL_MIN=5;
+var loaderEl=document.getElementById('loader');
+var statusEl=document.getElementById('status');
+function setStatus(msg){if(statusEl&&statusEl.parentNode)statusEl.textContent=msg;}
+function escHtml(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function showError(msg,hint,allowCached){
+var html='<div class="err">'+escHtml(msg)+(hint?'<br><br><strong>Tipp:</strong> '+escHtml(hint):'')+'</div>';
+html+='<button class="btn" onclick="location.reload()">Erneut versuchen</button>';
+if(allowCached&&window._cachedApp)html+='<button class="btn gray" onclick="loadCached()">Gecachte Version starten</button>';
+loaderEl.innerHTML=html;
+}
+window.loadCached=function(){if(window._cachedApp){document.open();document.write(window._cachedApp);document.close();}};
+var cacheKey='app_cache_'+REPO;
+var cachedHtml=null,cachedAt=null;
+try{cachedHtml=localStorage.getItem(cacheKey);cachedAt=localStorage.getItem(cacheKey+'_at');}catch(e){}
+if(cachedHtml)window._cachedApp=cachedHtml;
+function injectMonitor(html){
+var mon='<script>(function(){try{var R="'+REPO+'",F="'+FILENAME+'",CK="app_cache_"+R,P='+POLL_MIN+'*60*1000;'
++'function showUpdateBanner(){if(document.getElementById("__upd_banner"))return;var b=document.createElement("div");b.id="__upd_banner";b.style.cssText="position:fixed;top:0;left:0;right:0;background:#00e676;color:#000;padding:10px 14px;text-align:center;font-family:-apple-system,sans-serif;font-size:13px;z-index:999999;font-weight:700;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.3);padding-top:calc(10px + env(safe-area-inset-top, 0px))";b.innerHTML="â¨ Neue Version verfÃ¼gbar â hier klicken zum Aktualisieren";b.onclick=function(){location.reload();};document.body.appendChild(b);}'
++'function chk(){fetch("https://raw.githubusercontent.com/"+R+"/main/"+F+"?t="+Date.now(),{cache:"no-store"}).then(function(r){if(!r.ok)return;return r.text();}).then(function(t){if(!t)return;var c=null;try{c=localStorage.getItem(CK);}catch(e){}if(c&&t!==c){showUpdateBanner();}}).catch(function(){});}'
++'setTimeout(chk,30000);setInterval(chk,P);'
++'document.addEventListener("visibilitychange",function(){if(!document.hidden)chk();});'
++'window.addEventListener("focus",chk);'
++'}catch(e){}})();<\/script>';
+var idx=html.toLowerCase().lastIndexOf('</body>');
+if(idx>=0)return html.slice(0,idx)+mon+html.slice(idx);
+return html+mon;
+}
+try{
+setStatus('Lade neueste Version');
+var url='https://raw.githubusercontent.com/'+REPO+'/main/'+FILENAME+'?t='+Date.now();
+var res=await fetch(url,{cache:'no-store'});
+if(!res.ok)throw new Error('HTTP '+res.status);
+var html=await res.text();
+if(!html||html.length<100)throw new Error('Datei leer oder ungÃ¼ltig');
+try{localStorage.setItem(cacheKey,html);localStorage.setItem(cacheKey+'_at',new Date().toISOString());}catch(e){}
+var withMonitor=injectMonitor(html);
+setStatus('Starte App');
+setTimeout(function(){document.open();document.write(withMonitor);document.close();},150);
+}catch(err){
+console.error('Loader error:',err);
+if(cachedHtml){
+setStatus('Offline-Modus');
+var d=cachedAt?new Date(cachedAt).toLocaleString('de-DE'):'unbekannt';
+var b='<div style="position:fixed;top:0;left:0;right:0;background:#ff9800;color:#000;padding:8px;text-align:center;font-family:sans-serif;font-size:12px;z-index:99999;padding-top:calc(8px + env(safe-area-inset-top, 0px))">Offline-Modus Â· Letzte Version vom '+escHtml(d)+' Â· <a href="javascript:location.reload()" style="color:#000;font-weight:700;">Erneut verbinden</a></div>';
+var withBanner=cachedHtml.replace(/<body([^>]*)>/i,'<body$1>'+b);
+setTimeout(function(){document.open();document.write(injectMonitor(withBanner));document.close();},200);
+}else{
+showError('Konnte App nicht laden: '+err.message,'PrÃ¼fe deine Internetverbindung.',true);
+}
+}
+})();
+</script>
+</body>
+</html>
