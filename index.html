@@ -173,13 +173,16 @@
         </button>
       </div>
 
-      <!-- Mandanten-Switcher (UI-only in V1.0) -->
-      <div class="px-4 pb-4">
-        <button id="mandantBtn"
+      <!-- Mandanten-Switcher -->
+      <div id="mandantWrap" class="px-4 pb-4 relative">
+        <button id="mandantBtn" type="button" onclick="toggleMandantenMenu()"
           class="w-full h-10 rounded-lg bg-brand-600/40 hover:bg-brand-600/60 text-white text-sm flex items-center justify-between px-3 transition">
-          <span class="truncate">FLP Electronic Repair</span>
+          <span id="mandantLabel" class="truncate">–</span>
           <i data-lucide="chevron-down" class="w-4 h-4 shrink-0"></i>
         </button>
+        <div id="mandantMenu" class="hidden absolute left-4 right-4 top-11 bg-white rounded-lg shadow-card overflow-hidden z-50 max-h-64 overflow-y-auto">
+          <!-- per JS gefüllt -->
+        </div>
       </div>
 
       <!-- Nav -->
@@ -266,6 +269,24 @@
             </button>
           </div>
         </div>
+
+        <!-- Administration (nur für Admins) -->
+        <div id="navAdmin" class="mb-1 hidden mt-4 pt-4 border-t border-white/15">
+          <button class="nav-section w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-section="administration">
+            <span class="text-sm font-semibold tracking-wide flex items-center gap-2"><i data-lucide="shield" class="w-3.5 h-3.5"></i> Administration</span>
+            <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
+          </button>
+          <div class="nav-items pl-2 mt-1 space-y-0.5">
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-companies">
+              <i data-lucide="building-2" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Firmen</span>
+            </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-users">
+              <i data-lucide="users" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Benutzer</span>
+            </button>
+          </div>
+        </div>
       </nav>
 
       <!-- User & Logout -->
@@ -327,13 +348,20 @@
 
 
 <!-- ========================================================== -->
+<!-- MODAL                                                       -->
+<!-- ========================================================== -->
+<div id="modalBackdrop" class="hidden fixed inset-0 z-[70] bg-ink-900/50 grid place-items-center p-4" onclick="if(event.target===this)closeModal()">
+  <div id="modalBox" class="w-full max-w-lg bg-white rounded-2xl shadow-card max-h-[90vh] overflow-y-auto"></div>
+</div>
+
+<!-- ========================================================== -->
 <!-- SCRIPTS                                                     -->
 <!-- ========================================================== -->
 <script>
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.3';
+const APP_VERSION = 'v1.4';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -351,7 +379,9 @@ const APP_KEYS = {
   airtableWriteKey: null,
   anthropicKey: null,
   appBaseId: null,
-  user: null
+  user: null,
+  companies: [],
+  currentCompanyId: null
 };
 
 /* ============================================================
@@ -401,9 +431,76 @@ async function loginWithUserKey(userKey) {
     }
   }
 
-  // 4. Key persistieren
+  // 4. Firmen laden (gefiltert auf user.allowed_companies, Admin sieht alle)
+  await loadCompanies();
+
+  // 5. Key persistieren
   localStorage.setItem('user_key_' + APP_CONFIG.PROJECT_ID, userKey);
   return APP_KEYS.user;
+}
+
+/* ============================================================
+   COMPANY (MANDANT) STATE
+   ============================================================ */
+async function loadCompanies() {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + "/Company?filterByFormula=" + encodeURIComponent("{status}='aktiv'");
+  const res = await fetch(url, { headers });
+  if (!res.ok) { APP_KEYS.companies = []; APP_KEYS.currentCompanyId = null; return; }
+  const data = await res.json();
+  const all = (data.records || []).map(r => ({ id: r.id, name: r.fields.name || '–' }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'de'));
+
+  if (APP_KEYS.user?.is_admin) {
+    APP_KEYS.companies = all;
+  } else {
+    const allowed = new Set(APP_KEYS.user?.allowed_companies || []);
+    APP_KEYS.companies = all.filter(c => allowed.has(c.id));
+  }
+
+  const savedKey = 'current_company_' + APP_CONFIG.PROJECT_ID;
+  const saved = localStorage.getItem(savedKey);
+  if (saved && APP_KEYS.companies.find(c => c.id === saved)) {
+    APP_KEYS.currentCompanyId = saved;
+  } else {
+    APP_KEYS.currentCompanyId = APP_KEYS.companies[0]?.id || null;
+    if (APP_KEYS.currentCompanyId) localStorage.setItem(savedKey, APP_KEYS.currentCompanyId);
+    else localStorage.removeItem(savedKey);
+  }
+}
+
+function getCurrentCompany() {
+  return APP_KEYS.companies.find(c => c.id === APP_KEYS.currentCompanyId) || null;
+}
+
+function setCurrentCompany(companyId) {
+  if (!APP_KEYS.companies.find(c => c.id === companyId)) return;
+  APP_KEYS.currentCompanyId = companyId;
+  localStorage.setItem('current_company_' + APP_CONFIG.PROJECT_ID, companyId);
+  document.getElementById('mandantMenu')?.classList.add('hidden');
+  renderMandantenSwitcher();
+  toast('Mandant gewechselt: ' + getCurrentCompany().name, 'success');
+}
+
+function renderMandantenSwitcher() {
+  const label = document.getElementById('mandantLabel');
+  const menu = document.getElementById('mandantMenu');
+  if (!label || !menu) return;
+  const cur = getCurrentCompany();
+  label.textContent = cur ? cur.name : '– keine Firma –';
+  if (APP_KEYS.companies.length === 0) {
+    menu.innerHTML = '<p class="px-3 py-2 text-xs text-ink-500">Keine Firmen verfügbar.</p>';
+  } else {
+    menu.innerHTML = APP_KEYS.companies.map(c => `
+      <button type="button" onclick="setCurrentCompany('${c.id}')" class="w-full text-left px-3 py-2 text-sm hover:bg-ink-100 ${c.id === APP_KEYS.currentCompanyId ? 'bg-brand-50 font-medium text-brand-700' : 'text-ink-900'}">
+        ${escapeHtml(c.name)}
+      </button>
+    `).join('');
+  }
+}
+
+function toggleMandantenMenu() {
+  document.getElementById('mandantMenu')?.classList.toggle('hidden');
 }
 
 async function tryAutoLogin() {
@@ -687,6 +784,296 @@ function escapeHtml(s) {
 }
 
 /* ============================================================
+   MODAL
+   ============================================================ */
+function openModal(html) {
+  document.getElementById('modalBox').innerHTML = html;
+  document.getElementById('modalBackdrop').classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
+}
+function closeModal() {
+  document.getElementById('modalBackdrop').classList.add('hidden');
+  document.getElementById('modalBox').innerHTML = '';
+}
+
+/* ============================================================
+   ROUTING (Sidebar Nav-Items)
+   ============================================================ */
+function dispatchRoute(route) {
+  closeDrawer();
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('bg-brand-700', b.dataset.route === route));
+  switch (route) {
+    case 'admin-companies': renderAdminCompanies(); break;
+    case 'admin-users':     renderAdminUsers(); break;
+    default:                renderWelcome();
+  }
+}
+function initNavRouting() {
+  document.querySelectorAll('.nav-item').forEach(btn => {
+    if (btn.classList.contains('disabled')) return;
+    if (btn.dataset._wired) return;
+    btn.dataset._wired = '1';
+    btn.addEventListener('click', () => {
+      const route = btn.dataset.route;
+      if (route) dispatchRoute(route);
+    });
+  });
+}
+
+/* ============================================================
+   ADMIN: FIRMEN
+   ============================================================ */
+async function renderAdminCompanies() {
+  setPageTitle('Firmen verwalten');
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Firmen…</p>';
+  let all = [];
+  try {
+    all = await readData('Company', null, { sort: [{ field: 'name', direction: 'asc' }] });
+  } catch (e) { toast(e.message, 'error'); }
+  const html = `
+    <div class="max-w-3xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold text-ink-900">Firmen</h2>
+        <button onclick="openCompanyModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i> Firma anlegen
+        </button>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 divide-y divide-ink-100 overflow-hidden">
+        ${all.length === 0 ? '<p class="p-6 text-ink-500 text-sm">Noch keine Firmen.</p>' : all.map(companyRow).join('')}
+      </div>
+    </div>
+  `;
+  document.getElementById('pageContent').innerHTML = html;
+  if (window.lucide) lucide.createIcons();
+}
+
+function companyRow(rec) {
+  const f = rec.fields || {};
+  const archived = f.status === 'archiviert';
+  return `
+    <div class="flex items-center justify-between p-4">
+      <div class="min-w-0">
+        <p class="font-medium ${archived ? 'text-ink-500 line-through' : 'text-ink-900'} truncate">${escapeHtml(f.name || '–')}</p>
+        <p class="text-xs text-ink-500">${escapeHtml(f.status || '–')}</p>
+      </div>
+      <div class="flex gap-1 shrink-0">
+        <button onclick="openCompanyModal('${rec.id}')" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten">
+          <i data-lucide="pencil" class="w-4 h-4"></i>
+        </button>
+        <button onclick="toggleCompanyArchive('${rec.id}', ${!archived})" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="${archived ? 'Aktivieren' : 'Archivieren'}">
+          <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function openCompanyModal(id) {
+  let f = {};
+  if (id) {
+    const all = await readData('Company');
+    f = all.find(r => r.id === id)?.fields || {};
+  }
+  openModal(`
+    <form onsubmit="saveCompany(event, '${id || ''}')" class="p-6">
+      <h3 class="text-lg font-bold mb-4 text-ink-900">${id ? 'Firma bearbeiten' : 'Firma anlegen'}</h3>
+      <label class="block text-sm font-medium text-ink-700 mb-1">Name</label>
+      <input name="name" required value="${escapeHtml(f.name || '')}" class="w-full mb-4 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+      <select name="status" class="w-full mb-5 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <option value="aktiv" ${(f.status||'aktiv')==='aktiv'?'selected':''}>aktiv</option>
+        <option value="archiviert" ${f.status==='archiviert'?'selected':''}>archiviert</option>
+      </select>
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveCompany(e, id) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const fields = { name: fd.get('name').trim(), status: fd.get('status') };
+  if (!fields.name) return toast('Name fehlt', 'error');
+  try {
+    if (id) await updateData('Company', id, fields);
+    else    await writeData('Company', fields);
+    closeModal();
+    await loadCompanies();
+    renderMandantenSwitcher();
+    renderAdminCompanies();
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleCompanyArchive(id, archive) {
+  try {
+    await updateData('Company', id, { status: archive ? 'archiviert' : 'aktiv' });
+    await loadCompanies();
+    renderMandantenSwitcher();
+    renderAdminCompanies();
+    toast(archive ? 'Archiviert' : 'Aktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   ADMIN: BENUTZER
+   ============================================================ */
+async function renderAdminUsers() {
+  setPageTitle('Benutzer verwalten');
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Benutzer…</p>';
+  let all = [];
+  try {
+    all = await readData('User', null, { sort: [{ field: 'name', direction: 'asc' }] });
+  } catch (e) { toast(e.message, 'error'); }
+  const html = `
+    <div class="max-w-3xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold text-ink-900">Benutzer</h2>
+        <button onclick="openUserModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="plus" class="w-4 h-4"></i> Benutzer anlegen
+        </button>
+      </div>
+      <div class="bg-white rounded-2xl border border-ink-200 divide-y divide-ink-100 overflow-hidden">
+        ${all.length === 0 ? '<p class="p-6 text-ink-500 text-sm">Noch keine Benutzer.</p>' : all.map(userRow).join('')}
+      </div>
+    </div>
+  `;
+  document.getElementById('pageContent').innerHTML = html;
+  if (window.lucide) lucide.createIcons();
+}
+
+function userRow(rec) {
+  const f = rec.fields || {};
+  const inactive = f.status !== 'aktiv';
+  const isAdmin = !!f.is_admin;
+  const cnt = (f.allowed_companies || []).length;
+  return `
+    <div class="flex items-center justify-between p-4">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <p class="font-medium ${inactive ? 'text-ink-500' : 'text-ink-900'} truncate">${escapeHtml(f.name || '–')}</p>
+          ${isAdmin ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded">admin</span>' : ''}
+        </div>
+        <p class="text-xs text-ink-500 mt-0.5 truncate">
+          ${escapeHtml(f.role || '—')} · ${cnt} Firma${cnt===1?'':'n'} · ${escapeHtml(f.status || '—')}
+        </p>
+      </div>
+      <div class="flex gap-1 shrink-0">
+        <button onclick="openUserModal('${rec.id}')" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten">
+          <i data-lucide="pencil" class="w-4 h-4"></i>
+        </button>
+        <button onclick="toggleUserStatus('${rec.id}', ${inactive})" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="${inactive ? 'Aktivieren' : 'Deaktivieren'}">
+          <i data-lucide="${inactive ? 'user-check' : 'user-x'}" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function generateApiKey() {
+  const a = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const arr = new Uint8Array(24);
+  crypto.getRandomValues(arr);
+  let s = '';
+  for (let i = 0; i < 24; i++) s += a[arr[i] % a.length];
+  return s;
+}
+
+async function openUserModal(id) {
+  let f = {};
+  if (id) {
+    const all = await readData('User');
+    f = all.find(r => r.id === id)?.fields || {};
+  }
+  let companies = [];
+  try {
+    companies = await readData('Company', "{status}='aktiv'", { sort: [{ field: 'name', direction: 'asc' }] });
+  } catch (e) {}
+  const allowedSet = new Set(f.allowed_companies || []);
+  const apiKey = id ? (f.api_key || '') : generateApiKey();
+  const companiesHtml = companies.length === 0
+    ? '<p class="text-xs text-ink-500">Keine aktiven Firmen verfügbar.</p>'
+    : companies.map(c => `
+        <label class="flex items-center gap-2 py-1">
+          <input type="checkbox" name="allowed_companies" value="${c.id}" ${allowedSet.has(c.id) ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+          <span class="text-sm text-ink-900">${escapeHtml(c.fields.name || '–')}</span>
+        </label>
+      `).join('');
+  openModal(`
+    <form onsubmit="saveUser(event, '${id || ''}')" class="p-6">
+      <h3 class="text-lg font-bold mb-4 text-ink-900">${id ? 'Benutzer bearbeiten' : 'Benutzer anlegen'}</h3>
+
+      <label class="block text-sm font-medium text-ink-700 mb-1">Name</label>
+      <input name="name" required value="${escapeHtml(f.name || '')}" class="w-full mb-3 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+
+      <label class="block text-sm font-medium text-ink-700 mb-1">Rolle</label>
+      <input name="role" value="${escapeHtml(f.role || '')}" placeholder="z.B. Buchhaltung" class="w-full mb-3 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+
+      <label class="block text-sm font-medium text-ink-700 mb-1">API-Key</label>
+      <div class="flex gap-2 mb-3">
+        <input id="userApiKey" name="api_key" required value="${escapeHtml(apiKey)}" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs">
+        <button type="button" onclick="document.getElementById('userApiKey').value=generateApiKey()" class="px-3 py-2 text-xs rounded-lg border border-ink-200 hover:bg-ink-50">Neu</button>
+      </div>
+
+      <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+      <select name="status" class="w-full mb-3 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <option value="aktiv" ${(f.status||'aktiv')==='aktiv'?'selected':''}>aktiv</option>
+        <option value="inaktiv" ${f.status==='inaktiv'?'selected':''}>inaktiv</option>
+      </select>
+
+      <label class="flex items-center gap-2 mb-3 mt-1">
+        <input type="checkbox" name="is_admin" ${f.is_admin ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+        <span class="text-sm text-ink-900">Admin <span class="text-ink-500">(sieht alle Firmen + verwaltet Benutzer)</span></span>
+      </label>
+
+      <p class="block text-sm font-medium text-ink-700 mb-1 mt-2">Zugriff auf Firmen</p>
+      <div class="border border-ink-200 rounded-lg p-3 mb-5 max-h-40 overflow-y-auto bg-ink-50/40">
+        ${companiesHtml}
+      </div>
+
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveUser(e, id) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const fields = {
+    name:      (fd.get('name') || '').trim(),
+    role:      (fd.get('role') || '').trim(),
+    api_key:   (fd.get('api_key') || '').trim(),
+    status:    fd.get('status') || 'aktiv',
+    is_admin:  fd.get('is_admin') === 'on',
+    allowed_companies: fd.getAll('allowed_companies')
+  };
+  if (!fields.name)    return toast('Name fehlt', 'error');
+  if (!fields.api_key) return toast('API-Key fehlt', 'error');
+  if (!id) fields.created = new Date().toISOString().slice(0,10);
+  try {
+    if (id) await updateData('User', id, fields);
+    else    await writeData('User', fields);
+    closeModal();
+    renderAdminUsers();
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleUserStatus(id, currentlyInactive) {
+  try {
+    await updateData('User', id, { status: currentlyInactive ? 'aktiv' : 'inaktiv' });
+    renderAdminUsers();
+    toast(currentlyInactive ? 'Aktiviert' : 'Deaktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
    UI: LOGIN HANDLER
    ============================================================ */
 function showLoginScreen() {
@@ -703,10 +1090,20 @@ function showApp() {
   document.getElementById('appShell').classList.remove('hidden');
   document.getElementById('sidebarUserName').textContent = APP_KEYS.user?.name || '–';
   document.getElementById('sidebarUserRole').textContent = APP_KEYS.user?.role || '';
+  if (APP_KEYS.user?.is_admin) document.getElementById('navAdmin')?.classList.remove('hidden');
   initNavSections();
+  initNavRouting();
+  renderMandantenSwitcher();
   renderWelcome();
   if (window.lucide) lucide.createIcons();
 }
+
+// Klick außerhalb schließt das Mandanten-Menü
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('mandantWrap');
+  if (!wrap || wrap.contains(e.target)) return;
+  document.getElementById('mandantMenu')?.classList.add('hidden');
+});
 
 function setLoginLoading(loading) {
   const btn = document.getElementById('loginBtn');
