@@ -398,7 +398,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.15';
+const APP_VERSION = 'v2.16';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -956,6 +956,89 @@ function closeModal2() {
   document.getElementById('modalBackdrop2').classList.add('hidden');
   document.getElementById('modalBox2').innerHTML = '';
 }
+
+/* ============================================================
+   COMBOBOX (suchbares Dropdown) — wird mit renderCombobox(...) erzeugt
+   ============================================================ */
+const _comboboxData = {};
+
+function renderCombobox(opts) {
+  // opts: { id, name, items: [{id,label,secondary}], current, placeholder, onChange (Funktionsname auf window) }
+  _comboboxData[opts.id] = opts.items || [];
+  const cur = (opts.items || []).find(i => i.id === opts.current);
+  const dataOnchange = opts.onChange ? ` data-onchange="${escapeHtml(opts.onChange)}"` : '';
+  return `
+    <div class="relative" data-combobox="${escapeHtml(opts.id)}"${dataOnchange}>
+      <input id="${escapeHtml(opts.id)}_search" type="text" autocomplete="off" value="${escapeHtml(cur?.label || '')}" placeholder="${escapeHtml(opts.placeholder || 'Suchen…')}"
+             oninput="onComboboxInput('${escapeHtml(opts.id)}')" onfocus="onComboboxFocus('${escapeHtml(opts.id)}')"
+             class="w-full pl-3 pr-8 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      <input id="${escapeHtml(opts.id)}_value" type="hidden" name="${escapeHtml(opts.name || '')}" value="${escapeHtml(opts.current || '')}">
+      <button type="button" onclick="onComboboxClear('${escapeHtml(opts.id)}')" class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-ink-400 hover:text-ink-700" title="Auswahl löschen">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+      <div id="${escapeHtml(opts.id)}_dropdown" class="hidden absolute z-50 left-0 right-0 mt-1 bg-white border border-ink-200 rounded-lg shadow-card max-h-64 overflow-y-auto"></div>
+    </div>
+  `;
+}
+
+function onComboboxFocus(id) {
+  renderComboboxDropdown(id, document.getElementById(id + '_search')?.value || '');
+}
+function onComboboxInput(id) {
+  renderComboboxDropdown(id, document.getElementById(id + '_search')?.value || '');
+}
+function renderComboboxDropdown(id, term) {
+  const items = _comboboxData[id] || [];
+  const t = (term || '').trim().toLowerCase();
+  const filtered = !t ? items : items.filter(i =>
+    (i.label || '').toLowerCase().includes(t) || (i.secondary || '').toLowerCase().includes(t)
+  );
+  const dd = document.getElementById(id + '_dropdown');
+  if (!dd) return;
+  if (filtered.length === 0) {
+    dd.innerHTML = '<div class="px-3 py-2 text-sm text-ink-500 italic">Keine Treffer</div>';
+  } else {
+    dd.innerHTML = filtered.slice(0, 80).map(i => `
+      <div class="px-3 py-2 text-sm hover:bg-brand-50 cursor-pointer border-b border-ink-50 last:border-b-0"
+           onmousedown="event.preventDefault();onComboboxSelect('${id}', '${escapeHtml(i.id)}')">
+        <p class="font-medium text-ink-900">${escapeHtml(i.label || '–')}</p>
+        ${i.secondary ? `<p class="text-xs text-ink-500">${escapeHtml(i.secondary)}</p>` : ''}
+      </div>
+    `).join('');
+  }
+  dd.classList.remove('hidden');
+}
+function onComboboxSelect(id, value) {
+  const item = (_comboboxData[id] || []).find(i => i.id === value);
+  if (!item) return;
+  const valEl = document.getElementById(id + '_value');
+  const srEl  = document.getElementById(id + '_search');
+  if (valEl) valEl.value = value;
+  if (srEl)  srEl.value  = item.label || '';
+  document.getElementById(id + '_dropdown')?.classList.add('hidden');
+  const wrap = document.querySelector(`[data-combobox="${id.replace(/'/g,'')}"]`);
+  const cbName = wrap?.getAttribute('data-onchange');
+  if (cbName && typeof window[cbName] === 'function') window[cbName](value, id);
+}
+function onComboboxClear(id) {
+  const valEl = document.getElementById(id + '_value');
+  const srEl  = document.getElementById(id + '_search');
+  if (valEl) valEl.value = '';
+  if (srEl)  srEl.value  = '';
+  document.getElementById(id + '_dropdown')?.classList.add('hidden');
+  const wrap = document.querySelector(`[data-combobox="${id.replace(/'/g,'')}"]`);
+  const cbName = wrap?.getAttribute('data-onchange');
+  if (cbName && typeof window[cbName] === 'function') window[cbName]('', id);
+}
+// Klick außerhalb schließt offene Dropdowns
+document.addEventListener('mousedown', (e) => {
+  document.querySelectorAll('[data-combobox]').forEach(wrap => {
+    if (!wrap.contains(e.target)) {
+      const cbId = wrap.getAttribute('data-combobox');
+      document.getElementById(cbId + '_dropdown')?.classList.add('hidden');
+    }
+  });
+});
 
 /* ============================================================
    ROUTING (Sidebar Nav-Items)
@@ -1563,6 +1646,10 @@ async function openCustomerModal(id) {
           <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
           <input name="payment_terms" placeholder="14 Tage netto" value="${escapeHtml(f.payment_terms || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Lieferbedingungen</label>
+          <input name="delivery_terms" placeholder="EXW Fellbach" value="${escapeHtml(f.delivery_terms || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
       </div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen</h4>
@@ -1582,7 +1669,7 @@ async function saveCustomer(e, id) {
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   const fd = new FormData(e.target);
   const fields = {};
-  ['name1','name2','customer_no','street','zip','city','country','email','phone','website','vat_id','payment_terms','status','notes'].forEach(k => {
+  ['name1','name2','customer_no','street','zip','city','country','email','phone','website','vat_id','payment_terms','delivery_terms','status','notes'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   if (!fields.name1) return toast('Name (Zeile 1) fehlt', 'error');
@@ -3429,6 +3516,7 @@ function quoteRow(rec, custMap) {
   const lockedBadge = lockedByOther
     ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Wird gerade von ${escapeHtml(userLabel(lockInfo.userId))} bearbeitet"><i data-lucide="lock" class="w-3 h-3"></i> in Bearbeitung</span>`
     : '';
+  const primary = cust?.name1 || '— Kunde nicht zugeordnet —';
   return `
     <div class="flex items-start justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openQuoteModal('${rec.id}')">
       <div class="min-w-0 flex-1">
@@ -3437,10 +3525,9 @@ function quoteRow(rec, custMap) {
           ${quoteStatusBadge(f.status || 'Entwurf')}
           ${lockedBadge}
         </div>
-        <p class="font-medium text-ink-900 truncate mt-0.5">${escapeHtml(f.title || '— ohne Titel —')}</p>
+        <p class="font-medium ${cust ? 'text-ink-900' : 'text-ink-400 italic'} truncate mt-0.5">${escapeHtml(primary)}</p>
         <p class="text-xs text-ink-500 mt-0.5 truncate">
-          ${cust ? escapeHtml(cust.name1 || '–') + (cust.customer_no ? ' · ' + escapeHtml(cust.customer_no) : '') : '<span class="text-ink-400">— Kunde nicht zugeordnet —</span>'}
-          ${f.date ? ' · ' + escapeHtml(f.date) : ''}
+          ${cust?.customer_no ? escapeHtml(cust.customer_no) + ' · ' : ''}${f.date ? escapeHtml(f.date) : ''}${f.title ? ' · ' + escapeHtml(f.title) : ''}
         </p>
       </div>
       <div class="flex items-center gap-2 shrink-0 ml-2">
@@ -3486,6 +3573,23 @@ async function openQuoteModal(id) {
   const currentContactId  = (f.contact_id  || [])[0] || '';
   const sums = calcQuoteSums(items);
 
+  // Combobox-Items
+  const customerItems = customersInCompany.map(c => ({
+    id: c.id,
+    label: c.fields.name1 || '–',
+    secondary: [c.fields.customer_no, c.fields.city].filter(Boolean).join(' · ')
+  }));
+  const contactItemsFor = (cid) => allContacts
+    .filter(c => (c.fields.customer_id || []).includes(cid))
+    .map(c => ({
+      id: c.id,
+      label: contactDisplayName(c.fields),
+      secondary: [c.fields.role, c.fields.email].filter(Boolean).join(' · ')
+    }));
+  // Globaler Customer-Daten-Cache für Defaults bei Wechsel (payment_terms / delivery_terms / contacts)
+  window._quoteCustomerCache = { byId: {}, contacts: allContacts };
+  customersInCompany.forEach(c => { window._quoteCustomerCache.byId[c.id] = c.fields; });
+
   openModal(`
     <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-6">
       <div class="flex items-baseline justify-between mb-4">
@@ -3504,10 +3608,6 @@ async function openQuoteModal(id) {
             ${['Entwurf','versendet','angenommen','abgelehnt','abgelaufen','archiviert'].map(s => `<option value="${s}" ${(f.status||'Entwurf')===s?'selected':''}>${s}</option>`).join('')}
           </select>
         </div>
-        <div class="col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Titel <span class="text-red-500">*</span></label>
-          <input name="title" required value="${escapeHtml(f.title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Datum</label>
           <input name="date" type="date" value="${escapeHtml(f.date || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
@@ -3518,21 +3618,19 @@ async function openQuoteModal(id) {
         </div>
         <div class="col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Kunde</label>
-          <select name="customer_id" id="quote_customer_select" onchange="onQuoteCustomerChange()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-            <option value="">— nicht zugeordnet —</option>
-            ${customersInCompany.map(c => `<option value="${c.id}" ${currentCustomerId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name1 || '–')}${c.fields.customer_no ? ' (' + escapeHtml(c.fields.customer_no) + ')' : ''}</option>`).join('')}
-          </select>
+          ${renderCombobox({ id: 'qc_customer', name: 'customer_id', items: customerItems, current: currentCustomerId, placeholder: 'Kunde suchen…', onChange: 'onQuoteCustomerChange' })}
         </div>
         <div class="col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
-          <select name="contact_id" id="quote_contact_select" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-            <option value="">— nicht zugeordnet —</option>
-            ${allContacts.filter(c => (c.fields.customer_id || []).includes(currentCustomerId)).map(c => `<option value="${c.id}" ${currentContactId === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('')}
-          </select>
+          ${renderCombobox({ id: 'qc_contact', name: 'contact_id', items: contactItemsFor(currentCustomerId), current: currentContactId, placeholder: 'Ansprechpartner suchen…' })}
         </div>
-        <div class="col-span-2">
+        <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
-          <input name="payment_terms" value="${escapeHtml(f.payment_terms || '')}" placeholder="z.B. 14 Tage netto" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input name="payment_terms" value="${escapeHtml(f.payment_terms || '')}" placeholder="14 Tage netto" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Lieferbedingungen</label>
+          <input name="delivery_terms" value="${escapeHtml(f.delivery_terms || '')}" placeholder="EXW Fellbach" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Beschreibung / Vortext</label>
@@ -3567,16 +3665,38 @@ function quoteSumsHtml(sums) {
   `;
 }
 
-function onQuoteCustomerChange() {
-  const cid = document.getElementById('quote_customer_select')?.value;
-  const select = document.getElementById('quote_contact_select');
-  if (!select) return;
-  if (!cid) { select.innerHTML = '<option value="">— nicht zugeordnet —</option>'; return; }
-  readData('Contact').then(all => {
-    const list = all.filter(c => (c.fields.customer_id || []).includes(cid));
-    select.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
-      list.map(c => `<option value="${c.id}">${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
-  });
+// Wird vom Customer-Combobox aufgerufen (value, comboboxId)
+function onQuoteCustomerChange(value) {
+  const cid = value || document.getElementById('qc_customer_value')?.value || '';
+  const cache = window._quoteCustomerCache || {};
+  const contacts = cache.contacts || [];
+  // 1) Ansprechpartner-Combobox auf den neuen Kunden filtern
+  const list = !cid ? [] : contacts.filter(c => (c.fields.customer_id || []).includes(cid));
+  const items = list.map(c => ({
+    id: c.id,
+    label: contactDisplayName(c.fields),
+    secondary: [c.fields.role, c.fields.email].filter(Boolean).join(' · ')
+  }));
+  _comboboxData['qc_contact'] = items;
+  // Aktuelle Auswahl ggf. zurücksetzen, falls dieser Kontakt nicht mehr zum Kunden gehört
+  const contactValueEl = document.getElementById('qc_contact_value');
+  const contactSearchEl = document.getElementById('qc_contact_search');
+  if (contactValueEl && !items.find(i => i.id === contactValueEl.value)) {
+    contactValueEl.value = '';
+    if (contactSearchEl) contactSearchEl.value = '';
+  }
+  // 2) Defaults aus Customer (nur wenn Felder leer)
+  if (cid) {
+    const cFields = cache.byId?.[cid] || {};
+    const ptInput = document.querySelector('#modalBox input[name="payment_terms"]');
+    if (ptInput && !ptInput.value.trim()) {
+      ptInput.value = cFields.payment_terms || '14 Tage netto';
+    }
+    const dtInput = document.querySelector('#modalBox input[name="delivery_terms"]');
+    if (dtInput && !dtInput.value.trim()) {
+      dtInput.value = cFields.delivery_terms || 'EXW Fellbach';
+    }
+  }
 }
 
 function renderQuoteItems(quoteId, items) {
@@ -3632,6 +3752,13 @@ function quoteItemRow(quoteId, it) {
 
 async function showQuoteItemInlineForm(quoteId, itemId) {
   if (document.querySelector('#qiFormWrap [data-qi-form]')) return;
+  // Auto-Save bei neuem Angebot ohne ID: Header zuerst speichern, dann Position-Form öffnen
+  if (!quoteId) {
+    _pendingPostQuoteAction = () => document.getElementById('addQiBtn')?.click();
+    const form = document.querySelector('#modalBox form');
+    await saveQuote({ preventDefault: () => {}, target: form }, '', true);
+    return;
+  }
   const cur = getCurrentCompany();
   let f = {};
   try {
@@ -3659,7 +3786,17 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
   } catch (e) {}
   const currentArticleId = (f.article_id || [])[0] || '';
   const fid = 'qif_' + (itemId || 'new');
-  const articlesData = JSON.stringify(articles.map(a => ({ id: a.id, name1: a.fields.name1 || '', name2: a.fields.name2 || '', desc: a.fields.description || '', price: a.fields.sales_price || 0, unit: a.fields.unit || 'Stück', vat: a.fields.vat_rate || 19 }))).replace(/'/g, '&#39;');
+  // Article-Combobox: Items + Cache für Auto-Fill
+  window._qiArticleCacheById = {};
+  articles.forEach(a => { window._qiArticleCacheById[a.id] = {
+    name1: a.fields.name1 || '', name2: a.fields.name2 || '', desc: a.fields.description || '',
+    price: a.fields.sales_price || 0, unit: a.fields.unit || 'Stück', vat: a.fields.vat_rate || 19
+  }; });
+  const articleItems = articles.map(a => ({
+    id: a.id,
+    label: a.fields.name1 || '–',
+    secondary: [a.fields.article_no, a.fields.manufacturer].filter(Boolean).join(' · ')
+  }));
 
   if (itemId) {
     const row = document.querySelector(`[data-qi-row="${itemId}"]`);
@@ -3668,7 +3805,7 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
   document.getElementById('addQiBtn')?.classList.add('hidden');
 
   document.getElementById('qiFormWrap').innerHTML = `
-    <div data-qi-form data-articles='${articlesData}' class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3">
+    <div data-qi-form data-fid="${fid}" class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3">
       <p class="text-sm font-semibold text-brand-700">${itemId ? 'Position bearbeiten' : 'Neue Position'}</p>
 
       <div class="grid grid-cols-3 gap-2">
@@ -3677,11 +3814,8 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
           <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="col-span-2">
-          <label class="block text-xs font-medium text-ink-700 mb-1">Artikel (optional)</label>
-          <select id="${fid}_article" onchange="onQiArticleChange('${fid}')" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-            <option value="">— freie Position —</option>
-            ${articles.map(a => `<option value="${a.id}" ${currentArticleId === a.id ? 'selected' : ''}>${escapeHtml(a.fields.name1 || '–')}${a.fields.article_no ? ' (' + escapeHtml(a.fields.article_no) + ')' : ''}</option>`).join('')}
-          </select>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Artikel (suchen oder leer = freie Position)</label>
+          ${renderCombobox({ id: fid + '_article', name: '', items: articleItems, current: currentArticleId, placeholder: 'Artikel suchen…', onChange: 'onQiArticleChange' })}
         </div>
       </div>
 
@@ -3730,13 +3864,13 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
   setTimeout(() => document.getElementById(fid + '_description')?.focus(), 50);
 }
 
-function onQiArticleChange(fid) {
-  const formEl = document.querySelector('#qiFormWrap [data-qi-form]');
-  if (!formEl) return;
-  const articles = JSON.parse(formEl.getAttribute('data-articles').replace(/&#39;/g, "'"));
-  const articleId = document.getElementById(fid + '_article')?.value;
+// Wird vom Article-Combobox aufgerufen (value, comboboxId)
+function onQiArticleChange(value, comboboxId) {
+  const articleId = value || '';
+  // fid aus comboboxId ableiten ('qif_xxx_article' → 'qif_xxx')
+  const fid = (comboboxId || '').replace(/_article$/, '');
   if (!articleId) return;
-  const a = articles.find(x => x.id === articleId);
+  const a = (window._qiArticleCacheById || {})[articleId];
   if (!a) return;
   // Auto-fill — überschreibt aktuelle Werte (User kann danach anpassen)
   const descEl = document.getElementById(fid + '_description');
@@ -3771,7 +3905,8 @@ function cancelQuoteItemInline(quoteId, itemId) {
 async function saveQuoteItemInline(quoteId, itemId) {
   const fid = 'qif_' + (itemId || 'new');
   const $v = id => (document.getElementById(fid + '_' + id)?.value || '').trim();
-  const articleId = document.getElementById(fid + '_article')?.value || '';
+  // Combobox: value-Element heißt jetzt fid + '_article_value'
+  const articleId = document.getElementById(fid + '_article_value')?.value || '';
   const desc = $v('description');
   if (!desc) return toast('Beschreibung fehlt', 'error');
   const pos = parseInt($v('pos'), 10) || 1;
@@ -3823,6 +3958,8 @@ async function refreshQuoteItemsSection(quoteId) {
   } catch (e) { toast(e.message, 'error'); }
 }
 
+let _pendingPostQuoteAction = null;
+
 async function saveQuote(e, id, keepOpen) {
   if (e && e.preventDefault) e.preventDefault();
   const cur = getCurrentCompany();
@@ -3831,14 +3968,13 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','title','description','date','valid_until','status','payment_terms','notes'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
   const conSel = (fd.get('contact_id')  || '').trim();
   fields.customer_id = cidSel ? [cidSel] : [];
   fields.contact_id  = conSel ? [conSel] : [];
-  if (!fields.title) return toast('Titel fehlt', 'error');
   fields.status = fields.status || 'Entwurf';
   if (!id) fields.company_id = [cur.id];
   if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
@@ -3865,8 +4001,15 @@ async function saveQuote(e, id, keepOpen) {
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
     if (keepOpen) {
       closeModal();
-      toast('Gespeichert — Modal bleibt offen', 'success');
-      setTimeout(() => openQuoteModal(savedId), 60);
+      toast('Gespeichert', 'success');
+      setTimeout(async () => {
+        await openQuoteModal(savedId);
+        if (_pendingPostQuoteAction) {
+          const act = _pendingPostQuoteAction;
+          _pendingPostQuoteAction = null;
+          setTimeout(act, 100);
+        }
+      }, 60);
     } else {
       closeModal();
       renderQuotes();
