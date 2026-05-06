@@ -398,7 +398,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.13';
+const APP_VERSION = 'v2.14';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -3454,10 +3454,11 @@ function quoteRow(rec, custMap) {
 async function openQuoteModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
-  let f = {}, items = [], allCustomers = [], allContacts = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allCompanies = [];
   try {
-    [allCustomers, allContacts] = await Promise.all([readData('Customer'), readData('Contact')]);
+    [allCustomers, allContacts, allCompanies] = await Promise.all([readData('Customer'), readData('Contact'), readData('Company')]);
   } catch (e) { toast(e.message, 'error'); return; }
+  const companyData = allCompanies.find(c => c.id === cur.id)?.fields || { name: cur.name };
 
   if (id) {
     const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
@@ -3484,79 +3485,158 @@ async function openQuoteModal(id) {
     .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
   const currentCustomerId = (f.customer_id || [])[0] || '';
   const currentContactId  = (f.contact_id  || [])[0] || '';
+  const currentCustomer = customersInCompany.find(c => c.id === currentCustomerId);
   const sums = calcQuoteSums(items);
 
-  openModal(`
-    <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-6">
-      <div class="flex items-baseline justify-between mb-4">
-        <h3 class="text-lg font-bold text-ink-900">${id ? 'Angebot bearbeiten' : 'Neues Angebot'}</h3>
-        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
-      </div>
+  // Briefkopf (Letterhead): kompakte Adress-Zeile + FLP-Logo rechts
+  const companyAddrLine = [companyData.name, companyData.street, [companyData.zip, companyData.city].filter(Boolean).join(' ')]
+    .filter(Boolean).join(' · ');
 
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Angebots-Nr.</label>
-          <input name="quote_no" value="${escapeHtml(f.quote_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+  openModal(`
+    <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-5 sm:p-6 sm:max-w-4xl">
+      <!-- Modal-Top -->
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-2">
+          <h3 class="text-lg font-bold text-ink-900">${id ? 'Angebot bearbeiten' : 'Angebot erstellen'}</h3>
+          <span class="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-ink-100 text-ink-600">${escapeHtml(f.status || 'Entwurf')}</span>
         </div>
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
-          <select name="status" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <div class="flex items-center gap-2">
+          <select name="status" class="text-xs px-2 py-1 border border-ink-200 rounded-md text-ink-700">
             ${['Entwurf','versendet','angenommen','abgelehnt','abgelaufen','archiviert'].map(s => `<option value="${s}" ${(f.status||'Entwurf')===s?'selected':''}>${s}</option>`).join('')}
           </select>
         </div>
-        <div class="col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Titel <span class="text-red-500">*</span></label>
-          <input name="title" required value="${escapeHtml(f.title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Datum</label>
-          <input name="date" type="date" value="${escapeHtml(f.date || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Gültig bis</label>
-          <input name="valid_until" type="date" value="${escapeHtml(f.valid_until || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-        <div class="col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Kunde</label>
-          <select name="customer_id" id="quote_customer_select" onchange="onQuoteCustomerChange()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-            <option value="">— nicht zugeordnet —</option>
-            ${customersInCompany.map(c => `<option value="${c.id}" ${currentCustomerId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name1 || '–')}${c.fields.customer_no ? ' (' + escapeHtml(c.fields.customer_no) + ')' : ''}</option>`).join('')}
-          </select>
-        </div>
-        <div class="col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
-          <select name="contact_id" id="quote_contact_select" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-            <option value="">— nicht zugeordnet —</option>
-            ${allContacts.filter(c => (c.fields.customer_id || []).includes(currentCustomerId)).map(c => `<option value="${c.id}" ${currentContactId === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('')}
-          </select>
-        </div>
-        <div class="col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
-          <input name="payment_terms" value="${escapeHtml(f.payment_terms || '')}" placeholder="z.B. 14 Tage netto" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-        <div class="col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Beschreibung / Vortext</label>
-          <textarea name="description" rows="2" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
-        </div>
       </div>
 
-      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Positionen</h4>
-      <div id="quoteItemsWrap">${renderQuoteItems(id || '', items)}</div>
+      <!-- Briefkopf -->
+      <div class="bg-white border border-ink-200 rounded-2xl p-5 sm:p-7 shadow-card">
+        <div class="flex items-start justify-between gap-3 mb-3">
+          <div class="text-xs text-ink-500 leading-snug">${escapeHtml(companyAddrLine)}</div>
+          <svg class="h-9 sm:h-11 shrink-0 block" style="aspect-ratio:320/74" aria-label="${escapeHtml(companyData.name || 'FLP')}"><use href="#flp-logo"/></svg>
+        </div>
+        <div class="border-t border-ink-200 mb-5"></div>
 
-      <div id="quoteSums" class="mt-4 bg-ink-50 rounded-xl p-4 text-sm space-y-1">
-        ${quoteSumsHtml(sums)}
+        <!-- Empfänger + Meta -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-8 mb-6">
+          <div class="lg:col-span-7">
+            <label class="block text-xs font-medium text-ink-700 mb-1">Empfänger</label>
+            <select name="customer_id" id="quote_customer_select" onchange="onQuoteCustomerChange()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              <option value="">— Wähle Empfänger —</option>
+              ${customersInCompany.map(c => `<option value="${c.id}" ${currentCustomerId === c.id ? 'selected' : ''}>${escapeHtml(c.fields.name1 || '–')}${c.fields.customer_no ? ' (' + escapeHtml(c.fields.customer_no) + ')' : ''}</option>`).join('')}
+            </select>
+            <div id="quote_customer_addr" class="mt-2 text-sm text-ink-700 leading-relaxed min-h-[3.5rem]">${customerAddressBlock(currentCustomer?.fields)}</div>
+
+            <label class="block text-xs font-medium text-ink-700 mt-3 mb-1">Ansprechpartner</label>
+            <select name="contact_id" id="quote_contact_select" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              <option value="">— nicht zugeordnet —</option>
+              ${allContacts.filter(c => (c.fields.customer_id || []).includes(currentCustomerId)).map(c => `<option value="${c.id}" ${currentContactId === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('')}
+            </select>
+          </div>
+
+          <!-- Meta-Panel (rechts auf Desktop, gestackt auf Mobile) -->
+          <div class="lg:col-span-5 text-sm">
+            <div class="space-y-1.5">
+              <div class="grid grid-cols-2 items-center gap-2">
+                <label class="text-ink-500 text-xs text-right">Angebots-Nr.:</label>
+                <input name="quote_no" value="${escapeHtml(f.quote_no || '')}" class="px-2 py-1 border border-ink-200 rounded-md font-mono text-sm text-right focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              </div>
+              <div class="grid grid-cols-2 items-center gap-2">
+                <label class="text-ink-500 text-xs text-right">Datum:</label>
+                <input name="date" type="date" value="${escapeHtml(f.date || '')}" class="px-2 py-1 border border-ink-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              </div>
+              <div class="grid grid-cols-2 items-center gap-2">
+                <label class="text-ink-500 text-xs text-right">Kunden-Nr.:</label>
+                <span id="quote_customer_no_display" class="px-2 py-1 text-sm text-right font-mono text-ink-700">${escapeHtml(currentCustomer?.fields?.customer_no || '—')}</span>
+              </div>
+              <div class="grid grid-cols-2 items-center gap-2">
+                <label class="text-ink-500 text-xs text-right">Kunden-Ref.:</label>
+                <input name="customer_ref" value="${escapeHtml(f.customer_ref || '')}" placeholder="—" class="px-2 py-1 border border-ink-200 rounded-md text-sm text-right focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              </div>
+              <div class="grid grid-cols-2 items-center gap-2">
+                <label class="text-ink-500 text-xs text-right">Gültigkeit:</label>
+                <input name="valid_until" type="date" value="${escapeHtml(f.valid_until || '')}" class="px-2 py-1 border border-ink-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              </div>
+              <div class="grid grid-cols-2 items-center gap-2 pt-1.5 border-t border-ink-100">
+                <label class="text-ink-500 text-xs text-right">Telefon:</label>
+                <span class="px-2 py-1 text-sm text-right text-ink-700">${escapeHtml(companyData.phone || '—')}</span>
+              </div>
+              <div class="grid grid-cols-2 items-center gap-2">
+                <label class="text-ink-500 text-xs text-right">Fax:</label>
+                <span class="px-2 py-1 text-sm text-right text-ink-700">${escapeHtml(companyData.fax || '—')}</span>
+              </div>
+              <div class="grid grid-cols-2 items-center gap-2">
+                <label class="text-ink-500 text-xs text-right">E-Mail:</label>
+                <span class="px-2 py-1 text-sm text-right text-ink-700 truncate">${escapeHtml(companyData.email || '—')}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section: Angebot -->
+        <h2 class="text-2xl sm:text-3xl font-bold text-ink-900 mb-2">Angebot</h2>
+        <input name="title" value="${escapeHtml(f.title || '')}" placeholder="Interner Titel (z.B. „Anfrage Frequenzumrichter Kone")" class="w-full px-3 py-1.5 mb-3 border border-ink-100 rounded-md text-xs text-ink-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <textarea name="description" rows="2" placeholder="Anfangstext — z.B. „Wir freuen uns auf eine erfolgreiche Zusammenarbeit!"" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-4 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+
+        <!-- Positionen -->
+        <div id="quoteItemsWrap">${renderQuoteItems(id || '', items)}</div>
+
+        <!-- Summen -->
+        <div class="flex justify-end mt-4">
+          <div id="quoteSums" class="w-full sm:w-72 text-sm space-y-1">
+            ${quoteSumsHtml(sums)}
+          </div>
+        </div>
+
+        <!-- Lieferung + Zahlung -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-6">
+          <div>
+            <label class="block text-xs font-medium text-ink-700 mb-1">Lieferung</label>
+            <input name="delivery_terms" list="quote_delivery_options" value="${escapeHtml(f.delivery_terms || '')}" placeholder="z.B. frei Haus" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <datalist id="quote_delivery_options">
+              <option value="frei Haus">
+              <option value="ab Werk">
+              <option value="DAP">
+              <option value="DDP">
+              <option value="Selbstabholung">
+            </datalist>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-ink-700 mb-1">Zahlungsbedingungen</label>
+            <input name="payment_terms" list="quote_payment_options" value="${escapeHtml(f.payment_terms || '')}" placeholder="z.B. 14 Tage netto" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <datalist id="quote_payment_options">
+              <option value="14 Tage netto">
+              <option value="30 Tage netto">
+              <option value="7 Tage 2% Skonto / 30 Tage netto">
+              <option value="Vorkasse">
+              <option value="Sofort fällig">
+            </datalist>
+          </div>
+        </div>
+
+        <!-- Schlusstext -->
+        <label class="block text-xs font-medium text-ink-700 mt-5 mb-1">Schlusstext</label>
+        <textarea name="notes" rows="3" placeholder="z.B. Zusätzliche Hinweise, Bankverbindung, Gerichtsstand…" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
       </div>
 
-      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Notizen / Nachtext</h4>
-      <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
-
-      <div class="flex justify-end gap-2 flex-wrap">
+      <!-- Action Bar -->
+      <div class="flex justify-end gap-2 flex-wrap mt-5">
         <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
         <button type="button" onclick="saveQuote(event, '${id || ''}', true)" class="px-3 py-2 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
-        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
+        <button type="submit" class="px-4 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 font-medium">Speichern und schließen</button>
       </div>
     </form>
   `);
+}
+
+function customerAddressBlock(f) {
+  if (!f) return '<span class="text-ink-400 italic">— bitte Empfänger wählen —</span>';
+  const lines = [
+    f.name1,
+    f.name2,
+    f.street,
+    [f.zip, f.city].filter(Boolean).join(' '),
+    f.country
+  ].filter(Boolean);
+  return lines.map(l => escapeHtml(l)).join('<br>');
 }
 
 function quoteSumsHtml(sums) {
@@ -3569,13 +3649,22 @@ function quoteSumsHtml(sums) {
 
 function onQuoteCustomerChange() {
   const cid = document.getElementById('quote_customer_select')?.value;
-  const select = document.getElementById('quote_contact_select');
-  if (!select) return;
-  if (!cid) { select.innerHTML = '<option value="">— nicht zugeordnet —</option>'; return; }
-  readData('Contact').then(all => {
-    const list = all.filter(c => (c.fields.customer_id || []).includes(cid));
-    select.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
-      list.map(c => `<option value="${c.id}">${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
+  const contactSel = document.getElementById('quote_contact_select');
+  const addrEl     = document.getElementById('quote_customer_addr');
+  const noEl       = document.getElementById('quote_customer_no_display');
+  if (!cid) {
+    if (contactSel) contactSel.innerHTML = '<option value="">— nicht zugeordnet —</option>';
+    if (addrEl) addrEl.innerHTML = customerAddressBlock(null);
+    if (noEl)   noEl.textContent = '—';
+    return;
+  }
+  Promise.all([readData('Customer'), readData('Contact')]).then(([cust, cont]) => {
+    const c = cust.find(r => r.id === cid);
+    if (addrEl) addrEl.innerHTML = customerAddressBlock(c?.fields);
+    if (noEl)   noEl.textContent = c?.fields?.customer_no || '—';
+    const list = cont.filter(r => (r.fields.customer_id || []).includes(cid));
+    if (contactSel) contactSel.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
+      list.map(r => `<option value="${r.id}">${escapeHtml(contactDisplayName(r.fields))}${r.fields.role ? ' · ' + escapeHtml(r.fields.role) : ''}</option>`).join('');
   });
 }
 
@@ -3831,7 +3920,7 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','title','description','date','valid_until','status','payment_terms','notes'].forEach(k => {
+  ['quote_no','title','description','date','valid_until','status','payment_terms','customer_ref','delivery_terms','notes'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
