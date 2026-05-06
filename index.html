@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.20';
+const APP_VERSION = 'v2.21';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -949,6 +949,8 @@ function closeModal() {
   if (typeof _inquirySpeech !== 'undefined' && _inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
   if (typeof _inquiryImages !== 'undefined') _inquiryImages = [];
   if (typeof _inquiryWizard !== 'undefined') _inquiryWizard = null;
+  // Quote-Tracking-Global zurücksetzen
+  window._currentQuoteIdInModal = null;
   if (_currentLock) {
     const lock = _currentLock;
     _currentLock = null;
@@ -3827,22 +3829,28 @@ function quoteStatusBadge(status) {
 }
 
 function calcQuoteSums(items) {
-  let subtotal_net = 0, vat_total = 0;
+  let subtotal_net = 0, vat_total = 0, ek_total = 0;
   items.forEach(it => {
     const f = it.fields || it;
     const qty   = +(f.qty || 0);
     const price = +(f.unit_price_net || 0);
     const disc  = +(f.discount_pct || 0);
     const vat   = +(f.vat_rate || 0);
+    const ek    = +(f.purchase_price || 0);
     const lineNet = qty * price * (1 - disc / 100);
     const lineVat = lineNet * vat / 100;
     subtotal_net += lineNet;
     vat_total    += lineVat;
+    ek_total     += qty * ek;
   });
+  const margin = subtotal_net - ek_total;
   return {
     subtotal_net: Math.round(subtotal_net * 100) / 100,
     vat_total:    Math.round(vat_total    * 100) / 100,
-    total_gross:  Math.round((subtotal_net + vat_total) * 100) / 100
+    total_gross:  Math.round((subtotal_net + vat_total) * 100) / 100,
+    ek_total:     Math.round(ek_total     * 100) / 100,
+    margin:       Math.round(margin       * 100) / 100,
+    margin_pct:   subtotal_net > 0 ? Math.round((margin / subtotal_net) * 1000) / 10 : 0
   };
 }
 
@@ -4064,10 +4072,9 @@ function collectCustomValues() {
   return obj;
 }
 
-function quoteTemplatePicker(fieldName, sectionLabel) {
+function quoteTemplatePicker(fieldName, sectionLabel, currentTplId) {
   const tpls = (window._quoteTemplates || []).filter(t => (t.fields.section || '') === sectionLabel);
   if (tpls.length === 0) return '<span class="text-xs text-ink-400 italic">— keine Vorlage —</span>';
-  // Sortierung: Standard zuerst, dann nach Name
   const sorted = [...tpls].sort((a, b) => {
     const ad = a.fields.is_default ? 0 : 1;
     const bd = b.fields.is_default ? 0 : 1;
@@ -4075,11 +4082,30 @@ function quoteTemplatePicker(fieldName, sectionLabel) {
     return (a.fields.name || '').localeCompare(b.fields.name || '', 'de');
   });
   return `
-    <select onchange="onTemplatePicked(this, '${fieldName}', 'Angebot')" class="text-xs border border-ink-200 rounded-md px-2 py-1 max-w-[220px]">
-      <option value="">Vorlage einfügen…</option>
-      ${sorted.map(t => `<option value="${t.id}">${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '–')}</option>`).join('')}
-    </select>
+    <div class="flex items-center gap-1">
+      <select data-tpl-field="${fieldName}" onchange="onTemplatePicked(this, '${fieldName}', 'Angebot')" class="text-xs border border-ink-200 rounded-md px-2 py-1 max-w-[220px]">
+        <option value="">— keine Vorlage —</option>
+        ${sorted.map(t => `<option value="${t.id}" ${t.id===currentTplId?'selected':''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '–')}</option>`).join('')}
+      </select>
+      <button type="button" onclick="refreshTemplate('${fieldName}', 'Angebot')" title="Vorlage neu anwenden / Werte aktualisieren" class="p-1 text-ink-500 hover:text-brand-600 hover:bg-brand-50 rounded">
+        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+      </button>
+    </div>
   `;
+}
+
+function refreshTemplate(fieldName, docType) {
+  const select = document.querySelector(`#modalBox select[data-tpl-field="${fieldName}"]`);
+  const tplId = select?.value;
+  if (!tplId) { toast('Keine Vorlage ausgewählt', 'warn'); return; }
+  const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
+  if (!tpl) return;
+  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"]`);
+  if (!ta) return;
+  buildQuoteVariableContext().then(ctx => {
+    ta.value = substituteVariables(tpl.fields.content || '', docType, ctx);
+    toast('Aktualisiert', 'success', 1200);
+  });
 }
 
 async function applyDefaultTemplate(fieldName, section) {
@@ -4119,13 +4145,19 @@ async function buildQuoteVariableContext() {
 
 function onTemplatePicked(selectEl, fieldName, docType) {
   const tplId = selectEl.value;
-  selectEl.value = ''; // wieder auf "Vorlage einfügen…" zurück
-  if (!tplId) return;
+  // Hidden-Feld für Speicherung mitführen
+  const hiddenName = fieldName === 'description' ? 'intro_template_id' : 'closing_template_id';
+  const hidden = document.querySelector(`#modalBox input[name="${hiddenName}"]`);
+  if (hidden) hidden.value = tplId || '';
+  if (!tplId) return; // keine Vorlage
   const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
   if (!tpl) return;
   const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"]`);
   if (!ta) return;
-  if (ta.value.trim() && !confirm('Aktuellen Text durch Vorlage ersetzen?')) return;
+  if (ta.value.trim() && !confirm('Aktuellen Text durch Vorlage ersetzen?')) {
+    // Auswahl behalten, aber Text nicht überschreiben
+    return;
+  }
   buildQuoteVariableContext().then(ctx => {
     ta.value = substituteVariables(tpl.fields.content || '', docType, ctx);
   });
@@ -4134,6 +4166,10 @@ function onTemplatePicked(selectEl, fieldName, docType) {
 async function openQuoteModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  // Modal-Tracking-Global setzen (für Silent-Save-Logik)
+  window._currentQuoteIdInModal = id || null;
+  // Internen Modus standardmäßig aus
+  if (typeof window._quoteInternalMode === 'undefined') window._quoteInternalMode = false;
   let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [];
   try {
     [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields] = await Promise.all([
@@ -4244,8 +4280,9 @@ async function openQuoteModal(id) {
         <div class="col-span-2">
           <div class="flex items-center justify-between mb-1">
             <label class="text-sm font-medium text-ink-700">Einleitung</label>
-            ${quoteTemplatePicker('description', 'Einleitung')}
+            ${quoteTemplatePicker('description', 'Einleitung', (f.intro_template_id || [])[0] || '')}
           </div>
+          <input type="hidden" name="intro_template_id" value="${escapeHtml((f.intro_template_id || [])[0] || '')}">
           <textarea name="description" rows="3" placeholder="Anrede + Einleitung — z.B. „Sehr geehrte Damen und Herren, …"" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
         </div>
       </div>
@@ -4260,8 +4297,9 @@ async function openQuoteModal(id) {
       <div class="mt-5">
         <div class="flex items-center justify-between mb-1">
           <label class="text-sm font-medium text-ink-700">Schlusstext</label>
-          ${quoteTemplatePicker('notes', 'Schlusstext')}
+          ${quoteTemplatePicker('notes', 'Schlusstext', (f.closing_template_id || [])[0] || '')}
         </div>
+        <input type="hidden" name="closing_template_id" value="${escapeHtml((f.closing_template_id || [])[0] || '')}">
         <textarea name="notes" rows="3" placeholder="z.B. Grußformel + Bankverbindung + Hinweise" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
       </div>
 
@@ -4288,10 +4326,19 @@ async function openQuoteModal(id) {
 }
 
 function quoteSumsHtml(sums) {
+  const internal = !!window._quoteInternalMode;
+  const internalBlock = internal ? `
+    <div class="border-t-2 border-amber-300 pt-1.5 mt-1.5 bg-amber-50 -mx-4 px-4 -mb-4 pb-4 rounded-b-xl">
+      <p class="text-[10px] uppercase font-bold tracking-wider text-amber-700 mb-1">Interne Kalkulation</p>
+      <div class="flex items-center justify-between text-xs"><span class="text-ink-600">EK-Summe</span><span class="font-mono tabular-nums">${formatPrice(sums.ek_total)} €</span></div>
+      <div class="flex items-center justify-between font-semibold ${sums.margin >= 0 ? 'text-emerald-700' : 'text-red-700'}"><span>Marge</span><span class="font-mono tabular-nums">${formatPrice(sums.margin)} € (${sums.margin_pct}%)</span></div>
+    </div>
+  ` : '';
   return `
     <div class="flex items-center justify-between"><span class="text-ink-600">Summe netto</span><span class="font-mono tabular-nums">${formatPrice(sums.subtotal_net)} €</span></div>
     <div class="flex items-center justify-between"><span class="text-ink-600">MwSt</span><span class="font-mono tabular-nums">${formatPrice(sums.vat_total)} €</span></div>
     <div class="flex items-center justify-between border-t border-ink-200 pt-1 mt-1 font-bold text-ink-900"><span>Gesamt brutto</span><span class="font-mono tabular-nums">${formatPrice(sums.total_gross)} €</span></div>
+    ${internalBlock}
   `;
 }
 
@@ -4335,17 +4382,23 @@ function onQuoteCustomerChange(value) {
 }
 
 function renderQuoteItems(quoteId, items) {
-  if (!quoteId) {
-    return '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Speichere zuerst das Angebot — danach kannst du Positionen hinzufügen.</p>';
-  }
-  const sorted = [...items].sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+  // Tracking-Global: Quote-ID kann im Modal noch null sein, aber dank Silent-Save funktioniert + Position
+  const sorted = [...(items || [])].sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+  const internalMode = !!window._quoteInternalMode;
+  const toggle = `
+    <label class="flex items-center gap-2 text-xs text-ink-600 cursor-pointer">
+      <input type="checkbox" ${internalMode ? 'checked' : ''} onchange="window._quoteInternalMode=this.checked;refreshQuoteItemsSection(window._currentQuoteIdInModal || '${quoteId || ''}')" class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+      <span>Interner Modus (EK + Marge anzeigen)</span>
+    </label>
+  `;
   const rows = sorted.length === 0
     ? '<p class="text-xs text-ink-500 italic px-3 py-2">Noch keine Positionen.</p>'
     : '<div id="qiList" class="space-y-2">' + sorted.map(it => `<div data-qi-row="${it.id}">${quoteItemRow(quoteId, it)}</div>`).join('') + '</div>';
   return `
+    <div class="flex items-center justify-end mb-2">${toggle}</div>
     ${rows}
     <div id="qiFormWrap" class="mt-2"></div>
-    <button id="addQiBtn" type="button" onclick="showQuoteItemInlineForm('${quoteId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+    <button id="addQiBtn" type="button" onclick="showQuoteItemInlineForm('${quoteId || ''}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
       <i data-lucide="plus" class="w-4 h-4"></i> Position hinzufügen
     </button>
   `;
@@ -4353,14 +4406,21 @@ function renderQuoteItems(quoteId, items) {
 
 function quoteItemRow(quoteId, it) {
   const f = it.fields || {};
+  const internalMode = !!window._quoteInternalMode;
   const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
   const desc = (f.description || '').split('\n')[0] || '–';
+  const ek = +(f.purchase_price || 0);
+  const lineEk = (+(f.qty || 0)) * ek;
+  const margin = lineNet - lineEk;
   const meta = [
     (f.qty || 0) + (f.unit ? ' ' + f.unit : ''),
     '× ' + formatPrice(f.unit_price_net || 0) + ' €',
     f.discount_pct > 0 ? '−' + (f.discount_pct) + '%' : '',
     'MwSt ' + (f.vat_rate || 0) + '%'
   ].filter(Boolean).join(' · ');
+  const internalLine = internalMode
+    ? `<p class="text-xs text-amber-700 mt-1 font-mono">EK: ${formatPrice(ek)} € · Zeile-EK: ${formatPrice(lineEk)} € · Marge: <span class="${margin >= 0 ? 'text-emerald-700' : 'text-red-700'} font-semibold">${formatPrice(margin)} €</span></p>`
+    : '';
   return `
     <div class="p-3 bg-ink-50 rounded-lg border border-ink-100">
       <div class="flex items-start justify-between gap-2">
@@ -4370,6 +4430,7 @@ function quoteItemRow(quoteId, it) {
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
           <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
+          ${internalLine}
         </div>
         <div class="flex items-center gap-2 shrink-0">
           <span class="font-mono text-sm tabular-nums text-ink-900">${formatPrice(lineNet)} €</span>
@@ -4385,14 +4446,53 @@ function quoteItemRow(quoteId, it) {
   `;
 }
 
+async function _silentSaveQuoteHeader() {
+  // Speichert den Quote-Header still im Hintergrund und gibt die neue ID zurück.
+  const cur = getCurrentCompany();
+  if (!cur) return null;
+  const form = document.querySelector('#modalBox form');
+  if (!form) return null;
+  const fd = new FormData(form);
+  const fields = {};
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  const cidSel = (fd.get('customer_id') || '').trim();
+  const conSel = (fd.get('contact_id')  || '').trim();
+  fields.customer_id = cidSel ? [cidSel] : [];
+  fields.contact_id  = conSel ? [conSel] : [];
+  fields.status = fields.status || 'Entwurf';
+  fields.company_id = [cur.id];
+  const introTpl   = (fd.get('intro_template_id') || '').trim();
+  const closingTpl = (fd.get('closing_template_id') || '').trim();
+  if (introTpl)   fields.intro_template_id   = [introTpl];
+  if (closingTpl) fields.closing_template_id = [closingTpl];
+  const cv = collectCustomValues();
+  if (Object.keys(cv).length) fields.custom_values = JSON.stringify(cv);
+  try {
+    const created = await writeData('Quote', fields);
+    return created.id;
+  } catch (err) {
+    toast(err.message, 'error');
+    return null;
+  }
+}
+
 async function showQuoteItemInlineForm(quoteId, itemId) {
   if (document.querySelector('#qiFormWrap [data-qi-form]')) return;
-  // Auto-Save bei neuem Angebot ohne ID: Header zuerst speichern, dann Position-Form öffnen
+  // Auto-Save bei neuem Angebot: Header still im Hintergrund speichern, ohne Modal zu schließen
   if (!quoteId) {
-    _pendingPostQuoteAction = () => document.getElementById('addQiBtn')?.click();
-    const form = document.querySelector('#modalBox form');
-    await saveQuote({ preventDefault: () => {}, target: form }, '', true);
-    return;
+    const newId = await _silentSaveQuoteHeader();
+    if (!newId) return;
+    quoteId = newId;
+    window._currentQuoteIdInModal = newId;
+    // Items-Wrap mit der neuen ID neu rendern, damit Buttons die richtige ID haben
+    const wrap = document.getElementById('quoteItemsWrap');
+    if (wrap) {
+      wrap.innerHTML = renderQuoteItems(newId, []);
+      if (window.lucide) lucide.createIcons();
+    }
+    toast('Angebot ' + (document.querySelector('#modalBox input[name="quote_no"]')?.value || '') + ' angelegt', 'success', 1500);
   }
   const cur = getCurrentCompany();
   let f = {};
@@ -4412,13 +4512,31 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
     }
   } catch (e) {}
 
-  let articles = [];
+  let articles = [], allArticleSuppliers = [], allSuppliers = [];
   try {
-    const allArt = await readData('Article');
+    const [allArt, asAll, supAll] = await Promise.all([readData('Article'), readData('ArticleSupplier'), readData('Supplier')]);
     articles = allArt
       .filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv')
       .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+    allArticleSuppliers = asAll;
+    allSuppliers = supAll;
   } catch (e) {}
+  // Cache für Auto-Fill bei Artikel-Wahl: article -> [{supplierId, supplierName, ek, isDefault}]
+  window._qiArticleSupplierCache = {};
+  allArticleSuppliers.forEach(j => {
+    const aid = (j.fields.article_id || [])[0];
+    const sid = (j.fields.supplier_id || [])[0];
+    if (!aid || !sid) return;
+    const sup = allSuppliers.find(s => s.id === sid);
+    if (!window._qiArticleSupplierCache[aid]) window._qiArticleSupplierCache[aid] = [];
+    window._qiArticleSupplierCache[aid].push({
+      supplierId: sid,
+      supplierName: sup?.fields?.name1 || '?',
+      supplierNo:   sup?.fields?.supplier_no || '',
+      ek: +(j.fields.purchase_price || 0),
+      isDefault: !!j.fields.is_default
+    });
+  });
   const currentArticleId = (f.article_id || [])[0] || '';
   const fid = 'qif_' + (itemId || 'new');
   // Article-Combobox: Items + Cache für Auto-Fill
@@ -4457,6 +4575,20 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
       <div>
         <label class="block text-xs font-medium text-ink-700 mb-1">Beschreibung</label>
         <textarea id="${fid}_description" rows="2" placeholder="Position-Beschreibung (mehrzeilig erlaubt)" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Lieferant</label>
+          <select id="${fid}_supplier" onchange="onQiSupplierChange('${fid}')" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— kein Lieferant —</option>
+            ${(currentArticleId && window._qiArticleSupplierCache[currentArticleId] || []).map(s => `<option value="${s.supplierId}" data-ek="${s.ek}" ${(f.supplier_id||[])[0]===s.supplierId?'selected':''}>${s.isDefault ? '★ ' : ''}${escapeHtml(s.supplierName)}${s.supplierNo ? ' (' + escapeHtml(s.supplierNo) + ')' : ''}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
+          <input id="${fid}_purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
       </div>
 
       <div class="grid grid-cols-4 gap-2">
@@ -4502,12 +4634,23 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
 // Wird vom Article-Combobox aufgerufen (value, comboboxId)
 function onQiArticleChange(value, comboboxId) {
   const articleId = value || '';
-  // fid aus comboboxId ableiten ('qif_xxx_article' → 'qif_xxx')
   const fid = (comboboxId || '').replace(/_article$/, '');
+  // Lieferanten-Picker neu befüllen aus Cache
+  const supSel = document.getElementById(fid + '_supplier');
+  if (supSel) {
+    const list = (window._qiArticleSupplierCache || {})[articleId] || [];
+    supSel.innerHTML = '<option value="">— kein Lieferant —</option>' +
+      list.map(s => `<option value="${s.supplierId}" data-ek="${s.ek}" ${s.isDefault ? 'selected' : ''}>${s.isDefault ? '★ ' : ''}${escapeHtml(s.supplierName)}${s.supplierNo ? ' (' + escapeHtml(s.supplierNo) + ')' : ''}</option>`).join('');
+    // Wenn Default-Lieferant existiert: EK-Preis übernehmen
+    const def = list.find(s => s.isDefault);
+    if (def) {
+      const ekEl = document.getElementById(fid + '_purchase_price');
+      if (ekEl) ekEl.value = def.ek;
+    }
+  }
   if (!articleId) return;
   const a = (window._qiArticleCacheById || {})[articleId];
   if (!a) return;
-  // Auto-fill — überschreibt aktuelle Werte (User kann danach anpassen)
   const descEl = document.getElementById(fid + '_description');
   if (descEl && !descEl.value) descEl.value = [a.name1, a.name2, a.desc].filter(Boolean).join('\n');
   const priceEl = document.getElementById(fid + '_unit_price_net');
@@ -4517,6 +4660,18 @@ function onQiArticleChange(value, comboboxId) {
   const vatEl = document.getElementById(fid + '_vat_rate');
   if (vatEl) vatEl.value = a.vat;
   recalcQiPreview(fid);
+}
+
+// Lieferanten-Wahl: EK-Preis aus dem ausgewählten Optionseintrag übernehmen
+function onQiSupplierChange(fid) {
+  const supSel = document.getElementById(fid + '_supplier');
+  if (!supSel) return;
+  const opt = supSel.options[supSel.selectedIndex];
+  const ek = opt?.getAttribute('data-ek');
+  if (ek !== null && ek !== undefined && ek !== '') {
+    const ekEl = document.getElementById(fid + '_purchase_price');
+    if (ekEl) ekEl.value = ek;
+  }
 }
 
 function recalcQiPreview(fid) {
@@ -4560,6 +4715,11 @@ async function saveQuoteItemInline(quoteId, itemId) {
     label:          'Pos.' + pos + ' · ' + desc.split('\n')[0].substring(0, 50)
   };
   fields.article_id = articleId ? [articleId] : [];
+  // Lieferant + EK-Preis (Snapshot)
+  const supplierId = document.getElementById(fid + '_supplier')?.value || '';
+  fields.supplier_id = supplierId ? [supplierId] : [];
+  const ek = parseDecimal($v('purchase_price'));
+  if (ek !== null) fields.purchase_price = ek;
   if (!itemId) fields.quote_id = [quoteId];
   try {
     if (itemId) await updateData('QuoteItem', itemId, fields);
@@ -4599,6 +4759,8 @@ async function saveQuote(e, id, keepOpen) {
   if (e && e.preventDefault) e.preventDefault();
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  // Falls inzwischen ein Silent-Save passiert ist, Tracking-Global hat Vorrang
+  if (!id && window._currentQuoteIdInModal) id = window._currentQuoteIdInModal;
   const form = e?.target?.tagName === 'FORM' ? e.target : (e?.target?.closest?.('form') || document.querySelector('#modalBox form'));
   if (!form) return;
   const fd = new FormData(form);
@@ -4606,6 +4768,11 @@ async function saveQuote(e, id, keepOpen) {
   ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
+  // Template-IDs (für persistente Auswahl beim Wieder-Öffnen)
+  const introTpl   = (fd.get('intro_template_id') || '').trim();
+  const closingTpl = (fd.get('closing_template_id') || '').trim();
+  fields.intro_template_id   = introTpl   ? [introTpl]   : [];
+  fields.closing_template_id = closingTpl ? [closingTpl] : [];
   // Individuelle Felder als JSON
   const cv = collectCustomValues();
   fields.custom_values = Object.keys(cv).length ? JSON.stringify(cv) : '';
@@ -4637,6 +4804,7 @@ async function saveQuote(e, id, keepOpen) {
       savedId = created.id;
     }
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
+    window._currentQuoteIdInModal = savedId;
     if (keepOpen) {
       closeModal();
       toast('Gespeichert', 'success');
