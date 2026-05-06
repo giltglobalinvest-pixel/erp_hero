@@ -64,6 +64,22 @@
 </head>
 <body class="bg-brand-500 text-ink-900">
 
+<!-- FLP Logo (Original-SVG, einmal definiert, mehrfach via <use> referenziert) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="flp-logo" viewBox="50.2 112.3 319.9 73.5">
+    <path fill="#007EAC" d="M298,113.8h70.6v70.6H298V113.8z M296.6,185.8h73.5v-73.5h-73.5V185.8z"/>
+    <polygon fill="#575756" points="91.7,112.3 50.2,112.3 50.2,185.8 123.7,185.8 123.7,138.2 123.7,112.3 "/>
+    <polygon fill="#007EAC" points="173.8,112.3 132.3,112.3 132.3,185.8 205.8,185.8 205.8,138.2 205.8,112.3 "/>
+    <polygon fill="#007EAC" points="256,112.3 214.5,112.3 214.5,185.8 287.9,185.8 287.9,138.2 287.9,112.3 "/>
+    <path fill="#F6F6F6" d="M69,131.6v-5.1h32.2v5.1H75.5 M75.5,146.4h24.4v5.1H75.5v20.2H69v-25.3"/>
+    <polygon fill="#F6F6F6" points="157.7,126.6 164.2,126.6 164.2,166.5 190.1,166.5 190.1,171.6 157.7,171.6 "/>
+    <path fill="#F6F6F6" d="M231.8,127.3h20.7c13.5,0,18,4,18,12.1c0,7.8-5.2,13.1-16.1,13.1h-16.2v19.7h-6.5V127.3z M252.9,147.4 c7.5,0,10.8-2.6,10.8-8c0-4.9-2.8-7-11.3-7h-14.1v15H252.9z"/>
+    <path fill="#007EAC" d="M348.7,163H347v3.1h-3.1V163h-1.7v7.8h1.7v-3.4h3.1v3.4h1.7V163z M334.3,167.5c0.9,0,1.4,0.3,1.4,1 c0,0.4-0.1,0.6-0.3,0.8c-0.2,0.2-0.6,0.3-1,0.3h-1.1v-2H334.3z M333.3,164.4h0.9c0.5,0,0.8,0.1,1,0.2c0.2,0.1,0.3,0.3,0.3,0.6 c0,0.3-0.1,0.6-0.3,0.7c-0.2,0.1-0.5,0.2-1,0.2h-1V164.4z M331.6,170.9h2.9c0.9,0,1.6-0.2,2.1-0.6c0.5-0.4,0.8-1,0.8-1.7 c0-0.5-0.1-0.9-0.3-1.2s-0.6-0.5-1.1-0.6v-0.1c0.4-0.1,0.7-0.2,0.9-0.5c0.2-0.3,0.3-0.7,0.3-1.2c0-0.7-0.3-1.2-0.8-1.5 c-0.5-0.3-1.3-0.5-2.4-0.5h-2.4V170.9z M322.8,170.9l2-6.1h0c0,1-0.1,1.6-0.1,1.8c0,0.2,0,0.4,0,0.6v3.7h1.6V163h-2.3l-2,6h0 l-1.9-6h-2.3v7.8h1.5v-3.6c0-0.4,0-1.3-0.1-2.5h0l1.9,6.2H322.8z M309.7,167.8h1.5v1.6c-0.4,0.1-0.7,0.1-1.1,0.1 c-0.7,0-1.2-0.2-1.5-0.7c-0.3-0.4-0.5-1.1-0.5-1.9c0-0.8,0.2-1.5,0.6-1.9c0.4-0.5,1-0.7,1.7-0.7c0.6,0,1.2,0.1,1.8,0.4l0.6-1.3 c-0.7-0.3-1.5-0.5-2.3-0.5c-1.3,0-2.3,0.4-3,1.1c-0.7,0.7-1.1,1.7-1.1,3c0,1.3,0.3,2.3,0.9,3c0.6,0.7,1.5,1,2.7,1 c0.5,0,0.9,0,1.4-0.1c0.4-0.1,0.9-0.2,1.4-0.3v-4.1h-3.1V167.8z"/>
+    <path fill="#007EAC" d="M352.2,149.5c-0.3-0.4-0.8-0.7-1.5-1.1c-0.6-0.3-0.9-0.4-1.1-0.6c-0.1-0.1-0.3-0.2-0.3-0.3s-0.1-0.2-0.1-0.4 c0-0.2,0.1-0.4,0.3-0.6c0.2-0.1,0.4-0.2,0.7-0.2c0.3,0,0.5,0,0.8,0.1c0.3,0.1,0.6,0.2,1,0.4l0.5-1.3c-0.4-0.2-0.8-0.3-1.2-0.4 c-0.4-0.1-0.8-0.1-1.2-0.1c-0.8,0-1.5,0.2-2,0.6c-0.5,0.4-0.7,0.9-0.7,1.6c0,0.4,0.1,0.7,0.2,1c0.1,0.3,0.3,0.5,0.6,0.7 c0.2,0.2,0.6,0.4,1.1,0.6c0.5,0.2,0.9,0.4,1,0.5c0.2,0.1,0.3,0.2,0.4,0.3c0.1,0.1,0.1,0.3,0.1,0.4c0,0.3-0.1,0.5-0.3,0.6 c-0.2,0.1-0.5,0.2-0.8,0.2c-0.3,0-0.6,0-1-0.1c-0.4-0.1-0.8-0.3-1.3-0.5v1.5c0.6,0.3,1.4,0.5,2.2,0.5c0.9,0,1.6-0.2,2.1-0.6 c0.5-0.4,0.8-1,0.8-1.7C352.6,150.3,352.5,149.8,352.2,149.5 M341.3,146.5h2.1v-1.4h-5.9v1.4h2.1v6.5h1.7V146.5z M330.3,149.9 l1.9,3h1.8c-0.4-0.5-1.1-1.7-2.3-3.4c0.5-0.2,0.8-0.5,1.1-0.8c0.3-0.4,0.4-0.8,0.4-1.2c0-0.8-0.3-1.4-0.8-1.8 c-0.5-0.4-1.3-0.6-2.4-0.6h-2.3v7.8h1.7v-3H330.3z M329.4,146.5h0.5c0.5,0,0.9,0.1,1.2,0.2c0.3,0.2,0.4,0.4,0.4,0.8 c0,0.4-0.1,0.7-0.4,0.8c-0.2,0.2-0.6,0.3-1.2,0.3h-0.5V146.5z M318.7,149.7c0.6-1.8,0.9-2.9,1-3.4c0,0.1,0.1,0.3,0.1,0.5 c0.1,0.2,0.4,1.2,0.9,2.9H318.7z M323.5,153l-2.8-7.9h-2l-2.8,7.9h1.8l0.6-1.9h2.9l0.6,1.9H323.5z M311.4,145.7 c-0.5-0.4-1.2-0.6-2.2-0.6h-2.5v7.8h1.7v-2.8h0.7c1,0,1.7-0.2,2.3-0.7c0.5-0.4,0.8-1.1,0.8-1.9 C312.1,146.7,311.9,146.1,311.4,145.7 M308.3,146.5h0.8c0.5,0,0.8,0.1,1,0.3c0.2,0.2,0.3,0.5,0.3,0.9c0,0.4-0.1,0.7-0.4,0.9 c-0.3,0.2-0.6,0.3-1.1,0.3h-0.5V146.5z"/>
+    <path fill="#007EAC" d="M335.5,128.6h2.1v-1.4h-5.9v1.4h2.1v6.5h1.7V128.6z M324.8,131.9h2.7v-1.4h-2.7v-2h2.9v-1.4h-4.5v7.8h1.6V131.9 z M317.9,127.2h-1.7v7.8h1.7V127.2z M311.5,135v-1.4h-3.2v-6.5h-1.7v7.8H311.5z"/>
+  </symbol>
+</svg>
+
 <!-- ========================================================== -->
 <!-- LOGIN SCREEN                                                -->
 <!-- ========================================================== -->
@@ -71,10 +87,8 @@
   <div class="w-full max-w-md">
     <!-- Logo -->
     <div class="flex items-center justify-center mb-8 select-none">
-      <div class="flex items-center gap-1 bg-white p-2 rounded-lg shadow-card">
-        <div class="w-12 h-12 bg-[#575756] text-white grid place-items-center font-bold text-2xl tracking-tight">F</div>
-        <div class="w-12 h-12 bg-[#007EAC] text-white grid place-items-center font-bold text-2xl tracking-tight">L</div>
-        <div class="w-12 h-12 bg-[#007EAC] text-white grid place-items-center font-bold text-2xl tracking-tight">P</div>
+      <div class="bg-white px-4 py-3 rounded-lg shadow-card">
+        <svg class="h-12 w-auto block" aria-label="FLP Lift Parts"><use href="#flp-logo"/></svg>
       </div>
     </div>
 
@@ -149,10 +163,8 @@
       <!-- Logo -->
       <div class="px-5 pt-5 pb-3 flex items-center justify-between">
         <div class="flex items-center gap-1 select-none">
-          <div class="flex items-center gap-0.5 bg-white p-1 rounded">
-            <div class="w-7 h-7 bg-[#575756] text-white grid place-items-center font-bold text-sm">F</div>
-            <div class="w-7 h-7 bg-[#007EAC] text-white grid place-items-center font-bold text-sm">L</div>
-            <div class="w-7 h-7 bg-[#007EAC] text-white grid place-items-center font-bold text-sm">P</div>
+          <div class="bg-white px-2 py-1.5 rounded">
+            <svg class="h-7 w-auto block" aria-label="FLP Lift Parts"><use href="#flp-logo"/></svg>
           </div>
         </div>
         <!-- Close (mobile) -->
@@ -321,7 +333,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v1.1';
+const APP_VERSION = 'v1.2';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
