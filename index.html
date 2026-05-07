@@ -452,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.63';
+const APP_VERSION = 'v2.64';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6371,10 +6371,10 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     fwTotal: 'font-bold',
     fwBezeichnung: isK ? 'font-semibold' : '',
   };
-  // Sub-Logo (z.B. TÜV) — wird im Header oben links neben dem FLP-Logo platziert (80px hoch)
+  // Sub-Logo (z.B. TÜV) — wird unter dem Header oben links platziert (70px hoch)
   const subLogoUrl = (c?.sub_logo || [])[0]?.url || '';
   const subLogoHtml = subLogoUrl
-    ? `<img src="${escapeHtml(subLogoUrl)}" crossorigin="anonymous" style="height:80px;width:auto;display:block;" alt="Sub-Logo">`
+    ? `<img src="${escapeHtml(subLogoUrl)}" crossorigin="anonymous" style="height:70px;width:auto;display:block;" alt="Sub-Logo">`
     : '';
   // Anrede für Empfänger (Herrn/Frau aus contact.gender ableiten)
   const recipientSalutation = (() => {
@@ -6389,17 +6389,18 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
   const secondaryLogoUrl = (c?.secondary_logo || [])[0]?.url || '';
   const secondaryLogoHtml = secondaryLogoUrl
-    ? `<img src="${escapeHtml(secondaryLogoUrl)}" crossorigin="anonymous" style="height:80px;width:auto;display:block;" alt="2. Logo">`
+    ? `<img src="${escapeHtml(secondaryLogoUrl)}" crossorigin="anonymous" style="height:70px;width:auto;display:block;" alt="2. Logo">`
     : '';
   // Sub-Logo + 2. Logo (linksbündig) — werden im Pager nur auf Seite 1 gerendert.
   const leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
     ? `<div class="mt-1 mb-2 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
     : '';
-  // Tagline einzeilig — Logo überlappt die rechte Seite (position:absolute),
-  // Tagline läuft full-width darunter. Bei Überlänge: das Logo verdeckt das Ende.
+  // Tagline einzeilig + kleinere Schrift, garantiert sichtbar.
+  // FLP-Logo position:absolute auf der rechten Seite (z-index überdeckt Überlauf falls nötig).
+  // Tagline mit padding-right damit sie nicht hinter dem Logo verschwindet.
   const header = `
-    <div style="position:relative;margin-bottom:4px;height:46px;">
-      <div class="text-ink-700" style="position:absolute;top:6px;left:0;right:0;font-size:14px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tagline)}</div>
+    <div style="position:relative;margin-bottom:4px;height:42px;">
+      <div class="text-ink-700" style="position:absolute;top:8px;left:0;right:184px;font-size:12px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tagline)}</div>
       <div style="position:absolute;top:0;right:0;z-index:2;">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
@@ -6410,10 +6411,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   // (Inline-Styles überschreiben Tailwind-Klassen ohne !important — bulletproof).
   const body = `
     <div data-quote-body class="${sz.base} text-ink-900${bodyExtraClass}" style="${bodyInlineStyle}">
-      <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
-      <div class="quote-doc-title ${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-2" style="${titleInlineStyle}">Angebot</div>
 
-      <!-- ADRESSZEILE + EMPFÄNGER + META (im Klassisch-Variant enger gesetzt) -->
+      <!-- ADRESSZEILE + EMPFÄNGER (LINKS)  |  ANGEBOT-Title + META (RECHTS) -->
       <div class="grid grid-cols-2 ${sz.colsGap} ${sz.sectionGap}">
         <div>
           <!-- Briefkuvert-Adresszeile -->
@@ -6427,18 +6426,24 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
             ${cu.country ? `<div>${escapeHtml(cu.country)}</div>` : ''}
           </div>
         </div>
-        <div class="${isK ? 'text-[11px]' : 'text-[10px]'}">
-          <!-- Meta-Block rechtsbündig, kompakt: Label + 16px Gap + Wert -->
-          <div style="margin-left:auto;width:fit-content;max-width:100%;">
-            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Angebots-Nr.:</span><span>${escapeHtml(q.quote_no || '–')}</span></div>
-            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kunden-Nr.:</span><span>${escapeHtml(cu.customer_no || '–')}</span></div>
-            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Datum:</span><span>${escapeHtml(formatDeDate(q.date))}</span></div>
-            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Gültigkeit:</span><span>${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : '30 Tage'}</span></div>
-            <div class="${sz.cellPad}" style="height:8px;"></div>
-            <div class="${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kontakt:</span></div>
-            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Telefon:</span><span>${escapeHtml(footer.tel)}</span></div>
-            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Fax:</span><span>${escapeHtml(footer.fax)}</span></div>
-            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">E-Mail:</span><span>${escapeHtml(footer.email)}</span></div>
+        <div>
+          <!-- 'Angebot' Titel — in der RECHTEN Spalte, oben, rechtsbündig.
+               Aligned mit dem Meta-Block darunter. -->
+          <div class="quote-doc-title text-ink-900 font-bold tracking-tight leading-none text-right" style="font-size:32px;margin-bottom:14px;${titleInlineStyle}">Angebot</div>
+
+          <div class="${isK ? 'text-[11px]' : 'text-[10px]'}">
+            <!-- Meta-Block rechtsbündig, kompakt: Label + 16px Gap + Wert -->
+            <div style="margin-left:auto;width:fit-content;max-width:100%;">
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Angebots-Nr.:</span><span>${escapeHtml(q.quote_no || '–')}</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kunden-Nr.:</span><span>${escapeHtml(cu.customer_no || '–')}</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Datum:</span><span>${escapeHtml(formatDeDate(q.date))}</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Gültigkeit:</span><span>${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : '30 Tage'}</span></div>
+              <div class="${sz.cellPad}" style="height:8px;"></div>
+              <div class="${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kontakt:</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Telefon:</span><span>${escapeHtml(footer.tel)}</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Fax:</span><span>${escapeHtml(footer.fax)}</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">E-Mail:</span><span>${escapeHtml(footer.email)}</span></div>
+            </div>
           </div>
         </div>
       </div>
@@ -6564,10 +6569,10 @@ function paginatePreview() {
 
   // A4 @ 96dpi
   const A4_W = 794, A4_H = 1123;
-  const PAD_T = 28, PAD_LR = 50, PAD_B = 24;
-  const HEADER_H = 50, FOOTER_H = 92, GAP = 0;
-  // Logos-Höhe nur reservieren wenn welche existieren (sonst 0) — 80px Logos exakt
-  const LOGOS_H = headerPage1Html ? 80 : 0;
+  const PAD_T = 22, PAD_LR = 50, PAD_B = 24;
+  const HEADER_H = 44, FOOTER_H = 92, GAP = 0;
+  // Logos-Höhe nur reservieren wenn welche existieren (sonst 0) — 70px Logos
+  const LOGOS_H = headerPage1Html ? 72 : 0;
   // usableH ist konstant — auf jeder Seite gleich. Logos-Bereich auf Seite 2+ bleibt einfach leer.
   const usableH = A4_H - PAD_T - HEADER_H - LOGOS_H - GAP - FOOTER_H - PAD_B;
 
