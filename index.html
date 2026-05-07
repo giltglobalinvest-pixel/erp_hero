@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.30';
+const APP_VERSION = 'v2.31';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -5102,7 +5102,10 @@ function flpLogoInlineSvg(heightPx) {
   const symbol = document.getElementById('flp-logo');
   const inner = symbol ? symbol.innerHTML : '';
   const viewBox = symbol?.getAttribute('viewBox') || '50.2 112.3 319.9 73.5';
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" style="height:${heightPx}px;width:auto;display:block;">${inner}</svg>`;
+  // CSS-Klassen .st0/.st1/.st2 aus dem Original-Logo inline einbetten,
+  // damit das SVG auch isoliert (in PDF-Capture / off-screen) korrekt rendert.
+  const styleBlock = `<style>.st0{fill:#007EAC;}.st1{fill:#575756;}.st2{fill:#F6F6F6;}</style>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" style="height:${heightPx}px;width:auto;display:block;">${styleBlock}${inner}</svg>`;
 }
 
 // PDF-spezifischer Renderer mit reinen Inline-Styles (keine Tailwind-Abhängigkeit)
@@ -5252,78 +5255,59 @@ async function exportQuoteAsPdf() {
   const previewHtml = renderQuotePdfHtml(ctx, items, intro, closing);
   const customer = ctx.customer || {};
   const quoteNo = ctx.quote?.quote_no || 'Entwurf';
-  const filename = _safeFilename('Angebot_' + quoteNo + (customer.name1 ? '_' + customer.name1 : ''));
+  const filename = _safeFilename('Angebot_' + quoteNo + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
 
-  // Native Print-to-PDF: separates Fenster, eigene @page-Regel, Auto-Print.
-  // Browser-eigene PDF-Engine rendert identisch zur Vorschau (gleicher CSS-Renderer)
-  // und produziert echte Vektor-PDFs mit selektierbarem Text.
-  const html = `<!DOCTYPE html>
-<html lang="de">
-<head>
-<meta charset="utf-8">
-<title>${escapeHtml(filename)}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
-  @page { size: A4; margin: 16mm 14mm; }
-  @media print {
-    body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-  }
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0; padding: 0; background: #FFFFFF;
-    font-family: Inter, system-ui, -apple-system, sans-serif;
-    color: #0F172A; font-size: 11pt; line-height: 1.5;
-    -webkit-font-smoothing: antialiased;
-  }
-  .pdf-print-hint {
-    position: fixed; top: 12px; right: 12px; z-index: 9999;
-    background: #1FA8D6; color: #fff; padding: 8px 14px; border-radius: 8px;
-    font-size: 13px; font-family: Inter, system-ui, sans-serif;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  }
-  .pdf-print-hint button {
-    margin-left: 10px; background: #fff; color: #1FA8D6;
-    border: 0; padding: 4px 10px; border-radius: 4px; font-weight: 600; cursor: pointer;
-  }
-  @media print { .pdf-print-hint { display: none !important; } }
-</style>
-</head>
-<body>
-  <div class="pdf-print-hint">
-    Druck-Dialog: <strong>"Als PDF speichern"</strong> wählen.
-    <button onclick="window.print()">Drucken</button>
-  </div>
-  ${previewHtml}
-  ${attListHtml}
-  <` + `script>
-    window.addEventListener('load', () => {
-      // Kurz warten bis Fonts und SVG gerendert sind, dann Print-Dialog
-      setTimeout(() => {
-        if (document.fonts && document.fonts.ready) {
-          document.fonts.ready.then(() => setTimeout(() => window.print(), 150));
-        } else {
-          window.print();
-        }
-      }, 250);
-    });
-    window.addEventListener('afterprint', () => {
-      setTimeout(() => { try { window.close(); } catch(e) {} }, 300);
-    });
-  </` + `script>
-</body>
-</html>`;
+  // Loading-Overlay: deckt das visuell die Seite ab, während der Container
+  // ON-SCREEN bei top:0/left:0 gerendert wird (html2canvas erfasst nur sichtbare Elemente).
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,0.96);z-index:99999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;font-family:Inter,system-ui,sans-serif;font-size:14px;color:#0F172A;';
+  overlay.innerHTML = `
+    <div style="width:48px;height:48px;border:4px solid #E2E8F0;border-top-color:#1FA8D6;border-radius:50%;animation:pdfspin 0.8s linear infinite;"></div>
+    <div style="font-weight:600;">PDF wird erstellt …</div>
+    <style>@keyframes pdfspin{to{transform:rotate(360deg);}}</style>
+  `;
+  document.body.appendChild(overlay);
 
-  const w = window.open('', '_blank', 'width=900,height=1100');
-  if (!w) {
-    toast('Popup blockiert — bitte Pop-ups für diese Seite erlauben und erneut versuchen', 'error', 5000);
-    return;
+  // Container: A4-Format in Pixel (794 × 1123 bei 96dpi).
+  // ON-SCREEN bei top:0/left:0 platziert (vom Overlay verdeckt) → html2canvas captured zuverlässig.
+  const container = document.createElement('div');
+  container.style.cssText = 'position:fixed;top:0;left:0;width:794px;min-height:1123px;padding:64px 76px;box-sizing:border-box;background:#FFFFFF;font-family:Inter,system-ui,sans-serif;color:#0F172A;font-size:11pt;line-height:1.5;z-index:99998;';
+  container.innerHTML = previewHtml + attListHtml;
+  document.body.appendChild(container);
+
+  try {
+    await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js');
+    if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch(e){} }
+    // Layout settling
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await new Promise(r => setTimeout(r, 150));
+
+    await window.html2pdf().set({
+      margin: 0,
+      filename,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: {
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#FFFFFF',
+        logging: false,
+        windowWidth: 794,
+        width: 794,
+        scrollX: 0,
+        scrollY: 0
+      },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+      pagebreak: { mode: ['css', 'legacy'] }
+    }).from(container).save();
+    toast('PDF erstellt: ' + filename, 'success', 3000);
+  } catch (err) {
+    console.error('PDF-Erstellung fehlgeschlagen:', err);
+    toast('PDF-Erstellung fehlgeschlagen: ' + (err.message || err), 'error', 5000);
+  } finally {
+    if (container.parentNode) container.parentNode.removeChild(container);
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
   }
-  w.document.open();
-  w.document.write(html);
-  w.document.close();
-  toast('Druck-Dialog wird geöffnet — als PDF speichern wählen', 'info', 3500);
 }
 
 /* E-Mail vorbereiten — öffnet mailto:-Link mit Empfänger + vorgefülltem Subject + Body. PDF muss vorher heruntergeladen sein. */
