@@ -452,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.61';
+const APP_VERSION = 'v2.62';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6400,12 +6400,12 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
     ? `<div class="mt-1 mb-2 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
     : '';
-  // Tagline einzeilig via Grid (1fr auto) — Logo bekommt seine natürliche Breite,
-  // Tagline füllt den Rest. Bei Überlänge: ellipsis statt Umbruch.
+  // Tagline einzeilig — Logo überlappt die rechte Seite (position:absolute),
+  // Tagline läuft full-width darunter. Bei Überlänge: das Logo verdeckt das Ende.
   const header = `
-    <div style="display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;margin-bottom:4px;">
-      <div class="text-ink-700" style="padding-top:6px;font-size:13px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${escapeHtml(tagline)}</div>
-      <div style="padding-top:6px;">
+    <div style="position:relative;margin-bottom:4px;height:46px;">
+      <div class="text-ink-700" style="position:absolute;top:6px;left:0;right:0;font-size:14px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tagline)}</div>
+      <div style="position:absolute;top:0;right:0;z-index:2;">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
