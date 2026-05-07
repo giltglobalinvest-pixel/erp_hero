@@ -420,7 +420,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.35';
+const APP_VERSION = 'v2.36';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4883,6 +4883,8 @@ async function updateQuotePreview() {
   target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing, articleMap);
   // Erst nach Render in Multi-Page-Sheets paginieren
   paginatePreview();
+  // Dann zeitversetzt echte PDF-Vorschau (jedes Sheet via html2canvas zu Bild)
+  scheduleQuoteCanvasRefresh();
   if (window.lucide) lucide.createIcons();
 }
 
@@ -5197,6 +5199,86 @@ window.addEventListener('resize', () => {
   clearTimeout(_quoteScaleTimer);
   _quoteScaleTimer = setTimeout(applyQuoteSheetScale, 80);
 });
+
+/* === Echte PDF-Vorschau ===
+   Nach dem HTML-Rendering werden alle .quote-sheet Elemente via html2canvas zu echten
+   Bildern gemacht und ersetzt. Das ist exakt das, was im PDF landet — also wirklich eine
+   PDF-Vorschau, kein HTML-Approximation. Eliminiert Mobile-Rendering-Bugs. */
+let _quoteCanvasTimer = null;
+let _quoteCanvasRunning = false;
+
+function scheduleQuoteCanvasRefresh() {
+  clearTimeout(_quoteCanvasTimer);
+  _quoteCanvasTimer = setTimeout(refreshQuoteCanvasPreview, 600);
+}
+
+async function refreshQuoteCanvasPreview() {
+  if (_quoteCanvasRunning) return;
+  const target = document.getElementById('quotePreview');
+  if (!target) return;
+  const sheets = Array.from(target.querySelectorAll('.quote-sheet'));
+  if (!sheets.length) return;
+  _quoteCanvasRunning = true;
+
+  // Loading-Badge (kleines Pill rechts oben)
+  let badge = target.querySelector('[data-canvas-loading]');
+  if (!badge) {
+    if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+    badge = document.createElement('div');
+    badge.setAttribute('data-canvas-loading', '');
+    badge.style.cssText = 'position:absolute;top:8px;right:8px;background:rgba(15,23,42,0.85);color:#fff;font-size:10px;padding:4px 10px;border-radius:99px;z-index:50;font-family:Inter,sans-serif;display:flex;align-items:center;gap:6px;';
+    badge.innerHTML = '<span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:pdfspin 0.7s linear infinite;display:inline-block;"></span>PDF-Vorschau wird erstellt';
+    target.appendChild(badge);
+  }
+
+  try {
+    await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+    if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch(e) {} }
+
+    const canvases = [];
+    for (const sheet of sheets) {
+      if (!sheet.parentNode) break; // Sheet wurde durch erneutes Re-Render gewechselt
+      const origZoom = sheet.style.zoom;
+      sheet.style.zoom = '1';
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      try {
+        const c = await window.html2canvas(sheet, {
+          scale: 2,
+          useCORS: true,
+          allowTaint: true,
+          backgroundColor: '#FFFFFF',
+          logging: false,
+          width: 794,
+          height: 1123,
+          windowWidth: 794,
+        });
+        canvases.push(c);
+      } finally {
+        if (sheet.parentNode) sheet.style.zoom = origZoom;
+      }
+    }
+
+    // Sheets durch Canvas-Wrapper ersetzen — nur, wenn die Sheets noch im DOM hängen
+    sheets.forEach((sheet, i) => {
+      if (!sheet.parentNode || !canvases[i]) return;
+      const c = canvases[i];
+      const wrap = document.createElement('div');
+      wrap.className = 'quote-canvas-page';
+      wrap.style.cssText = 'width:100%;aspect-ratio:210/297;background:#FFFFFF;box-shadow:0 6px 24px rgba(0,0,0,0.12);margin:0 auto 18px auto;overflow:hidden;';
+      c.style.cssText = 'width:100%;height:100%;display:block;';
+      wrap.appendChild(c);
+      sheet.replaceWith(wrap);
+    });
+
+    window._quoteCanvases = canvases;
+  } catch (e) {
+    console.error('PDF-Vorschau fehlgeschlagen:', e);
+  } finally {
+    _quoteCanvasRunning = false;
+    const b = target.querySelector('[data-canvas-loading]');
+    if (b && b.parentNode) b.remove();
+  }
+}
 
 function quoteSumsHtml(sums) {
   const internal = !!window._quoteInternalMode;
@@ -5600,20 +5682,22 @@ async function exportQuoteAsPdf() {
   document.body.appendChild(overlay);
 
   try {
-    // Liftaro-Pattern: html2canvas auf bereits sichtbare DOM-Elemente + pdf-lib zur PDF-Assembly.
-    // Pro paginiertes A4-Sheet wird genau eine PDF-Seite erzeugt.
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
 
     if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch(e) {} }
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    await new Promise(r => setTimeout(r, 80));
 
-    const sheets = previewEl.querySelectorAll('.quote-sheet');
-    if (!sheets.length) {
-      // Fallback: Falls Pagination nicht griff, ganzen Preview-Container nehmen
-      const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: false, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
-      window._fallbackQuoteCanvas = canvas;
+    // Schritt 1: Wenn noch keine Canvases gecached sind, jetzt explizit erzeugen
+    if (!window._quoteCanvases || !window._quoteCanvases.length) {
+      clearTimeout(_quoteCanvasTimer);
+      // Sheets müssen vorhanden sein — falls nicht: paginatePreview hat noch nicht gelaufen
+      const sheetsExist = previewEl.querySelectorAll('.quote-sheet').length > 0;
+      if (!sheetsExist) {
+        // Vorschau erst aufbauen (paginatePreview → HTML-Sheets)
+        // updateQuotePreview wurde oben schon aufgerufen, aber paginatePreview könnte noch laufen
+        await new Promise(r => setTimeout(r, 120));
+      }
+      await refreshQuoteCanvasPreview();
     }
 
     // PDF mit pdf-lib zusammenbauen
@@ -5621,42 +5705,24 @@ async function exportQuoteAsPdf() {
     const pdfDoc = await PDFDocument.create();
     const A4_W = 595.28, A4_H = 841.89;
 
-    if (sheets.length) {
-      // Für jedes Sheet: zoom temporär auf 1 setzen, capturen, restore
-      for (const sheet of sheets) {
-        const origZoom = sheet.style.zoom;
-        sheet.style.zoom = '1';
-        // Layout-Tick abwarten
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-        const canvas = await window.html2canvas(sheet, {
-          scale: 2,
-          useCORS: true,
-          allowTaint: true,
-          logging: false,
-          backgroundColor: '#FFFFFF',
-          width: 794,
-          height: 1123,
-          windowWidth: 794,
-        });
-        sheet.style.zoom = origZoom;
-        const imgData = canvas.toDataURL('image/png');
+    const canvases = window._quoteCanvases || [];
+    if (canvases.length) {
+      for (const c of canvases) {
+        const imgData = c.toDataURL('image/png');
         const pngImg = await pdfDoc.embedPng(imgData);
         const page = pdfDoc.addPage([A4_W, A4_H]);
         page.drawImage(pngImg, { x: 0, y: 0, width: A4_W, height: A4_H });
       }
-      // Skalierung wiederherstellen
-      applyQuoteSheetScale();
-    } else if (window._fallbackQuoteCanvas) {
-      // Fallback: gestreckte Single-Page wie vorher
-      const canvas = window._fallbackQuoteCanvas;
+    } else {
+      // Letzter Fallback: ganzen Preview-Container capturen (gestreckte Page)
+      const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: false, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
       const imgData = canvas.toDataURL('image/png');
       const pngImg = await pdfDoc.embedPng(imgData);
       const widthScale = A4_W / pngImg.width;
-      const drawW = A4_W, drawH = pngImg.height * widthScale;
+      const drawH = pngImg.height * widthScale;
       const pageH = Math.max(A4_H, drawH);
       const page = pdfDoc.addPage([A4_W, pageH]);
-      page.drawImage(pngImg, { x: 0, y: pageH - drawH, width: drawW, height: drawH });
-      delete window._fallbackQuoteCanvas;
+      page.drawImage(pngImg, { x: 0, y: pageH - drawH, width: A4_W, height: drawH });
     }
 
     // Anhang-Liste als separate Seite (falls Anhänge ausgewählt)
