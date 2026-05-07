@@ -402,7 +402,30 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.32';
+const APP_VERSION = 'v2.33';
+
+// FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
+// (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
+const FLP_BRAND = {
+  taglineTop: 'Zertifizierte Generalüberholung von Frequenzumrichter und Elektronik',
+  companyName: 'FLP Lift Parts GmbH',
+  managingDirector: 'Geschäftsführer Patrizio Fontanarosa',
+  street: 'Erich-Herion-Straße 16',
+  cityLine: 'D - 70734 Fellbach',
+  ustId: 'USt.Id.-Nr.: DE 313 059 811',
+  email: 'info@flp-shop.com',
+  web: 'www.flp-shop.com',
+  tel: '+49 711 219 59 764',
+  fax: '+49 711 219 59 740',
+  hrb: '761229',
+  ag: 'Stuttgart',
+  bankName: 'Volksbank Stuttgart eG',
+  iban: 'DE38 6009 0100 0500 3610 02',
+  bic: 'VOBADESS',
+  blz: '600 901 00',
+  // Adresszeile im Briefkuvert-Format (als kleine Zeile über dem Empfänger)
+  senderAddressLine: 'FLP Lift Parts GmbH · Erich-Herion-Str. 16 · 70734 Fellbach · DE',
+};
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -4745,59 +4768,97 @@ async function updateQuotePreview() {
         .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
     } catch (e) {}
   }
-  target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing);
+  // Article-Map (id → article_no) für Tabellenspalte 'Artikelnr.'
+  let articleMap = {};
+  try {
+    const articles = await readData('Article');
+    articles.forEach(a => { articleMap[a.id] = a.fields.article_no || ''; });
+  } catch (e) {}
+  target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing, articleMap);
   if (window.lucide) lucide.createIcons();
 }
 
-function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw) {
+function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const c  = ctx.company  || {};
   const cu = ctx.customer || {};
+  const co = ctx.contact  || {};
   const q  = ctx.quote    || {};
   const sums = calcQuoteSums(items);
   const intro   = substituteVariables(introRaw   || '', 'Angebot', ctx);
   const closing = substituteVariables(closingRaw || '', 'Angebot', ctx);
-  const companyAddrLine = [c.name, c.street, [c.zip, c.city].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+  articleMap = articleMap || {};
+  // Anrede für Empfänger (Herrn/Frau aus contact.gender ableiten)
+  const recipientSalutation = (() => {
+    if (!co || (!co.first_name && !co.last_name)) return '';
+    const g = co.gender;
+    const sal = g === 'männlich' ? 'Herrn' : g === 'weiblich' ? 'Frau' : '';
+    const fullName = [co.first_name, co.last_name].filter(Boolean).join(' ');
+    return [sal, fullName].filter(Boolean).join(' ');
+  })();
+
   return `
-    <div class="text-sm text-ink-900">
-      <div class="flex items-start justify-between mb-3 pb-3 border-b border-ink-200">
-        <div class="text-[10px] text-ink-500 leading-snug">${escapeHtml(companyAddrLine)}</div>
-        <svg class="h-7 shrink-0" style="aspect-ratio:320/74" aria-label="${escapeHtml(c.name || 'FLP')}"><use href="#flp-logo"/></svg>
-      </div>
+    <div class="text-[11px] text-ink-900 flex flex-col" style="min-height:100%;font-family:Inter,system-ui,sans-serif;">
 
-      <div class="grid grid-cols-2 gap-4 mb-5">
-        <div class="text-xs leading-relaxed">
-          ${cu.name1 ? escapeHtml(cu.name1) + '<br>' : '<span class="text-ink-400 italic">— Empfänger —</span>'}
-          ${cu.name2 ? escapeHtml(cu.name2) + '<br>' : ''}
-          ${(ctx.contact && (ctx.contact.first_name || ctx.contact.last_name))
-            ? escapeHtml([ctx.contact.first_name, ctx.contact.last_name].filter(Boolean).join(' ')) + '<br>'
-            : ''}
-          ${cu.street ? escapeHtml(cu.street) + '<br>' : ''}
-          ${(cu.zip || cu.city) ? escapeHtml([cu.zip, cu.city].filter(Boolean).join(' ')) + '<br>' : ''}
-          ${cu.country ? escapeHtml(cu.country) : ''}
+      <!-- TOP TAGLINE -->
+      <div class="text-[9px] text-ink-700 text-right -mt-2 mb-2">${escapeHtml(FLP_BRAND.taglineTop)}</div>
+
+      <!-- HEADER: TÜV-Marke (Platzhalter) links, FLP-Logo + 'Angebot' rechts -->
+      <div class="flex items-start justify-between mb-5">
+        <div class="flex flex-col items-start gap-1">
+          <div class="w-14 h-14 rounded-full border-2 border-ink-400 flex items-center justify-center text-[8px] font-bold text-ink-600 leading-tight text-center">TÜV<br><span class="text-[9px]">SÜD</span></div>
         </div>
-        <div class="text-[11px] space-y-0.5">
-          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Angebots-Nr.:</span><span class="text-right font-mono">${escapeHtml(q.quote_no || '–')}</span></div>
-          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Datum:</span><span class="text-right">${escapeHtml(formatDeDate(q.date))}</span></div>
-          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Kunden-Nr.:</span><span class="text-right font-mono">${escapeHtml(cu.customer_no || '–')}</span></div>
-          <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Gültig bis:</span><span class="text-right">${escapeHtml(formatDeDate(q.valid_until))}</span></div>
-          ${c.phone ? `<div class="grid grid-cols-2 gap-1 pt-1 border-t border-ink-100 mt-1"><span class="text-ink-500">Telefon:</span><span class="text-right">${escapeHtml(c.phone)}</span></div>` : ''}
-          ${c.email ? `<div class="grid grid-cols-2 gap-1"><span class="text-ink-500">E-Mail:</span><span class="text-right truncate">${escapeHtml(c.email)}</span></div>` : ''}
+        <div class="text-right">
+          <svg class="h-9 ml-auto" style="aspect-ratio:320/74" aria-label="FLP Lift Parts"><use href="#flp-logo"/></svg>
+          <div class="text-[26px] text-ink-700 font-light tracking-tight mt-1 leading-none">Angebot</div>
         </div>
       </div>
 
-      <h2 class="text-xl font-bold mb-2">Angebot</h2>
-      ${intro ? `<div class="whitespace-pre-line text-xs leading-relaxed mb-4">${escapeHtml(intro)}</div>` : '<p class="text-xs text-ink-400 italic mb-4">Einleitung — kein Text</p>'}
+      <!-- ADRESSZEILE + EMPFÄNGER + META -->
+      <div class="grid grid-cols-2 gap-6 mb-6">
+        <div>
+          <!-- Briefkuvert-Adresszeile -->
+          <div class="text-[7px] text-ink-500 border-b border-ink-300 pb-1 mb-3 inline-block leading-tight">${escapeHtml(FLP_BRAND.senderAddressLine)}</div>
+          <div class="text-[11px] leading-[1.5]">
+            ${cu.name1 ? `<div>${escapeHtml(cu.name1)}</div>` : '<div class="text-ink-400 italic">— Empfänger —</div>'}
+            ${cu.name2 ? `<div>${escapeHtml(cu.name2)}</div>` : ''}
+            ${recipientSalutation ? `<div>${escapeHtml(recipientSalutation)}</div>` : ''}
+            ${cu.street ? `<div>${escapeHtml(cu.street)}</div>` : ''}
+            ${(cu.zip || cu.city) ? `<div>${escapeHtml([cu.zip, cu.city].filter(Boolean).join(' '))}</div>` : ''}
+            ${cu.country ? `<div>${escapeHtml(cu.country)}</div>` : ''}
+          </div>
+        </div>
+        <div class="text-[10px]">
+          <table class="w-full">
+            <tbody>
+              <tr><td class="text-ink-700 py-0.5">Angebots-Nr.:</td><td class="text-right py-0.5">${escapeHtml(q.quote_no || '–')}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">Kunden-Nr.:</td><td class="text-right py-0.5">${escapeHtml(cu.customer_no || '–')}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">Datum:</td><td class="text-right py-0.5">${escapeHtml(formatDeDate(q.date))}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">Gültigkeit:</td><td class="text-right py-0.5">${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : '30 Tage'}</td></tr>
+              <tr><td colspan="2" class="py-1.5"></td></tr>
+              <tr><td class="text-ink-700 py-0.5">Kontakt:</td><td class="py-0.5"></td></tr>
+              <tr><td class="text-ink-700 py-0.5">Telefon:</td><td class="text-right py-0.5">${escapeHtml(FLP_BRAND.tel)}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">Fax:</td><td class="text-right py-0.5">${escapeHtml(FLP_BRAND.fax)}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">E-Mail:</td><td class="text-right py-0.5">${escapeHtml(FLP_BRAND.email)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
 
+      <!-- INTRO / GREETING -->
+      ${intro ? `<div class="whitespace-pre-line text-[11px] mb-4 leading-relaxed">${escapeHtml(intro)}</div>` : '<p class="text-[11px] text-ink-400 italic mb-4">— Einleitung —</p>'}
+
+      <!-- POSITIONEN -->
       ${items.length > 0 ? `
-        <table class="w-full text-[11px] mb-3">
-          <thead class="bg-brand-500 text-white text-[10px] uppercase tracking-wider">
-            <tr>
-              <th class="px-1.5 py-1.5 text-left">Pos.</th>
-              <th class="px-1.5 py-1.5 text-left">Bezeichnung</th>
-              <th class="px-1.5 py-1.5 text-right">Menge</th>
-              <th class="px-1.5 py-1.5 text-left">EH</th>
-              <th class="px-1.5 py-1.5 text-right">EP</th>
-              <th class="px-1.5 py-1.5 text-right">Gesamt</th>
+        <table class="w-full text-[10px] mb-2 border-collapse">
+          <thead>
+            <tr class="border-b border-ink-300 text-ink-700">
+              <th class="px-1 py-1.5 text-left font-medium">Pos.</th>
+              <th class="px-1 py-1.5 text-left font-medium">Anzahl</th>
+              <th class="px-1 py-1.5 text-left font-medium">Einheit</th>
+              <th class="px-1 py-1.5 text-left font-medium">Artikelnr.</th>
+              <th class="px-1 py-1.5 text-left font-medium">Bezeichnung</th>
+              <th class="px-1 py-1.5 text-right font-medium">Einzelpreis</th>
+              <th class="px-1 py-1.5 text-right font-medium">Gesamtpreis</th>
             </tr>
           </thead>
           <tbody>
@@ -4806,32 +4867,101 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw) {
               const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
               const grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
               const discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
-              const desc = (f.description || '').split('\n')[0] || '';
+              const descLines = (f.description || '').split('\n').map(l => l.trim()).filter(Boolean);
+              const descMain = descLines[0] || '';
+              const descSub  = descLines.slice(1).join(' · ');
+              const aId = (f.article_id || [])[0];
+              const aNo = aId ? (articleMap[aId] || '') : '';
               return `<tr class="border-b border-ink-100 align-top">
-                <td class="px-1.5 py-1">${f.pos || ''}</td>
-                <td class="px-1.5 py-1">${escapeHtml(desc)}${discAbs > 0 ? `<br><span class="text-[10px] text-amber-700">Rabatt: −${formatPrice(discAbs)} €</span>` : ''}</td>
-                <td class="px-1.5 py-1 text-right tabular-nums">${escapeHtml(String(f.qty || ''))}</td>
-                <td class="px-1.5 py-1">${escapeHtml(f.unit || '')}</td>
-                <td class="px-1.5 py-1 text-right font-mono tabular-nums">${formatPrice(f.unit_price_net || 0)}</td>
-                <td class="px-1.5 py-1 text-right font-mono tabular-nums">${formatPrice(lineNet)}</td>
+                <td class="px-1 py-1.5">${escapeHtml(String(f.pos || ''))}</td>
+                <td class="px-1 py-1.5">${escapeHtml(String(f.qty || ''))}</td>
+                <td class="px-1 py-1.5">${escapeHtml(f.unit || '')}</td>
+                <td class="px-1 py-1.5">${escapeHtml(aNo)}</td>
+                <td class="px-1 py-1.5">
+                  <div>${escapeHtml(descMain)}</div>
+                  ${descSub ? `<div class="text-[9px] italic text-ink-600 leading-snug mt-0.5">${escapeHtml(descSub)}</div>` : ''}
+                  ${discAbs > 0 ? `<div class="text-[9px] text-amber-700 mt-0.5">Rabatt: −${formatPrice(discAbs)} €</div>` : ''}
+                </td>
+                <td class="px-1 py-1.5 text-right tabular-nums">${formatPrice(f.unit_price_net || 0)} €</td>
+                <td class="px-1 py-1.5 text-right tabular-nums">${formatPrice(lineNet)} €</td>
               </tr>`;
             }).join('')}
           </tbody>
         </table>
-      ` : '<p class="text-xs text-ink-400 italic mb-3">— noch keine Positionen —</p>'}
+      ` : '<p class="text-[10px] text-ink-400 italic mb-3">— noch keine Positionen —</p>'}
 
-      <div class="flex justify-end mb-4">
-        <div class="w-52 text-xs space-y-0.5">
-          <div class="flex justify-between"><span class="text-ink-600">Nettobetrag</span><span class="font-mono tabular-nums">${formatPrice(sums.subtotal_net)} €</span></div>
-          <div class="flex justify-between"><span class="text-ink-600">USt</span><span class="font-mono tabular-nums">${formatPrice(sums.vat_total)} €</span></div>
-          <div class="flex justify-between border-t border-ink-300 pt-1 mt-1 font-bold"><span>Gesamt</span><span class="font-mono tabular-nums">${formatPrice(sums.total_gross)} €</span></div>
-        </div>
+      <!-- SUMS -->
+      <div class="mt-3 mb-4">
+        <table class="ml-auto text-[11px]" style="min-width:62%;">
+          <tbody>
+            <tr><td class="py-0.5">Summe</td><td class="text-right py-0.5 tabular-nums">${formatPrice(sums.subtotal_net)} €</td></tr>
+            <tr><td class="py-0.5">Mehrwertsteuer 19% auf ${formatPrice(sums.subtotal_net)} € netto</td><td class="text-right py-0.5 tabular-nums">${formatPrice(sums.vat_total)} €</td></tr>
+            <tr class="font-semibold"><td class="py-1 border-t border-ink-300">Gesamtbetrag</td><td class="text-right py-1 border-t border-ink-300 tabular-nums">${formatPrice(sums.total_gross)} €</td></tr>
+          </tbody>
+        </table>
       </div>
 
-      ${q.delivery_terms ? `<p class="text-xs"><span class="text-ink-500">Lieferung:</span> ${escapeHtml(q.delivery_terms)}</p>` : ''}
-      ${q.payment_terms  ? `<p class="text-xs"><span class="text-ink-500">Zahlungsbedingungen:</span> ${escapeHtml(q.payment_terms)}</p>` : ''}
+      <!-- LIEFERUNG / ZAHLUNG -->
+      <div class="text-[10px] mt-3 space-y-2">
+        <div>${escapeHtml(q.delivery_terms || 'Die Lieferung erfolgt frei Haus.')}</div>
+        ${q.payment_terms ? `
+          <div>
+            <div class="text-ink-700">Zahlungsbedingungen:</div>
+            <div>${escapeHtml(q.payment_terms)}</div>
+          </div>
+        ` : ''}
+      </div>
 
-      ${closing ? `<div class="whitespace-pre-line text-xs leading-relaxed mt-4">${escapeHtml(closing)}</div>` : ''}
+      <!-- CLOSING -->
+      ${closing ? `<div class="whitespace-pre-line text-[10px] mt-4 leading-relaxed">${escapeHtml(closing)}</div>` : ''}
+
+      <!-- SPACER drückt Footer nach unten -->
+      <div class="flex-1" style="min-height:24px;"></div>
+
+      <!-- FOOTER (4-spaltig + blauer Balken) -->
+      <div class="mt-4 pt-3 border-t border-ink-200">
+        <div class="grid gap-3" style="grid-template-columns:24px 1fr 1fr auto auto;">
+          <!-- 'F' Mark -->
+          <div class="flex items-start pt-0.5">
+            <div class="w-5 h-5 bg-brand-500 text-white flex items-center justify-center text-[10px] font-bold">F</div>
+          </div>
+          <!-- Spalte 1: Firma -->
+          <div class="text-[7.5px] leading-[1.45]">
+            <div class="font-bold text-ink-900 text-[8.5px] mb-0.5">${escapeHtml(FLP_BRAND.companyName)}</div>
+            <div class="text-ink-700">${escapeHtml(FLP_BRAND.managingDirector)}</div>
+            <div class="text-ink-700">${escapeHtml(FLP_BRAND.street)}</div>
+            <div class="text-ink-700">${escapeHtml(FLP_BRAND.cityLine)}</div>
+            <div class="text-ink-700">${escapeHtml(FLP_BRAND.ustId)}</div>
+          </div>
+          <!-- Spalte 2: Kontakt -->
+          <div class="text-[7.5px] leading-[1.45]">
+            <div class="grid gap-x-1.5 gap-y-0.5" style="grid-template-columns:auto 1fr;">
+              <div class="font-bold">E-Mail</div><div>${escapeHtml(FLP_BRAND.email)}</div>
+              <div class="font-bold">Web</div><div>${escapeHtml(FLP_BRAND.web)}</div>
+              <div class="font-bold">Tel.</div><div>${escapeHtml(FLP_BRAND.tel)}</div>
+              <div class="font-bold">Fax.</div><div>${escapeHtml(FLP_BRAND.fax)}</div>
+            </div>
+          </div>
+          <!-- Spalte 3: Register -->
+          <div class="text-[7.5px] leading-[1.45]">
+            <div class="grid gap-x-1.5 gap-y-0.5" style="grid-template-columns:auto 1fr;">
+              <div class="font-bold">HRB</div><div>${escapeHtml(FLP_BRAND.hrb)}</div>
+              <div class="font-bold">AG</div><div>${escapeHtml(FLP_BRAND.ag)}</div>
+            </div>
+          </div>
+          <!-- Spalte 4: Bank -->
+          <div class="text-[7.5px] leading-[1.45]">
+            <div class="grid gap-x-1.5 gap-y-0.5" style="grid-template-columns:auto 1fr;">
+              <div class="font-bold">Krl</div><div>${escapeHtml(FLP_BRAND.bankName)}</div>
+              <div class="font-bold">IBAN</div><div>${escapeHtml(FLP_BRAND.iban)}</div>
+              <div class="font-bold">BIC</div><div>${escapeHtml(FLP_BRAND.bic)}</div>
+              <div class="font-bold">BLZ</div><div>${escapeHtml(FLP_BRAND.blz)}</div>
+            </div>
+          </div>
+        </div>
+        <!-- blauer Balken am unteren Rand -->
+        <div class="mt-3 -mx-[10%] h-2 bg-brand-500"></div>
+      </div>
     </div>
   `;
 }
@@ -5223,6 +5353,9 @@ async function exportQuoteAsPdf() {
   const customer = ctx.customer || {};
   const quoteNo = ctx.quote?.quote_no || 'Entwurf';
   const filename = _safeFilename('Angebot_' + quoteNo + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
+
+  // Frische Vorschau erzwingen (User könnte gerade etwas geändert haben — Debounce abwarten + neu rendern)
+  try { await updateQuotePreview(); } catch(e) {}
 
   // Loading-Overlay (deckt nur visuell ab, die Vorschau bleibt im DOM gerendert)
   const overlay = document.createElement('div');
