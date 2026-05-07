@@ -431,7 +431,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.39';
+const APP_VERSION = 'v2.40';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4817,11 +4817,12 @@ async function openQuoteModal(id) {
         </div>
         <div class="sm:col-span-2">
           <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
-            <label class="text-sm font-medium text-ink-700">Titel im PDF</label>
+            <label class="text-sm font-medium text-ink-700">Kopfzeile / Tagline</label>
             ${quoteTemplatePicker('quote_title', 'Titel', (f.title_template_id || (id ? '' : (defaultTitleTpl?.id || ''))))}
           </div>
           <input type="hidden" name="title_template_id" value="${escapeHtml(f.title_template_id || (id ? '' : (defaultTitleTpl?.id || '')))}">
-          <input name="quote_title" placeholder="z.B. „Angebot" oder „Reparaturangebot"" value="${escapeHtml(f.quote_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input name="quote_title" placeholder="z.B. „Zertifizierte Generalüberholung von Frequenzumrichter…"" value="${escapeHtml(f.quote_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <p class="text-xs text-ink-500 mt-1">Wird oben rechts neben dem Logo auf jeder Angebotsseite angezeigt.</p>
         </div>
         <div class="sm:col-span-2">
           <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
@@ -5090,10 +5091,11 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   })();
 
   // Header (oben jede Seite) — Tagline + FLP-Logo (Original aus dem inline-SVG-Symbol).
-  // Wir inlinen die Pfade direkt, damit html2canvas das Logo zuverlässig captured (ohne <use>-Reference).
+  // Tagline kommt aus quote.quote_title (per Vorlage editierbar) mit Fallback auf FLP-Brand.
+  const tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
   const header = `
     <div class="flex items-start justify-between mb-1">
-      <div class="text-[9px] text-ink-700 max-w-[55%] pt-2">${escapeHtml(footer.taglineTop)}</div>
+      <div class="text-[9px] text-ink-700 max-w-[55%] pt-2">${escapeHtml(tagline)}</div>
       <div style="margin-left:auto;">
         ${flpLogoInlineSvg(40)}
       </div>
@@ -5104,8 +5106,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const body = `
     <div data-quote-body class="text-[11px] text-ink-900" style="font-family:Inter,system-ui,sans-serif;">
 
-      <!-- Dokumenten-Titel (aus Quote.quote_title oder Default 'Angebot') -->
-      <div class="text-[26px] text-ink-700 font-light tracking-tight leading-tight text-right mb-5">${escapeHtml(q.quote_title || 'Angebot')}</div>
+      <!-- Dokumenten-Überschrift bleibt fix 'Angebot' -->
+      <div class="text-[26px] text-ink-700 font-light tracking-tight leading-tight text-right mb-5">Angebot</div>
 
       <!-- ADRESSZEILE + EMPFÄNGER + META -->
       <div class="grid grid-cols-2 gap-6 mb-6">
