@@ -452,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.67';
+const APP_VERSION = 'v2.68';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5790,16 +5790,16 @@ async function applyQuoteBundle(bundleId, opts = {}) {
   try {
     const vars = JSON.parse(f.variable_values || '{}');
     Object.entries(vars).forEach(([key, val]) => {
-      // Custom-Field-Inputs in der Quote-Form haben name="cf_<key>" (siehe customFieldsSection)
-      const inp = document.querySelector(`#modalBox [name="cf_${key}"]`);
+      // Custom-Field-Inputs in der Quote-Form haben data-cv-name="<key>" (siehe customFieldsSection)
+      const inp = document.querySelector(`#modalBox [data-cv-name="${key}"]`);
       if (!inp) return;
       if (inp.type === 'checkbox') {
-        inp.checked = (val === 'true');
+        inp.checked = (val === 'true' || val === true);
       } else {
         inp.value = val;
       }
     });
-  } catch (e) {}
+  } catch (e) { console.warn('[Bundle] variable_values konnten nicht angewendet werden:', e); }
   // Live-Vorschau aktualisieren
   if (typeof updateQuotePreview === 'function') updateQuotePreview();
   if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
