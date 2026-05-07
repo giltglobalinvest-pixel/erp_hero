@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.27';
+const APP_VERSION = 'v2.28';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -5097,8 +5097,7 @@ function _safeFilename(s) {
   return String(s || '').replace(/[^a-zA-Z0-9_.\- ]/g, '_').replace(/\s+/g, '_').replace(/_+/g, '_').slice(0, 80);
 }
 
-// Liefert das FLP-Logo als komplett selbst-tragendes inline SVG (ohne <use>-Verweis),
-// damit html2canvas es zuverlässig rendern kann.
+// Liefert das FLP-Logo als komplett selbst-tragendes inline SVG (ohne <use>-Verweis)
 function flpLogoInlineSvg(heightPx) {
   const symbol = document.getElementById('flp-logo');
   const inner = symbol ? symbol.innerHTML : '';
@@ -5106,11 +5105,108 @@ function flpLogoInlineSvg(heightPx) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" style="height:${heightPx}px;width:auto;display:block;">${inner}</svg>`;
 }
 
-// Ersetzt im Preview-HTML den <use>-Logo-Aufruf durch echtes Inline-SVG (für PDF-Export, da html2canvas SVG-Symbole nicht zuverlässig rendert)
-function _inlineLogosInHtml(html) {
-  if (!html) return html;
-  // Ersetzt jedes <svg>...</svg> das ein <use href="#flp-logo"> enthält durch ein selbst-tragendes SVG.
-  return html.replace(/<svg[^>]*>[\s\S]*?<use\s+href="#flp-logo"[^>]*\/>[\s\S]*?<\/svg>/gi, () => flpLogoInlineSvg(28));
+// PDF-spezifischer Renderer mit reinen Inline-Styles (keine Tailwind-Abhängigkeit)
+function renderQuotePdfHtml(ctx, items, introRaw, closingRaw) {
+  const c  = ctx.company  || {};
+  const cu = ctx.customer || {};
+  const co = ctx.contact  || {};
+  const q  = ctx.quote    || {};
+  const sums = calcQuoteSums(items);
+  const intro   = substituteVariables(introRaw   || '', 'Angebot', ctx);
+  const closing = substituteVariables(closingRaw || '', 'Angebot', ctx);
+  const companyAddrLine = [c.name, c.street, [c.zip, c.city].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+  const css = `
+    .pdf-root { font-family: Inter, system-ui, -apple-system, sans-serif; color:#0F172A; font-size:11pt; line-height:1.5; }
+    .pdf-head { display:flex; align-items:flex-start; justify-content:space-between; padding-bottom:10px; border-bottom:1px solid #E2E8F0; margin-bottom:18px; }
+    .pdf-addr-line { font-size:9pt; color:#64748B; line-height:1.4; }
+    .pdf-cols { display:flex; gap:32px; margin-bottom:22px; }
+    .pdf-cols > div { flex:1; }
+    .pdf-recipient { font-size:11pt; line-height:1.7; }
+    .pdf-meta { font-size:10pt; }
+    .pdf-meta-row { display:flex; justify-content:space-between; gap:8px; padding:2px 0; }
+    .pdf-meta-row .l { color:#64748B; }
+    .pdf-meta-row .v { text-align:right; }
+    .pdf-meta-divider { border-top:1px solid #E2E8F0; padding-top:5px; margin-top:5px; }
+    .pdf-title { font-size:18pt; font-weight:700; margin:0 0 8px 0; }
+    .pdf-text { white-space:pre-line; font-size:11pt; line-height:1.6; margin:0 0 16px 0; }
+    .pdf-table { width:100%; border-collapse:collapse; font-size:10pt; margin-bottom:12px; }
+    .pdf-table thead { background:#1FA8D6; color:#fff; }
+    .pdf-table th { padding:7px 8px; text-align:left; font-size:9pt; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; }
+    .pdf-table th.right { text-align:right; }
+    .pdf-table td { padding:6px 8px; border-bottom:1px solid #F1F5F9; vertical-align:top; }
+    .pdf-table td.right { text-align:right; font-family: 'Courier New', monospace; font-variant-numeric: tabular-nums; }
+    .pdf-sums { margin-left:auto; width:240px; font-size:10pt; margin-top:4px; }
+    .pdf-sums-row { display:flex; justify-content:space-between; padding:2px 0; }
+    .pdf-sums-row .v { font-family:'Courier New', monospace; font-variant-numeric: tabular-nums; }
+    .pdf-sums-total { border-top:1px solid #94A3B8; margin-top:4px; padding-top:4px; font-weight:700; }
+    .pdf-terms { font-size:10pt; margin:8px 0 0 0; }
+    .pdf-empty { color:#94A3B8; font-style:italic; font-size:10pt; }
+    .pdf-discount { color:#B45309; font-size:9pt; }
+  `;
+  const recipientLines = [
+    cu.name1,
+    cu.name2,
+    (co.first_name || co.last_name) ? [co.first_name, co.last_name].filter(Boolean).join(' ') : null,
+    cu.street,
+    [cu.zip, cu.city].filter(Boolean).join(' '),
+    cu.country
+  ].filter(Boolean);
+  return `
+    <style>${css}</style>
+    <div class="pdf-root">
+      <div class="pdf-head">
+        <div class="pdf-addr-line">${escapeHtml(companyAddrLine)}</div>
+        ${flpLogoInlineSvg(34)}
+      </div>
+      <div class="pdf-cols">
+        <div class="pdf-recipient">
+          ${recipientLines.length ? recipientLines.map(l => escapeHtml(l)).join('<br>') : '<span class="pdf-empty">— Empfänger —</span>'}
+        </div>
+        <div class="pdf-meta">
+          <div class="pdf-meta-row"><span class="l">Angebots-Nr.:</span><span class="v">${escapeHtml(q.quote_no || '–')}</span></div>
+          <div class="pdf-meta-row"><span class="l">Datum:</span><span class="v">${escapeHtml(formatDeDate(q.date))}</span></div>
+          <div class="pdf-meta-row"><span class="l">Kunden-Nr.:</span><span class="v">${escapeHtml(cu.customer_no || '–')}</span></div>
+          <div class="pdf-meta-row"><span class="l">Gültig bis:</span><span class="v">${escapeHtml(formatDeDate(q.valid_until))}</span></div>
+          ${c.phone ? `<div class="pdf-meta-row pdf-meta-divider"><span class="l">Telefon:</span><span class="v">${escapeHtml(c.phone)}</span></div>` : ''}
+          ${c.email ? `<div class="pdf-meta-row"><span class="l">E-Mail:</span><span class="v">${escapeHtml(c.email)}</span></div>` : ''}
+        </div>
+      </div>
+      <h2 class="pdf-title">Angebot</h2>
+      ${intro ? `<div class="pdf-text">${escapeHtml(intro)}</div>` : ''}
+      ${items.length > 0 ? `
+        <table class="pdf-table">
+          <thead><tr>
+            <th>Pos.</th><th>Bezeichnung</th><th class="right">Menge</th><th>EH</th><th class="right">EP</th><th class="right">Gesamt</th>
+          </tr></thead>
+          <tbody>
+            ${items.map(it => {
+              const f = it.fields || {};
+              const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
+              const gl = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
+              const discAbs = gl * ((+(f.discount_pct || 0)) / 100);
+              const desc = (f.description || '').split('\n')[0] || '';
+              return `<tr>
+                <td>${escapeHtml(String(f.pos || ''))}</td>
+                <td>${escapeHtml(desc)}${discAbs > 0 ? `<br><span class="pdf-discount">Rabatt: −${formatPrice(discAbs)} €</span>` : ''}</td>
+                <td class="right">${escapeHtml(String(f.qty || ''))}</td>
+                <td>${escapeHtml(f.unit || '')}</td>
+                <td class="right">${formatPrice(f.unit_price_net || 0)}</td>
+                <td class="right">${formatPrice(lineNet)}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      ` : '<p class="pdf-empty">— noch keine Positionen —</p>'}
+      <div class="pdf-sums">
+        <div class="pdf-sums-row"><span>Nettobetrag</span><span class="v">${formatPrice(sums.subtotal_net)} €</span></div>
+        <div class="pdf-sums-row"><span>USt</span><span class="v">${formatPrice(sums.vat_total)} €</span></div>
+        <div class="pdf-sums-row pdf-sums-total"><span>Gesamt</span><span class="v">${formatPrice(sums.total_gross)} €</span></div>
+      </div>
+      ${q.delivery_terms ? `<p class="pdf-terms"><strong>Lieferung:</strong> ${escapeHtml(q.delivery_terms)}</p>` : ''}
+      ${q.payment_terms  ? `<p class="pdf-terms"><strong>Zahlungsbedingungen:</strong> ${escapeHtml(q.payment_terms)}</p>` : ''}
+      ${closing ? `<div class="pdf-text" style="margin-top:22px;">${escapeHtml(closing)}</div>` : ''}
+    </div>
+  `;
 }
 
 async function exportQuoteAsPdf() {
@@ -5153,16 +5249,12 @@ async function exportQuoteAsPdf() {
     } catch (e) {}
   }
 
-  const previewHtml = _inlineLogosInHtml(renderQuotePreviewHtml(ctx, items, intro, closing));
-  // Container: A4-Format in Pixel (794 × 1123 bei 96dpi). Position absolut top weit unten – nicht aus dem Viewport raus geschoben (html2canvas reagiert sensibel)
+  const previewHtml = renderQuotePdfHtml(ctx, items, intro, closing);
+  // Container: A4-Format in Pixel (794 × 1123 bei 96dpi). Im Viewport rendern, aber außerhalb des sichtbaren Bereichs (html2canvas erfasst nur sichtbar gerenderte Elemente).
   const container = document.createElement('div');
-  container.style.cssText = 'position:absolute;top:0;left:0;z-index:-1;width:794px;min-height:1123px;padding:68px 76px;box-sizing:border-box;background:#FFFFFF;font-family:Inter,system-ui,sans-serif;color:#0F172A;font-size:11pt;line-height:1.5;opacity:1;';
+  container.style.cssText = 'position:fixed;top:0;left:-9999px;width:794px;min-height:1123px;padding:68px 76px;box-sizing:border-box;background:#FFFFFF;font-family:Inter,system-ui,sans-serif;color:#0F172A;font-size:11pt;line-height:1.5;opacity:1;z-index:-1;';
   container.innerHTML = previewHtml + attListHtml;
   document.body.appendChild(container);
-  // Außerhalb des sichtbaren Bereichs verstecken (visuell nicht sichtbar, aber für html2canvas erfassbar)
-  container.style.position = 'fixed';
-  container.style.top = '0';
-  container.style.left = '-9000px';
 
   toast('PDF wird erstellt …', 'info', 1500);
   try {
