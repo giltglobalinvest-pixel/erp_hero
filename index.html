@@ -420,7 +420,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.34';
+const APP_VERSION = 'v2.35';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -779,6 +779,37 @@ async function ensureTable(tableName, fields) {
     throw new Error('Tabelle anlegen fehlgeschlagen: ' + (err.error?.message || createRes.status));
   }
   return await createRes.json();
+}
+
+/* ensureFields: stellt sicher, dass alle übergebenen Felder auf der Tabelle existieren.
+   fieldDefs: Array von { name, type, options? } — nur Felder, die noch nicht da sind, werden angelegt.
+   Idempotent: kann beliebig oft aufgerufen werden. */
+async function ensureFields(tableName, fieldDefs) {
+  if (!APP_KEYS.airtableWriteKey) return;
+  try {
+    const metaRes = await fetch(
+      'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
+      { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
+    );
+    if (!metaRes.ok) return;
+    const meta = await metaRes.json();
+    const table = (meta.tables || []).find(t => t.name === tableName);
+    if (!table) return;
+    const existingNames = new Set((table.fields || []).map(f => f.name));
+    for (const def of fieldDefs) {
+      if (existingNames.has(def.name)) continue;
+      try {
+        await fetch(
+          'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables/' + table.id + '/fields',
+          {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify(def)
+          }
+        );
+      } catch (e) { /* einzelner Fehler ignoriert — andere Felder weitermachen */ }
+    }
+  } catch (e) { /* still */ }
 }
 
 async function uploadFileToRecord(recordId, attachmentField, file) {
@@ -1197,6 +1228,17 @@ function companyRow(rec) {
 }
 
 async function openCompanyModal(id) {
+  // Footer-Felder bei Bedarf ergänzen (idempotent — nur fehlende werden angelegt)
+  await ensureFields('Company', [
+    { name: 'managing_director', type: 'singleLineText' },
+    { name: 'web',               type: 'singleLineText' },
+    { name: 'ag',                type: 'singleLineText' },
+    { name: 'bank_name',         type: 'singleLineText' },
+    { name: 'iban',              type: 'singleLineText' },
+    { name: 'bic',               type: 'singleLineText' },
+    { name: 'blz',               type: 'singleLineText' },
+  ]);
+
   let f = {};
   if (id) {
     const all = await readData('Company');
@@ -1232,7 +1274,7 @@ async function openCompanyModal(id) {
       </div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Kontakt</h4>
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Telefon</label>
           <input name="phone" value="${escapeHtml(f.phone || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
@@ -1241,17 +1283,29 @@ async function openCompanyModal(id) {
           <label class="block text-sm font-medium text-ink-700 mb-1">Fax</label>
           <input name="fax" value="${escapeHtml(f.fax || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
-        <div class="col-span-2">
+        <div class="sm:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">E-Mail</label>
           <input name="email" type="email" value="${escapeHtml(f.email || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Web</label>
+          <input name="web" placeholder="z.B. www.flp-shop.com" value="${escapeHtml(f.web || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Geschäftsführer</label>
+          <input name="managing_director" placeholder="z.B. Patrizio Fontanarosa" value="${escapeHtml(f.managing_director || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Steuer / Register</h4>
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">HRB-Nr.</label>
-          <input name="hrb" placeholder="z.B. HRB 12345" value="${escapeHtml(f.hrb || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input name="hrb" placeholder="z.B. 761229" value="${escapeHtml(f.hrb || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Amtsgericht</label>
+          <input name="ag" placeholder="z.B. Stuttgart" value="${escapeHtml(f.ag || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Steuernummer</label>
@@ -1267,6 +1321,26 @@ async function openCompanyModal(id) {
         </div>
       </div>
 
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Bankverbindung</h4>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Bank</label>
+          <input name="bank_name" placeholder="z.B. Volksbank Stuttgart eG" value="${escapeHtml(f.bank_name || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">IBAN</label>
+          <input name="iban" placeholder="DE00 0000 0000 0000 0000 00" value="${escapeHtml(f.iban || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">BIC</label>
+          <input name="bic" value="${escapeHtml(f.bic || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">BLZ</label>
+          <input name="blz" value="${escapeHtml(f.blz || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+
       <div class="flex justify-end gap-2 mt-6">
         <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
         <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
@@ -1279,7 +1353,7 @@ async function saveCompany(e, id) {
   e.preventDefault();
   const fd = new FormData(e.target);
   const fields = {};
-  ['name','status','street','zip','city','country','phone','fax','email','hrb','tax_no','vat_id','eori'].forEach(k => {
+  ['name','status','street','zip','city','country','phone','fax','email','web','managing_director','hrb','ag','tax_no','vat_id','eori','bank_name','iban','bic','blz'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   if (!fields.name) return toast('Firma fehlt', 'error');
@@ -4727,7 +4801,7 @@ async function openQuoteModal(id) {
         <button type="submit" class="px-3 py-2.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 col-span-2 sm:col-span-1">Speichern &amp; schließen</button>
       </div>
     </form>
-    <div class="hidden lg:block lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 p-4">
+    <div class="lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 border-t border-ink-200 p-3 sm:p-4">
       <div class="flex items-center justify-between mb-3">
         <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
         <div class="flex gap-1.5">
@@ -4735,7 +4809,7 @@ async function openQuoteModal(id) {
           <button type="button" onclick="emailQuote()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i> E-Mail</button>
         </div>
       </div>
-      <div id="quotePreview" class="bg-white shadow-card mx-auto" style="aspect-ratio:210/297;padding:8% 9%;width:100%;"></div>
+      <div id="quotePreview" class="mx-auto" style="width:100%;"></div>
     </div>
     </div>
   `, { maxWidth: 'max-w-7xl' });
@@ -4807,7 +4881,79 @@ async function updateQuotePreview() {
     articles.forEach(a => { articleMap[a.id] = a.fields.article_no || ''; });
   } catch (e) {}
   target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing, articleMap);
+  // Erst nach Render in Multi-Page-Sheets paginieren
+  paginatePreview();
   if (window.lucide) lucide.createIcons();
+}
+
+// Footer-Daten aus Company (mit FLP_BRAND als Fallback). Wird vom Preview UND vom PDF genutzt.
+function buildQuoteFooterData(c) {
+  c = c || {};
+  const cityLine = (c.zip && c.city) ? `D - ${c.zip} ${c.city}` : (c.city ? `D - ${c.city}` : FLP_BRAND.cityLine);
+  const senderParts = [c.name || FLP_BRAND.companyName, c.street || FLP_BRAND.street, [c.zip, c.city].filter(Boolean).join(' '), 'DE'].filter(Boolean);
+  return {
+    taglineTop: FLP_BRAND.taglineTop, // bleibt brand-default; kann später eigenes Company-Feld werden
+    companyName: c.name || FLP_BRAND.companyName,
+    managingDirector: c.managing_director ? `Geschäftsführer ${c.managing_director}` : FLP_BRAND.managingDirector,
+    street: c.street || FLP_BRAND.street,
+    cityLine,
+    ustId: c.vat_id ? `USt.Id.-Nr.: ${c.vat_id}` : FLP_BRAND.ustId,
+    email: c.email || FLP_BRAND.email,
+    web: c.web || FLP_BRAND.web,
+    tel: c.phone || FLP_BRAND.tel,
+    fax: c.fax || FLP_BRAND.fax,
+    hrb: c.hrb || FLP_BRAND.hrb,
+    ag: c.ag || FLP_BRAND.ag,
+    bankName: c.bank_name || FLP_BRAND.bankName,
+    iban: c.iban || FLP_BRAND.iban,
+    bic: c.bic || FLP_BRAND.bic,
+    blz: c.blz || FLP_BRAND.blz,
+    senderAddressLine: senderParts.join(' · '),
+  };
+}
+
+// Footer-HTML als eigene Funktion — wird im Preview unter dem Inhalt UND auf jeder PDF-Seite gerendert.
+function renderQuoteFooterHtml(footer) {
+  return `
+    <div class="grid gap-3 items-start" style="grid-template-columns:28px 1.4fr 1fr auto 1.2fr;">
+      <div class="flex items-start pt-0.5">
+        <svg viewBox="50.2 112.3 41.5 73.5" style="width:22px;height:auto;display:block;" aria-hidden="true">
+          <polygon fill="#575756" points="91.7,112.3 50.2,112.3 50.2,185.8 91.7,185.8 91.7,138.2 91.7,112.3 "/>
+          <path fill="#F6F6F6" d="M69,131.6v-5.1h22.2v5.1H75.5 M75.5,146.4h14.4v5.1H75.5v20.2H69v-25.3"/>
+        </svg>
+      </div>
+      <div class="text-[7.5px] leading-[1.5]">
+        <div class="font-bold text-ink-900 text-[8.5px] mb-0.5">${escapeHtml(footer.companyName)}</div>
+        <div class="text-ink-700">${escapeHtml(footer.managingDirector)}</div>
+        <div class="text-ink-700">${escapeHtml(footer.street)}</div>
+        <div class="text-ink-700">${escapeHtml(footer.cityLine)}</div>
+        <div class="text-ink-700">${escapeHtml(footer.ustId)}</div>
+      </div>
+      <div class="text-[7.5px] leading-[1.5]">
+        <div class="grid gap-x-2 gap-y-0.5" style="grid-template-columns:auto 1fr;">
+          <div class="font-bold">E-Mail</div><div>${escapeHtml(footer.email)}</div>
+          <div class="font-bold">Web</div><div>${escapeHtml(footer.web)}</div>
+          <div class="font-bold">Tel.</div><div>${escapeHtml(footer.tel)}</div>
+          <div class="font-bold">Fax.</div><div>${escapeHtml(footer.fax)}</div>
+        </div>
+      </div>
+      <div class="text-[7.5px] leading-[1.5]">
+        <div class="grid gap-x-2 gap-y-0.5" style="grid-template-columns:auto 1fr;">
+          <div class="font-bold">HRB</div><div>${escapeHtml(footer.hrb)}</div>
+          <div class="font-bold">AG</div><div>${escapeHtml(footer.ag)}</div>
+        </div>
+      </div>
+      <div class="text-[7.5px] leading-[1.5]">
+        <div class="grid gap-x-2 gap-y-0.5" style="grid-template-columns:auto 1fr;">
+          <div class="font-bold">Bank</div><div>${escapeHtml(footer.bankName)}</div>
+          <div class="font-bold">IBAN</div><div>${escapeHtml(footer.iban)}</div>
+          <div class="font-bold">BIC</div><div>${escapeHtml(footer.bic)}</div>
+          <div class="font-bold">BLZ</div><div>${escapeHtml(footer.blz)}</div>
+        </div>
+      </div>
+    </div>
+    <div class="mt-2 h-1.5 bg-brand-500"></div>
+  `;
 }
 
 function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
@@ -4819,6 +4965,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const intro   = substituteVariables(introRaw   || '', 'Angebot', ctx);
   const closing = substituteVariables(closingRaw || '', 'Angebot', ctx);
   articleMap = articleMap || {};
+  const footer = buildQuoteFooterData(c);
   // Anrede für Empfänger (Herrn/Frau aus contact.gender ableiten)
   const recipientSalutation = (() => {
     if (!co || (!co.first_name && !co.last_name)) return '';
@@ -4828,28 +4975,29 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     return [sal, fullName].filter(Boolean).join(' ');
   })();
 
-  return `
-    <div class="text-[11px] text-ink-900 flex flex-col" style="min-height:100%;font-family:Inter,system-ui,sans-serif;">
-
-      <!-- TOP TAGLINE -->
-      <div class="text-[9px] text-ink-700 text-right -mt-2 mb-2">${escapeHtml(FLP_BRAND.taglineTop)}</div>
-
-      <!-- HEADER: TÜV-Marke (Platzhalter) links, FLP-Logo + 'Angebot' rechts -->
-      <div class="flex items-start justify-between mb-5">
-        <div class="flex flex-col items-start gap-1">
-          <div class="w-14 h-14 rounded-full border-2 border-ink-400 flex items-center justify-center text-[8px] font-bold text-ink-600 leading-tight text-center">TÜV<br><span class="text-[9px]">SÜD</span></div>
-        </div>
-        <div class="text-right">
-          <svg class="h-9 ml-auto" style="aspect-ratio:320/74" aria-label="FLP Lift Parts"><use href="#flp-logo"/></svg>
-          <div class="text-[26px] text-ink-700 font-light tracking-tight mt-1 leading-none">Angebot</div>
-        </div>
+  // Header (oben jede Seite) — Tagline + FLP-Logo (Original aus dem inline-SVG-Symbol).
+  // Wir inlinen die Pfade direkt, damit html2canvas das Logo zuverlässig captured (ohne <use>-Reference).
+  const header = `
+    <div class="flex items-start justify-between mb-1">
+      <div class="text-[9px] text-ink-700 max-w-[55%] pt-2">${escapeHtml(footer.taglineTop)}</div>
+      <div style="margin-left:auto;">
+        ${flpLogoInlineSvg(40)}
       </div>
+    </div>
+  `;
+
+  // Hauptinhalt (für Page 1 — wenn auf Seite 2 fortgesetzt, wird er JS-mäßig fortgesetzt)
+  const body = `
+    <div data-quote-body class="text-[11px] text-ink-900" style="font-family:Inter,system-ui,sans-serif;">
+
+      <!-- 'Angebot' Titel -->
+      <div class="text-[26px] text-ink-700 font-light tracking-tight leading-none text-right mb-5">Angebot</div>
 
       <!-- ADRESSZEILE + EMPFÄNGER + META -->
       <div class="grid grid-cols-2 gap-6 mb-6">
         <div>
           <!-- Briefkuvert-Adresszeile -->
-          <div class="text-[7px] text-ink-500 border-b border-ink-300 pb-1 mb-3 inline-block leading-tight">${escapeHtml(FLP_BRAND.senderAddressLine)}</div>
+          <div class="text-[7px] text-ink-500 border-b border-ink-300 pb-1 mb-3 inline-block leading-tight">${escapeHtml(footer.senderAddressLine)}</div>
           <div class="text-[11px] leading-[1.5]">
             ${cu.name1 ? `<div>${escapeHtml(cu.name1)}</div>` : '<div class="text-ink-400 italic">— Empfänger —</div>'}
             ${cu.name2 ? `<div>${escapeHtml(cu.name2)}</div>` : ''}
@@ -4868,9 +5016,9 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               <tr><td class="text-ink-700 py-0.5">Gültigkeit:</td><td class="text-right py-0.5">${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : '30 Tage'}</td></tr>
               <tr><td colspan="2" class="py-1.5"></td></tr>
               <tr><td class="text-ink-700 py-0.5">Kontakt:</td><td class="py-0.5"></td></tr>
-              <tr><td class="text-ink-700 py-0.5">Telefon:</td><td class="text-right py-0.5">${escapeHtml(FLP_BRAND.tel)}</td></tr>
-              <tr><td class="text-ink-700 py-0.5">Fax:</td><td class="text-right py-0.5">${escapeHtml(FLP_BRAND.fax)}</td></tr>
-              <tr><td class="text-ink-700 py-0.5">E-Mail:</td><td class="text-right py-0.5">${escapeHtml(FLP_BRAND.email)}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">Telefon:</td><td class="text-right py-0.5">${escapeHtml(footer.tel)}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">Fax:</td><td class="text-right py-0.5">${escapeHtml(footer.fax)}</td></tr>
+              <tr><td class="text-ink-700 py-0.5">E-Mail:</td><td class="text-right py-0.5">${escapeHtml(footer.email)}</td></tr>
             </tbody>
           </table>
         </div>
@@ -4947,56 +5095,108 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
       <!-- CLOSING -->
       ${closing ? `<div class="whitespace-pre-line text-[10px] mt-4 leading-relaxed">${escapeHtml(closing)}</div>` : ''}
 
-      <!-- SPACER drückt Footer nach unten -->
-      <div class="flex-1" style="min-height:24px;"></div>
+    </div>
+  `;
 
-      <!-- FOOTER (4-spaltig + blauer Balken) -->
-      <div class="mt-4 pt-3 border-t border-ink-200">
-        <div class="grid gap-3" style="grid-template-columns:24px 1fr 1fr auto auto;">
-          <!-- 'F' Mark -->
-          <div class="flex items-start pt-0.5">
-            <div class="w-5 h-5 bg-brand-500 text-white flex items-center justify-center text-[10px] font-bold">F</div>
-          </div>
-          <!-- Spalte 1: Firma -->
-          <div class="text-[7.5px] leading-[1.45]">
-            <div class="font-bold text-ink-900 text-[8.5px] mb-0.5">${escapeHtml(FLP_BRAND.companyName)}</div>
-            <div class="text-ink-700">${escapeHtml(FLP_BRAND.managingDirector)}</div>
-            <div class="text-ink-700">${escapeHtml(FLP_BRAND.street)}</div>
-            <div class="text-ink-700">${escapeHtml(FLP_BRAND.cityLine)}</div>
-            <div class="text-ink-700">${escapeHtml(FLP_BRAND.ustId)}</div>
-          </div>
-          <!-- Spalte 2: Kontakt -->
-          <div class="text-[7.5px] leading-[1.45]">
-            <div class="grid gap-x-1.5 gap-y-0.5" style="grid-template-columns:auto 1fr;">
-              <div class="font-bold">E-Mail</div><div>${escapeHtml(FLP_BRAND.email)}</div>
-              <div class="font-bold">Web</div><div>${escapeHtml(FLP_BRAND.web)}</div>
-              <div class="font-bold">Tel.</div><div>${escapeHtml(FLP_BRAND.tel)}</div>
-              <div class="font-bold">Fax.</div><div>${escapeHtml(FLP_BRAND.fax)}</div>
-            </div>
-          </div>
-          <!-- Spalte 3: Register -->
-          <div class="text-[7.5px] leading-[1.45]">
-            <div class="grid gap-x-1.5 gap-y-0.5" style="grid-template-columns:auto 1fr;">
-              <div class="font-bold">HRB</div><div>${escapeHtml(FLP_BRAND.hrb)}</div>
-              <div class="font-bold">AG</div><div>${escapeHtml(FLP_BRAND.ag)}</div>
-            </div>
-          </div>
-          <!-- Spalte 4: Bank -->
-          <div class="text-[7.5px] leading-[1.45]">
-            <div class="grid gap-x-1.5 gap-y-0.5" style="grid-template-columns:auto 1fr;">
-              <div class="font-bold">Krl</div><div>${escapeHtml(FLP_BRAND.bankName)}</div>
-              <div class="font-bold">IBAN</div><div>${escapeHtml(FLP_BRAND.iban)}</div>
-              <div class="font-bold">BIC</div><div>${escapeHtml(FLP_BRAND.bic)}</div>
-              <div class="font-bold">BLZ</div><div>${escapeHtml(FLP_BRAND.blz)}</div>
-            </div>
-          </div>
-        </div>
-        <!-- blauer Balken am unteren Rand -->
-        <div class="mt-3 -mx-[10%] h-2 bg-brand-500"></div>
-      </div>
+  // Wir liefern Header / Body / Footer als data-Attribute zurück, damit der Pager
+  // beim Multi-Page-Aufbau jeden Block einzeln nutzen kann.
+  return `
+    <div data-quote-doc data-quote-no="${escapeHtml(q.quote_no || '')}">
+      <div data-quote-header>${header}</div>
+      ${body}
+      <div data-quote-footer-html style="display:none;">${renderQuoteFooterHtml(footer)}</div>
     </div>
   `;
 }
+
+/* Pager: zerlegt das gerenderte Quote-Doc in echte A4-Sheets, jedes mit Header oben + Footer unten.
+   Pixel-genau bei 794×1123 (A4 @ 96dpi). Skaliert visuell mit CSS zoom auf die Container-Breite. */
+function paginatePreview() {
+  const target = document.getElementById('quotePreview');
+  if (!target) return;
+  const docEl = target.querySelector('[data-quote-doc]');
+  if (!docEl) return;
+  const headerEl = docEl.querySelector('[data-quote-header]');
+  const bodyEl   = docEl.querySelector('[data-quote-body]');
+  const footerWrap = docEl.querySelector('[data-quote-footer-html]');
+  if (!headerEl || !bodyEl || !footerWrap) return;
+  const headerHtml = headerEl.innerHTML;
+  const bodyHtml   = bodyEl.outerHTML;
+  const footerHtml = footerWrap.innerHTML;
+
+  // A4 @ 96dpi
+  const A4_W = 794, A4_H = 1123;
+  const PAD_T = 32, PAD_LR = 50, PAD_B = 24;
+  const HEADER_H = 60, FOOTER_H = 92, GAP = 14;
+  const usableH = A4_H - PAD_T - HEADER_H - GAP - FOOTER_H - PAD_B;
+
+  // Body bei Referenz-Breite messen (gleicher CSS-Kontext wie im Sheet)
+  const measure = document.createElement('div');
+  measure.style.cssText = `position:fixed;top:-9999px;left:0;width:${A4_W - 2*PAD_LR}px;visibility:hidden;font-family:Inter,system-ui,sans-serif;`;
+  measure.innerHTML = bodyHtml;
+  document.body.appendChild(measure);
+  const bodyEl2 = measure.firstElementChild;
+  const bodyHpx = bodyEl2 ? bodyEl2.scrollHeight : measure.scrollHeight;
+  document.body.removeChild(measure);
+
+  const numPages = Math.max(1, Math.ceil(bodyHpx / usableH));
+
+  let html = '<div data-pages-wrap>';
+  for (let i = 0; i < numPages; i++) {
+    const offset = -i * usableH;
+    html += `
+      <div class="quote-sheet" style="
+        position:relative;
+        width:${A4_W}px;
+        height:${A4_H}px;
+        background:#FFFFFF;
+        box-shadow:0 6px 24px rgba(0,0,0,0.12);
+        margin:0 auto 18px auto;
+        overflow:hidden;
+        font-family:Inter,system-ui,sans-serif;
+        color:#0F172A;
+      ">
+        <!-- Header (jede Seite) -->
+        <div style="position:absolute;top:${PAD_T}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${HEADER_H}px;">
+          ${headerHtml}
+        </div>
+        <!-- Content-Slice -->
+        <div style="position:absolute;top:${PAD_T + HEADER_H + GAP}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${usableH}px;overflow:hidden;">
+          <div style="transform:translateY(${offset}px);">${bodyHtml}</div>
+        </div>
+        <!-- Footer (jede Seite) -->
+        <div style="position:absolute;bottom:${PAD_B}px;left:${PAD_LR}px;right:${PAD_LR}px;">
+          ${footerHtml}
+        </div>
+        <!-- Seitenzahl rechts oben -->
+        ${numPages > 1 ? `<div style="position:absolute;top:14px;right:${PAD_LR + 4}px;font-size:9px;color:#94A3B8;">Seite ${i+1} von ${numPages}</div>` : ''}
+      </div>
+    `;
+  }
+  html += '</div>';
+  target.innerHTML = html;
+  applyQuoteSheetScale();
+}
+
+/* Skaliert alle .quote-sheet via CSS zoom auf die verfügbare Breite des Containers.
+   zoom (im Gegensatz zu transform) verändert die effektive Layout-Box → kein Leerraum unten. */
+function applyQuoteSheetScale() {
+  const wraps = document.querySelectorAll('[data-pages-wrap]');
+  wraps.forEach(wrap => {
+    const parent = wrap.parentElement;
+    const cw = parent ? parent.clientWidth : 794;
+    // Nur runterskalieren — nie hochskalieren über die echte Größe
+    const scale = Math.min(1, Math.max(0.2, cw / 794));
+    wrap.querySelectorAll('.quote-sheet').forEach(s => { s.style.zoom = scale; });
+  });
+}
+
+// Bei Resize neu skalieren (debounced)
+let _quoteScaleTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_quoteScaleTimer);
+  _quoteScaleTimer = setTimeout(applyQuoteSheetScale, 80);
+});
 
 function quoteSumsHtml(sums) {
   const internal = !!window._quoteInternalMode;
@@ -5400,8 +5600,8 @@ async function exportQuoteAsPdf() {
   document.body.appendChild(overlay);
 
   try {
-    // Liftaro-Pattern: html2canvas auf bereits sichtbares DOM-Element + pdf-lib zur PDF-Assembly.
-    // Das Element #quotePreview ist im Modal sichtbar gerendert — html2canvas captured zuverlässig.
+    // Liftaro-Pattern: html2canvas auf bereits sichtbare DOM-Elemente + pdf-lib zur PDF-Assembly.
+    // Pro paginiertes A4-Sheet wird genau eine PDF-Seite erzeugt.
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
 
@@ -5409,29 +5609,55 @@ async function exportQuoteAsPdf() {
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     await new Promise(r => setTimeout(r, 80));
 
-    // Capture des sichtbaren Vorschau-Elements (kein off-screen, kein Sizing-Trick)
-    const canvas = await window.html2canvas(previewEl, {
-      scale: 2,
-      useCORS: true,
-      allowTaint: true,
-      logging: false,
-      backgroundColor: '#FFFFFF',
-      width: previewEl.scrollWidth,
-      height: previewEl.scrollHeight,
-    });
+    const sheets = previewEl.querySelectorAll('.quote-sheet');
+    if (!sheets.length) {
+      // Fallback: Falls Pagination nicht griff, ganzen Preview-Container nehmen
+      const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: false, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
+      window._fallbackQuoteCanvas = canvas;
+    }
 
     // PDF mit pdf-lib zusammenbauen
     const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
     const pdfDoc = await PDFDocument.create();
-    const imgData = canvas.toDataURL('image/png');
-    const pngImg = await pdfDoc.embedPng(imgData);
     const A4_W = 595.28, A4_H = 841.89;
-    const widthScale = A4_W / pngImg.width;
-    const drawW = A4_W;
-    const drawH = pngImg.height * widthScale;
-    const pageH = Math.max(A4_H, drawH);
-    const page = pdfDoc.addPage([A4_W, pageH]);
-    page.drawImage(pngImg, { x: 0, y: pageH - drawH, width: drawW, height: drawH });
+
+    if (sheets.length) {
+      // Für jedes Sheet: zoom temporär auf 1 setzen, capturen, restore
+      for (const sheet of sheets) {
+        const origZoom = sheet.style.zoom;
+        sheet.style.zoom = '1';
+        // Layout-Tick abwarten
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const canvas = await window.html2canvas(sheet, {
+          scale: 2,
+          useCORS: true,
+          allowTaint: true,
+          logging: false,
+          backgroundColor: '#FFFFFF',
+          width: 794,
+          height: 1123,
+          windowWidth: 794,
+        });
+        sheet.style.zoom = origZoom;
+        const imgData = canvas.toDataURL('image/png');
+        const pngImg = await pdfDoc.embedPng(imgData);
+        const page = pdfDoc.addPage([A4_W, A4_H]);
+        page.drawImage(pngImg, { x: 0, y: 0, width: A4_W, height: A4_H });
+      }
+      // Skalierung wiederherstellen
+      applyQuoteSheetScale();
+    } else if (window._fallbackQuoteCanvas) {
+      // Fallback: gestreckte Single-Page wie vorher
+      const canvas = window._fallbackQuoteCanvas;
+      const imgData = canvas.toDataURL('image/png');
+      const pngImg = await pdfDoc.embedPng(imgData);
+      const widthScale = A4_W / pngImg.width;
+      const drawW = A4_W, drawH = pngImg.height * widthScale;
+      const pageH = Math.max(A4_H, drawH);
+      const page = pdfDoc.addPage([A4_W, pageH]);
+      page.drawImage(pngImg, { x: 0, y: pageH - drawH, width: drawW, height: drawH });
+      delete window._fallbackQuoteCanvas;
+    }
 
     // Anhang-Liste als separate Seite (falls Anhänge ausgewählt)
     const attIds = collectSelectedAttachments();
