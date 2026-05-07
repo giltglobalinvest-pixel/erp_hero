@@ -366,10 +366,6 @@
               <i data-lucide="package" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Vorlagenpakete</span>
             </button>
-            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-layouts">
-              <i data-lucide="palette" class="w-4 h-4"></i>
-              <span class="text-sm flex-1 text-left">Layouts (AI)</span>
-            </button>
           </div>
         </div>
       </nav>
@@ -456,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.58';
+const APP_VERSION = 'v2.59';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1223,7 +1219,6 @@ function dispatchRoute(route) {
     case 'admin-users':     renderAdminUsers(); break;
     case 'admin-templates': renderAdminTextemplates(); break;
     case 'admin-bundles':   renderAdminQuoteBundles(); break;
-    case 'admin-layouts':   renderAdminLayouts(); break;
     default:                renderWelcome();
   }
 }
@@ -5949,12 +5944,6 @@ async function openQuoteModal(id) {
     .filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert')
     .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
   const defaultBundle = window._quoteBundles.find(b => b.fields.is_default);
-  // Custom-Layouts laden — pro Mandant
-  let allLayouts = [];
-  try { allLayouts = await readData('Layout'); } catch (e) {}
-  window._quoteLayouts = allLayouts
-    .filter(l => l.fields.company_id === cur.id && (l.fields.status || 'aktiv') !== 'archiviert')
-    .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
 
   if (id) {
     const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
@@ -6171,14 +6160,7 @@ async function openQuoteModal(id) {
     </form>
     <div class="lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 border-t border-ink-200 p-3 sm:p-4">
       <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
-        <div class="flex items-center gap-2 flex-wrap">
-          <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
-          <select id="quoteLayoutTopSelect" onchange="onLayoutVariantChange(this.value)" class="text-xs border border-ink-200 rounded-md px-2 py-1 bg-white">
-            <option value="standard" ${(f.layout_variant || 'standard') === 'standard' ? 'selected' : ''}>Layout: Standard</option>
-            <option value="klassisch" ${f.layout_variant === 'klassisch' ? 'selected' : ''}>Layout: Klassisch</option>
-            ${(window._quoteLayouts || []).map(l => `<option value="layout:${l.id}" ${f.layout_variant === 'layout:' + l.id ? 'selected' : ''}>Layout: ${escapeHtml(l.fields.name || '–')}${l.fields.is_default ? ' ★' : ''}</option>`).join('')}
-          </select>
-        </div>
+        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
         <div class="flex gap-1.5 items-center flex-wrap">
           <!-- Zoom Controls -->
           <div class="flex items-center gap-0.5 bg-white border border-ink-200 rounded-lg overflow-hidden">
@@ -6193,11 +6175,6 @@ async function openQuoteModal(id) {
               <i data-lucide="maximize" class="w-3.5 h-3.5"></i>
             </button>
           </div>
-          ${APP_KEYS.user?.is_admin ? `
-            <button type="button" onclick="openLayoutLiveAdjust()" title="Layout per KI anpassen (Admin)" class="text-xs px-2 py-1 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 flex items-center gap-1">
-              <i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Layout-AI
-            </button>
-          ` : ''}
           <button type="button" onclick="exportQuoteAsPdf()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF</button>
           <button type="button" onclick="emailQuote()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i> E-Mail</button>
         </div>
@@ -6375,41 +6352,19 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const closing = substituteVariables(closingRaw || '', 'Angebot', ctx);
   articleMap = articleMap || {};
   const footer = buildQuoteFooterData(c);
-  // Layout-Variante kann "standard", "klassisch" oder "layout:<id>" (Custom-Layout) sein.
-  // Live-Layout-Anpassung im Toolbar überschreibt temporär (window._liveLayoutPreview).
-  const lv = q.layout_variant || 'standard';
-  let customLayoutCfg = null;
-  if (window._liveLayoutPreview) {
-    customLayoutCfg = { ...LAYOUT_DEFAULT_CONFIG, ...window._liveLayoutPreview };
-  } else if (lv.startsWith('layout:')) {
-    const layoutId = lv.slice('layout:'.length);
-    const layout = (window._quoteLayouts || []).find(l => l.id === layoutId);
-    if (layout) {
-      try { customLayoutCfg = { ...LAYOUT_DEFAULT_CONFIG, ...JSON.parse(layout.fields.config_json || '{}') }; } catch(e) {}
-    }
-  }
-  const variant = customLayoutCfg ? 'standard' : (lv === 'klassisch' ? 'klassisch' : 'standard');
-  const isK = variant === 'klassisch';
-  // Wenn Custom-Layout: bodyInlineStyle + titleInlineStyle + tableInlineStyle.
-  // Inline-Styles überschreiben Tailwind-Klassen IMMER (höchste Specificity).
-  let bodyExtraClass = '';
-  let bodyInlineStyle = 'font-family:Inter,system-ui,sans-serif;';
-  let titleInlineStyle = '';
-  let tableInlineStyle = '';
-  let theadInlineStyle = '';
-  let totalRowInlineStyle = '';
-  let bezeichnungInlineStyle = '';
-  if (customLayoutCfg) {
-    bodyExtraClass = ' quote-body-custom';
-    const cfg = customLayoutCfg;
-    bodyInlineStyle  = `font-family:Inter,system-ui,sans-serif;font-size:${cfg.fontBase};color:${cfg.bodyColor};`;
-    titleInlineStyle = `font-size:${cfg.fontTitle};font-weight:${cfg.titleWeight};color:${cfg.titleColor};text-align:${cfg.titleAlign};`;
-    tableInlineStyle = `font-size:${cfg.fontTable};`;
-    theadInlineStyle = `background:${cfg.tableHeaderBg};color:${cfg.tableHeaderColor};font-weight:${cfg.tableHeaderWeight};`;
-    totalRowInlineStyle = `font-weight:${cfg.totalBold ? '700' : '400'};`;
-    bezeichnungInlineStyle = `font-weight:${cfg.bezeichnungBold ? '600' : '400'};`;
-    if (cfg.accentColor) footer.brandColor = cfg.accentColor;
-  }
+  // Es gibt nur noch das Standard-Layout — vereinfacht (ohne Layout-Variante / Custom-Layouts).
+  const variant = 'standard';
+  const isK = false;
+  // Inline-Styles bleiben für Renderer-Konsistenz definiert — leer im Standard-Layout.
+  const bodyExtraClass = '';
+  const bodyInlineStyle = 'font-family:Inter,system-ui,sans-serif;';
+  const titleInlineStyle = '';
+  const tableInlineStyle = '';
+  const theadInlineStyle = '';
+  const totalRowInlineStyle = '';
+  const bezeichnungInlineStyle = '';
+  // sectionGap überschreiben — User möchte Inhalt enger an die Logos
+  sz.sectionGap = 'mb-3';
   // Schrift noch eine Stufe größer (User-Feedback "alle eine Nummer größer")
   const sz = {
     base:  isK ? 'text-[14px]' : 'text-[13px]',
@@ -6423,10 +6378,10 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     fwTotal: 'font-bold',
     fwBezeichnung: isK ? 'font-semibold' : '',
   };
-  // Sub-Logo (z.B. TÜV) — wird im Header oben links neben dem FLP-Logo platziert
+  // Sub-Logo (z.B. TÜV) — wird im Header oben links neben dem FLP-Logo platziert (80px hoch)
   const subLogoUrl = (c?.sub_logo || [])[0]?.url || '';
   const subLogoHtml = subLogoUrl
-    ? `<img src="${escapeHtml(subLogoUrl)}" crossorigin="anonymous" style="height:64px;width:auto;display:block;" alt="Sub-Logo">`
+    ? `<img src="${escapeHtml(subLogoUrl)}" crossorigin="anonymous" style="height:80px;width:auto;display:block;" alt="Sub-Logo">`
     : '';
   // Anrede für Empfänger (Herrn/Frau aus contact.gender ableiten)
   const recipientSalutation = (() => {
@@ -6441,16 +6396,17 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
   const secondaryLogoUrl = (c?.secondary_logo || [])[0]?.url || '';
   const secondaryLogoHtml = secondaryLogoUrl
-    ? `<img src="${escapeHtml(secondaryLogoUrl)}" crossorigin="anonymous" style="height:64px;width:auto;display:block;" alt="2. Logo">`
+    ? `<img src="${escapeHtml(secondaryLogoUrl)}" crossorigin="anonymous" style="height:80px;width:auto;display:block;" alt="2. Logo">`
     : '';
   // Sub-Logo + 2. Logo (linksbündig) — werden im Pager nur auf Seite 1 gerendert.
   const leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
     ? `<div class="mt-1 mb-2 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
     : '';
+  // Tagline soll einzeilig sein — viel Breite + nowrap; Schrift bleibt 14px.
   const header = `
     <div class="flex items-start justify-between mb-1">
-      <div class="text-ink-700 max-w-[55%]" style="padding-top:6px;font-size:${customLayoutCfg ? customLayoutCfg.fontSmall : '14px'};line-height:1.35;">${escapeHtml(tagline)}</div>
-      <div style="margin-left:auto;padding-top:6px;">
+      <div class="text-ink-700" style="padding-top:6px;font-size:14px;line-height:1.3;flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:12px;">${escapeHtml(tagline)}</div>
+      <div style="flex:0 0 auto;padding-top:6px;">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
@@ -6461,7 +6417,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const body = `
     <div data-quote-body class="${sz.base} text-ink-900${bodyExtraClass}" style="${bodyInlineStyle}">
       <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
-      <div class="quote-doc-title ${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5" style="${titleInlineStyle}">Angebot</div>
+      <div class="quote-doc-title ${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-2" style="${titleInlineStyle}">Angebot</div>
 
       <!-- ADRESSZEILE + EMPFÄNGER + META (im Klassisch-Variant enger gesetzt) -->
       <div class="grid grid-cols-2 ${sz.colsGap} ${sz.sectionGap}">
@@ -6577,7 +6533,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
 
   // Extra-Block für erzwungenes Schlusstext-Auf-Seite-2 (von paginate aufgegriffen)
   const closingExtraHtml = (closing && q.force_closing_new_page)
-    ? `<div data-quote-closing-extra class="${sz.table}${bodyExtraClass}" style="font-family:Inter,system-ui,sans-serif;color:${customLayoutCfg ? customLayoutCfg.bodyColor : '#0F172A'};"><div class="leading-relaxed" style="${customLayoutCfg ? `font-size:${customLayoutCfg.fontTable};` : ''}">${renderTemplateContent(closing)}</div></div>`
+    ? `<div data-quote-closing-extra class="${sz.table}" style="font-family:Inter,system-ui,sans-serif;color:#0F172A;"><div class="leading-relaxed">${renderTemplateContent(closing)}</div></div>`
     : '';
 
   // Wir liefern Header / Body / Footer als data-Attribute zurück, damit der Pager
@@ -6614,10 +6570,10 @@ function paginatePreview() {
 
   // A4 @ 96dpi
   const A4_W = 794, A4_H = 1123;
-  const PAD_T = 32, PAD_LR = 50, PAD_B = 24;
-  const HEADER_H = 50, FOOTER_H = 92, GAP = 6;
-  // Logos-Höhe nur reservieren wenn welche existieren (sonst 0)
-  const LOGOS_H = headerPage1Html ? 64 : 0;
+  const PAD_T = 28, PAD_LR = 50, PAD_B = 24;
+  const HEADER_H = 50, FOOTER_H = 92, GAP = 0;
+  // Logos-Höhe nur reservieren wenn welche existieren (sonst 0) — 80px Logos exakt
+  const LOGOS_H = headerPage1Html ? 80 : 0;
   // usableH ist konstant — auf jeder Seite gleich. Logos-Bereich auf Seite 2+ bleibt einfach leer.
   const usableH = A4_H - PAD_T - HEADER_H - LOGOS_H - GAP - FOOTER_H - PAD_B;
 
