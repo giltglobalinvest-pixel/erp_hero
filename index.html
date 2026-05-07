@@ -456,7 +456,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.56';
+const APP_VERSION = 'v2.57';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5512,6 +5512,23 @@ function setQuoteFieldValue(fieldName, value) {
   if (el) el.value = value || '';
 }
 
+/* Toggle für die optionalen Bereiche (Kopfzeile/Einleitung/Schluss/Anhänge).
+   Standardmäßig ausgeblendet — werden i.d.R. aus dem Vorlagenpaket übernommen. */
+function toggleQuoteAdvanced() {
+  const sections = document.querySelectorAll('#modalBox [data-quote-advanced]');
+  if (!sections.length) return;
+  const isHidden = sections[0].style.display === 'none';
+  sections.forEach(el => el.style.display = isHidden ? '' : 'none');
+  const lbl = document.getElementById('quoteAdvancedToggleLbl');
+  const btn = document.getElementById('quoteAdvancedToggle');
+  if (lbl) lbl.textContent = isHidden ? 'Kopfzeile · Einleitung · Schluss · Anhänge ausblenden' : 'Kopfzeile · Einleitung · Schluss · Anhänge anzeigen';
+  if (btn) {
+    const icon = btn.querySelector('[data-lucide]');
+    if (icon) icon.setAttribute('data-lucide', isHidden ? 'chevron-up' : 'chevron-down');
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
 /* Layout-Variante (Standard/Klassisch) wird im Toolbar oberhalb der Vorschau gewählt.
    Hidden-Feld in der Form syncen + Live-Preview neu rendern. */
 function onLayoutVariantChange(variant) {
@@ -5621,7 +5638,10 @@ Nur die Keys, kein Text drumherum, keine Code-Blöcke.`;
     const result = await askAI(prompt, { maxTokens: 1200 });
     let cleaned = result.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/, '').trim();
     const parsed = JSON.parse(cleaned);
+    console.log('[Layout-AI] Vor:', { ..._liveLayoutState.config });
+    console.log('[Layout-AI] AI-Output:', parsed);
     _liveLayoutState.config = { ...LAYOUT_DEFAULT_CONFIG, ..._liveLayoutState.config, ...parsed };
+    console.log('[Layout-AI] Nach:', { ..._liveLayoutState.config });
     // Live in Vorschau anwenden — temporäres Custom-Layout
     window._liveLayoutPreview = _liveLayoutState.config;
     if (typeof updateQuotePreview === 'function') updateQuotePreview();
@@ -5945,6 +5965,7 @@ async function openQuoteModal(id) {
     f.date = today.toISOString().slice(0, 10);
     f.valid_until = valid.toISOString().slice(0, 10);
     f.status = 'Entwurf';
+    f.force_closing_new_page = true; // Standard für neue Angebote: Schlusstext auf Seite 2
   }
 
   const customersInCompany = allCustomers
@@ -5991,6 +6012,15 @@ async function openQuoteModal(id) {
           <p class="text-xs text-ink-500 mt-1">Bei Auswahl werden Titel + Texte + Anhänge + Layout aus dem Paket übernommen.</p>
         </div>
       ` : `<input type="hidden" name="bundle_id" value="${escapeHtml(f.bundle_id || '')}">`}
+
+      <!-- Toggle: Erweiterte Sektionen (Kopfzeile/Einleitung/Schluss/Anhänge) ein-/ausblenden -->
+      <div class="mb-3">
+        <button type="button" id="quoteAdvancedToggle" onclick="toggleQuoteAdvanced()" class="text-xs text-ink-500 hover:text-ink-900 flex items-center gap-1.5">
+          <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+          <span id="quoteAdvancedToggleLbl">Kopfzeile · Einleitung · Schluss · Anhänge anzeigen</span>
+        </button>
+        <p class="text-[11px] text-ink-400 italic mt-1">Werden i.d.R. aus dem Vorlagenpaket übernommen — bei Bedarf hier individuell überschreiben.</p>
+      </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <div>
@@ -6046,7 +6076,7 @@ async function openQuoteModal(id) {
           </div>
         </div>
         <input type="hidden" name="layout_variant" value="${escapeHtml(f.layout_variant || 'standard')}">
-        <div class="sm:col-span-2">
+        <div class="sm:col-span-2" data-quote-advanced style="display:none;">
           <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
             <label class="text-sm font-medium text-ink-700">Kopfzeile / Tagline</label>
             ${quoteTemplatePicker('quote_title', 'Titel', (f.title_template_id || (id ? '' : (defaultTitleTpl?.id || ''))))}
@@ -6055,7 +6085,7 @@ async function openQuoteModal(id) {
           <input name="quote_title" placeholder="z.B. „Zertifizierte Generalüberholung von Frequenzumrichter…"" value="${escapeHtml(f.quote_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
           <p class="text-xs text-ink-500 mt-1">Wird oben rechts neben dem Logo auf jeder Angebotsseite angezeigt.</p>
         </div>
-        <div class="sm:col-span-2">
+        <div class="sm:col-span-2" data-quote-advanced style="display:none;">
           <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
             <div class="flex items-center gap-1">
               <label class="text-sm font-medium text-ink-700">Einleitung</label>
@@ -6078,7 +6108,7 @@ async function openQuoteModal(id) {
         ${quoteSumsHtml(sums)}
       </div>
 
-      <div class="mt-5">
+      <div class="mt-5" data-quote-advanced style="display:none;">
         <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
           <div class="flex items-center gap-1">
             <label class="text-sm font-medium text-ink-700">Schlusstext</label>
@@ -6099,7 +6129,7 @@ async function openQuoteModal(id) {
 
       ${customFieldsSection(window._quoteCustomFields, parseQuoteCustomValues(f.custom_values))}
 
-      <div class="mt-5">
+      <div class="mt-5" data-quote-advanced style="display:none;">
         <div class="flex items-center justify-between mb-1">
           <label class="text-sm font-medium text-ink-700">Anhänge</label>
           <button type="button" onclick="openAttachmentManagement(true)" class="text-xs px-2 py-1 rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center gap-1">
@@ -6351,26 +6381,24 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   }
   const variant = customLayoutCfg ? 'standard' : (lv === 'klassisch' ? 'klassisch' : 'standard');
   const isK = variant === 'klassisch';
-  // Wenn Custom-Layout: Body-Wrapper-Klasse + Style-Block INNERHALB des Bodys
-  // (NICHT im <head> — html2canvas captured den Body in einer iframe-Umgebung,
-  // dort sind dynamisch im Document-Head injizierte Styles nicht sichtbar.
-  // Style INSIDE body wird bei outerHTML mitgenommen.)
+  // Wenn Custom-Layout: bodyInlineStyle + titleInlineStyle + tableInlineStyle.
+  // Inline-Styles überschreiben Tailwind-Klassen IMMER (höchste Specificity).
   let bodyExtraClass = '';
-  let inlineStyleHtml = '';
+  let bodyInlineStyle = 'font-family:Inter,system-ui,sans-serif;';
+  let titleInlineStyle = '';
+  let tableInlineStyle = '';
+  let theadInlineStyle = '';
+  let totalRowInlineStyle = '';
+  let bezeichnungInlineStyle = '';
   if (customLayoutCfg) {
     bodyExtraClass = ' quote-body-custom';
     const cfg = customLayoutCfg;
-    inlineStyleHtml = `<style>
-      .quote-body-custom { font-size: ${cfg.fontBase} !important; color: ${cfg.bodyColor} !important; }
-      .quote-body-custom .quote-doc-title { font-size: ${cfg.fontTitle} !important; font-weight: ${cfg.titleWeight} !important; color: ${cfg.titleColor} !important; text-align: ${cfg.titleAlign} !important; }
-      .quote-body-custom table { font-size: ${cfg.fontTable} !important; }
-      .quote-body-custom table thead tr { background: ${cfg.tableHeaderBg} !important; color: ${cfg.tableHeaderColor} !important; font-weight: ${cfg.tableHeaderWeight} !important; }
-      .quote-body-custom table thead th { color: ${cfg.tableHeaderColor} !important; font-weight: ${cfg.tableHeaderWeight} !important; background: ${cfg.tableHeaderBg} !important; }
-      .quote-body-custom .quote-total-row { font-weight: ${cfg.totalBold ? '700' : '400'} !important; }
-      .quote-body-custom .quote-total-row td { font-weight: ${cfg.totalBold ? '700' : '400'} !important; }
-      .quote-body-custom .quote-bezeichnung { font-weight: ${cfg.bezeichnungBold ? '600' : '400'} !important; }
-      .quote-body-custom .quote-meta-label { font-weight: ${cfg.metaLabelBold ? '600' : '400'} !important; }
-    </style>`;
+    bodyInlineStyle  = `font-family:Inter,system-ui,sans-serif;font-size:${cfg.fontBase};color:${cfg.bodyColor};`;
+    titleInlineStyle = `font-size:${cfg.fontTitle};font-weight:${cfg.titleWeight};color:${cfg.titleColor};text-align:${cfg.titleAlign};`;
+    tableInlineStyle = `font-size:${cfg.fontTable};`;
+    theadInlineStyle = `background:${cfg.tableHeaderBg};color:${cfg.tableHeaderColor};font-weight:${cfg.tableHeaderWeight};`;
+    totalRowInlineStyle = `font-weight:${cfg.totalBold ? '700' : '400'};`;
+    bezeichnungInlineStyle = `font-weight:${cfg.bezeichnungBold ? '600' : '400'};`;
     if (cfg.accentColor) footer.brandColor = cfg.accentColor;
   }
   // Schrift noch eine Stufe größer (User-Feedback "alle eine Nummer größer")
@@ -6412,21 +6440,19 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     : '';
   const header = `
     <div class="flex items-start justify-between mb-1">
-      <div class="${sz.small} text-ink-700 max-w-[55%]" style="padding-top:6px;">${escapeHtml(tagline)}</div>
+      <div class="text-ink-700 max-w-[55%]" style="padding-top:6px;font-size:${customLayoutCfg ? customLayoutCfg.fontSmall : '14px'};line-height:1.35;">${escapeHtml(tagline)}</div>
       <div style="margin-left:auto;padding-top:6px;">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
   `;
 
-  // Hauptinhalt — Layout-Varianten "standard" und "klassisch" via sz.* Tokens gesteuert.
-  // Custom-Layouts via inlineStyleHtml im Body — html2canvas-kompatibel.
+  // Hauptinhalt — Custom-Layouts via Inline-Styles auf den Schlüssel-Elementen
+  // (Inline-Styles überschreiben Tailwind-Klassen ohne !important — bulletproof).
   const body = `
-    <div data-quote-body class="${sz.base} text-ink-900${bodyExtraClass}" style="font-family:Inter,system-ui,sans-serif;">
-      ${inlineStyleHtml}
-
+    <div data-quote-body class="${sz.base} text-ink-900${bodyExtraClass}" style="${bodyInlineStyle}">
       <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
-      <div class="quote-doc-title ${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5">Angebot</div>
+      <div class="quote-doc-title ${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5" style="${titleInlineStyle}">Angebot</div>
 
       <!-- ADRESSZEILE + EMPFÄNGER + META (im Klassisch-Variant enger gesetzt) -->
       <div class="grid grid-cols-2 ${sz.colsGap} ${sz.sectionGap}">
@@ -6463,16 +6489,16 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
 
       <!-- POSITIONEN -->
       ${items.length > 0 ? `
-        <table class="w-full ${sz.table} mb-2 border-collapse">
-          <thead>
-            <tr class="border-b border-ink-300 text-ink-700">
-              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}">Pos.</th>
-              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}">Anzahl</th>
-              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}">Einheit</th>
-              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}">Artikelnr.</th>
-              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}">Bezeichnung</th>
-              <th class="px-1 py-1.5 text-right ${isK ? 'font-semibold' : 'font-medium'}">Einzelpreis</th>
-              <th class="px-1 py-1.5 text-right ${isK ? 'font-semibold' : 'font-medium'}">Gesamtpreis</th>
+        <table class="w-full ${sz.table} mb-2 border-collapse" style="${tableInlineStyle}">
+          <thead style="${theadInlineStyle}">
+            <tr class="border-b border-ink-300 text-ink-700" style="${theadInlineStyle}">
+              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}" style="${theadInlineStyle}">Pos.</th>
+              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}" style="${theadInlineStyle}">Anzahl</th>
+              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}" style="${theadInlineStyle}">Einheit</th>
+              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}" style="${theadInlineStyle}">Artikelnr.</th>
+              <th class="px-1 py-1.5 text-left ${isK ? 'font-semibold' : 'font-medium'}" style="${theadInlineStyle}">Bezeichnung</th>
+              <th class="px-1 py-1.5 text-right ${isK ? 'font-semibold' : 'font-medium'}" style="${theadInlineStyle}">Einzelpreis</th>
+              <th class="px-1 py-1.5 text-right ${isK ? 'font-semibold' : 'font-medium'}" style="${theadInlineStyle}">Gesamtpreis</th>
             </tr>
           </thead>
           <tbody>
@@ -6487,12 +6513,12 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               const aNo = aId ? (articleMap[aId] || '') : '';
               let descCell;
               if (isHtmlDesc) {
-                descCell = `<div class="${sz.fwBezeichnung} quote-bezeichnung">${rawDesc}</div>`;
+                descCell = `<div class="${sz.fwBezeichnung} quote-bezeichnung" style="${bezeichnungInlineStyle}">${rawDesc}</div>`;
               } else {
                 const descLines = rawDesc.split('\n').map(l => l.trim()).filter(Boolean);
                 const descMain = descLines[0] || '';
                 const descSub  = descLines.slice(1).join(' · ');
-                descCell = `<div class="${sz.fwBezeichnung} quote-bezeichnung">${escapeHtml(descMain)}</div>` +
+                descCell = `<div class="${sz.fwBezeichnung} quote-bezeichnung" style="${bezeichnungInlineStyle}">${escapeHtml(descMain)}</div>` +
                            (descSub ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic text-ink-600 leading-snug mt-0.5">${escapeHtml(descSub)}</div>` : '');
               }
               return `<tr class="border-b border-ink-100 align-top">
@@ -6518,7 +6544,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
           <tbody>
             <tr><td class="py-0.5 ${isK ? 'font-medium' : ''}">Summe</td><td class="text-right py-0.5 tabular-nums">${formatPrice(sums.subtotal_net)} €</td></tr>
             <tr><td class="py-0.5">Mehrwertsteuer 19% auf ${formatPrice(sums.subtotal_net)} € netto</td><td class="text-right py-0.5 tabular-nums">${formatPrice(sums.vat_total)} €</td></tr>
-            <tr class="${sz.fwTotal} quote-total-row"><td class="py-1 border-t border-ink-300">Gesamtbetrag</td><td class="text-right py-1 border-t border-ink-300 tabular-nums">${formatPrice(sums.total_gross)} €</td></tr>
+            <tr class="${sz.fwTotal} quote-total-row"><td class="py-1 border-t border-ink-300" style="${totalRowInlineStyle}">Gesamtbetrag</td><td class="text-right py-1 border-t border-ink-300 tabular-nums" style="${totalRowInlineStyle}">${formatPrice(sums.total_gross)} €</td></tr>
           </tbody>
         </table>
       </div>
