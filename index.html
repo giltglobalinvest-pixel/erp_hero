@@ -456,7 +456,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.54';
+const APP_VERSION = 'v2.55';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1097,6 +1097,9 @@ function closeModal() {
   // Live-Layout-Preview-State freigeben
   if (window._liveLayoutPreview) window._liveLayoutPreview = null;
   if (typeof _liveLayoutState !== 'undefined') _liveLayoutState = null;
+  // Custom-Layout-Stylesheet im Head leeren
+  const cls = document.getElementById('quote-custom-layout-styles');
+  if (cls) cls.textContent = '';
   // Quote-Tracking-Global zurücksetzen
   window._currentQuoteIdInModal = null;
   if (_currentLock) {
@@ -6348,12 +6351,20 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   }
   const variant = customLayoutCfg ? 'standard' : (lv === 'klassisch' ? 'klassisch' : 'standard');
   const isK = variant === 'klassisch';
-  // Wenn Custom-Layout: Body-Wrapper-Klasse + Style-Block für Override
-  let customStyleBlock = '', bodyExtraClass = '';
+  // Wenn Custom-Layout: Body-Wrapper-Klasse + globaler <style>-Tag im Head als Override.
+  // (Globaler Tag, weil paginatePreview nur das data-quote-body Element clonet — ein lokaler
+  // <style>-Block würde dabei verloren gehen.)
+  let bodyExtraClass = '';
+  let styleEl = document.getElementById('quote-custom-layout-styles');
   if (customLayoutCfg) {
     bodyExtraClass = ' quote-body-custom';
     const cfg = customLayoutCfg;
-    customStyleBlock = `<style>
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = 'quote-custom-layout-styles';
+      document.head.appendChild(styleEl);
+    }
+    styleEl.textContent = `
       .quote-body-custom { font-size: ${cfg.fontBase} !important; color: ${cfg.bodyColor} !important; }
       .quote-body-custom > div:first-child { font-size: ${cfg.fontTitle} !important; font-weight: ${cfg.titleWeight} !important; color: ${cfg.titleColor} !important; text-align: ${cfg.titleAlign} !important; }
       .quote-body-custom table { font-size: ${cfg.fontTable} !important; }
@@ -6362,8 +6373,11 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
       .quote-body-custom .quote-total-row { font-weight: ${cfg.totalBold ? '700' : '400'} !important; }
       .quote-body-custom .quote-bezeichnung { font-weight: ${cfg.bezeichnungBold ? '600' : '400'} !important; }
       .quote-body-custom .quote-meta-label { font-weight: ${cfg.metaLabelBold ? '600' : '400'} !important; }
-    </style>`;
+    `;
     if (cfg.accentColor) footer.brandColor = cfg.accentColor;
+  } else if (styleEl) {
+    // Style entfernen, wenn Standard/Klassisch wieder aktiv
+    styleEl.textContent = '';
   }
   // Schrift noch eine Stufe größer (User-Feedback "alle eine Nummer größer")
   const sz = {
@@ -6412,9 +6426,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   `;
 
   // Hauptinhalt — Layout-Varianten "standard" und "klassisch" via sz.* Tokens gesteuert.
-  // Custom-Layouts via customStyleBlock (CSS-Override) angewandt.
+  // Custom-Layouts: globaler <style>-Tag im Head (siehe oben) wirkt via .quote-body-custom Klasse.
   const body = `
-    ${customStyleBlock}
     <div data-quote-body class="${sz.base} text-ink-900${bodyExtraClass}" style="font-family:Inter,system-ui,sans-serif;">
 
       <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
@@ -6534,7 +6547,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
 
   // Extra-Block für erzwungenes Schlusstext-Auf-Seite-2 (von paginate aufgegriffen)
   const closingExtraHtml = (closing && q.force_closing_new_page)
-    ? `<div data-quote-closing-extra class="${sz.table} ${bodyExtraClass}" style="font-family:Inter,system-ui,sans-serif;color:${customLayoutCfg ? customLayoutCfg.bodyColor : '#0F172A'};">${customStyleBlock}<div class="${bodyExtraClass} leading-relaxed" style="font-size:${customLayoutCfg ? customLayoutCfg.fontTable : ''};">${renderTemplateContent(closing)}</div></div>`
+    ? `<div data-quote-closing-extra class="${sz.table}${bodyExtraClass}" style="font-family:Inter,system-ui,sans-serif;color:${customLayoutCfg ? customLayoutCfg.bodyColor : '#0F172A'};"><div class="leading-relaxed" style="${customLayoutCfg ? `font-size:${customLayoutCfg.fontTable};` : ''}">${renderTemplateContent(closing)}</div></div>`
     : '';
 
   // Wir liefern Header / Body / Footer als data-Attribute zurück, damit der Pager
