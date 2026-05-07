@@ -452,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.69';
+const APP_VERSION = 'v2.70';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6398,9 +6398,12 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   // Tagline einzeilig + kleinere Schrift, garantiert sichtbar.
   // FLP-Logo position:absolute auf der rechten Seite (z-index überdeckt Überlauf falls nötig).
   // Tagline mit padding-right damit sie nicht hinter dem Logo verschwindet.
+  // Tagline im NORMALEN Flow (nicht absolute) — html2canvas rendert das zuverlässiger
+  // als absolute positioning. Logo überlappt rechts via z-index.
+  // padding-top gibt vertikalen Safety-Raum, padding-right reserviert Platz fürs Logo.
   const header = `
-    <div style="position:relative;margin-bottom:4px;height:46px;">
-      <div class="text-ink-700" style="position:absolute;top:6px;left:0;right:184px;font-size:12px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tagline)}</div>
+    <div style="position:relative;margin-bottom:4px;padding:10px 184px 0 0;min-height:46px;">
+      <div class="text-ink-700" style="font-size:12px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tagline)}</div>
       <div style="position:absolute;top:4px;right:0;z-index:2;">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
