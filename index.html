@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.24';
+const APP_VERSION = 'v2.25';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -1050,6 +1050,9 @@ function onComboboxSelect(id, value) {
   const wrap = document.querySelector(`[data-combobox="${id.replace(/'/g,'')}"]`);
   const cbName = wrap?.getAttribute('data-onchange');
   if (cbName && typeof window[cbName] === 'function') window[cbName](value, id);
+  // Synthetisches change-Event aufs Form, damit Listener (z.B. Live-Vorschau) reagieren
+  const form = wrap?.closest('form');
+  if (form) form.dispatchEvent(new Event('change', { bubbles: true }));
 }
 function onComboboxClear(id) {
   const valEl = document.getElementById(id + '_value');
@@ -1506,7 +1509,7 @@ function templateRow(rec) {
 function defaultTemplateContent(docType, section) {
   if (docType === 'Angebot') {
     if (section === 'Einleitung') return '{{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage. Wir freuen uns, Ihnen folgendes Angebot {{angebot.nr}} unterbreiten zu dürfen.\n\nDas Angebot ist gültig bis zum {{angebot.gueltig_bis}}.\n\nLieferbedingungen: {{angebot.lieferung}}\nZahlungsbedingungen: {{angebot.zahlungsziel}}';
-    if (section === 'Schlusstext') return 'Wir hoffen, dass Ihnen unser Angebot zusagt und freuen uns auf Ihren Auftrag.\n\nMit freundlichen Grüßen\n\n{{user.name}}\n{{firma.name}}';
+    if (section === 'Schlusstext') return 'Wir hoffen, dass Ihnen unser Angebot zusagt und freuen uns auf Ihren Auftrag.\n\nMit freundlichen Grüßen\n\n{{firma.name}}';
   }
   return '';
 }
@@ -4486,18 +4489,20 @@ async function openQuoteModal(id) {
   window._currentQuoteIdInModal = id || null;
   // Internen Modus standardmäßig aus
   if (typeof window._quoteInternalMode === 'undefined') window._quoteInternalMode = false;
-  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [], allAttachments = [];
   try {
-    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms] = await Promise.all([
+    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms, allAttachments] = await Promise.all([
       readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company'), readData('CustomField'),
-      readData('PaymentTerm'), readData('DeliveryTerm')
+      readData('PaymentTerm'), readData('DeliveryTerm'), readData('Attachment')
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
+  const attachments = allAttachments.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const paymentTerms = allPaymentTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const deliveryTerms = allDeliveryTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
   // Default-Werte für neue Angebote
   const initialPayment  = f.payment_terms  || (id ? '' : (paymentTerms.find(t => t.fields.is_default)?.fields.name || ''));
   const initialDelivery = f.delivery_terms || (id ? '' : (deliveryTerms.find(t => t.fields.is_default)?.fields.name || ''));
+  const selectedAttachmentIds = f.attachment_ids || [];
   // Template-Cache für die Vorlagen-Picker
   window._quoteTemplates = allTemplates.filter(t =>
     (t.fields.company_id || []).includes(cur.id) &&
@@ -4650,14 +4655,41 @@ async function openQuoteModal(id) {
 
       ${customFieldsSection(window._quoteCustomFields, parseQuoteCustomValues(f.custom_values))}
 
+      <div class="mt-5">
+        <div class="flex items-center justify-between mb-1">
+          <label class="text-sm font-medium text-ink-700">Anhänge</label>
+          <button type="button" onclick="openAttachmentManagement(true)" class="text-xs px-2 py-1 rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center gap-1">
+            <i data-lucide="settings-2" class="w-3.5 h-3.5"></i> verwalten
+          </button>
+        </div>
+        ${attachments.length === 0
+          ? '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Noch keine Anhänge angelegt — über „verwalten" hinzufügen.</p>'
+          : `<div class="border border-ink-200 rounded-lg p-2 space-y-1">
+              ${attachments.map(a => {
+                const fileCount = (a.fields.file || []).length;
+                const isSel = selectedAttachmentIds.includes(a.id);
+                return `<label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-ink-50 cursor-pointer">
+                  <input type="checkbox" data-attachment-id="${a.id}" ${isSel ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+                  <span class="text-sm text-ink-900">${escapeHtml(a.fields.name || '–')}</span>
+                  <span class="text-xs text-ink-500">${fileCount} Datei${fileCount===1?'':'en'}</span>
+                </label>`;
+              }).join('')}
+            </div>`}
+        <p class="text-[10px] text-ink-400 italic mt-1">Markierte Anhänge werden im PDF nach dem Angebot aufgeführt.</p>
+      </div>
+
       <div class="flex justify-end gap-2 flex-wrap">
         <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="exportQuoteAsPdf()" class="px-3 py-2 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center gap-1.5"><i data-lucide="file-down" class="w-4 h-4"></i> PDF</button>
         <button type="button" onclick="saveQuote(event, '${id || ''}', true)" class="px-3 py-2 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
         <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
       </div>
     </form>
     <div class="hidden lg:block lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-50 lg:border-l border-ink-200 p-6">
-      <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-2 flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau</p>
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau</p>
+        <button type="button" onclick="exportQuoteAsPdf()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF</button>
+      </div>
       <div id="quotePreview" class="bg-white shadow-card rounded-lg p-6 min-h-[200px]"></div>
     </div>
     </div>
@@ -4730,10 +4762,14 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw) {
 
       <div class="grid grid-cols-2 gap-4 mb-5">
         <div class="text-xs leading-relaxed">
-          ${cu.name1   ? escapeHtml(cu.name1)   + '<br>' : '<span class="text-ink-400 italic">— Empfänger —</span>'}
-          ${cu.name2   ? escapeHtml(cu.name2)   + '<br>' : ''}
-          ${cu.street  ? escapeHtml(cu.street)  + '<br>' : ''}
-          ${(cu.zip || cu.city) ? escapeHtml([cu.zip, cu.city].filter(Boolean).join(' ')) : ''}
+          ${cu.name1 ? escapeHtml(cu.name1) + '<br>' : '<span class="text-ink-400 italic">— Empfänger —</span>'}
+          ${cu.name2 ? escapeHtml(cu.name2) + '<br>' : ''}
+          ${(ctx.contact && (ctx.contact.first_name || ctx.contact.last_name))
+            ? escapeHtml([ctx.contact.first_name, ctx.contact.last_name].filter(Boolean).join(' ')) + '<br>'
+            : ''}
+          ${cu.street ? escapeHtml(cu.street) + '<br>' : ''}
+          ${(cu.zip || cu.city) ? escapeHtml([cu.zip, cu.city].filter(Boolean).join(' ')) + '<br>' : ''}
+          ${cu.country ? escapeHtml(cu.country) : ''}
         </div>
         <div class="text-[11px] space-y-0.5">
           <div class="grid grid-cols-2 gap-1"><span class="text-ink-500">Angebots-Nr.:</span><span class="text-right font-mono">${escapeHtml(q.quote_no || '–')}</span></div>
@@ -4764,10 +4800,12 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw) {
             ${items.map(it => {
               const f = it.fields || {};
               const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
+              const grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
+              const discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
               const desc = (f.description || '').split('\n')[0] || '';
               return `<tr class="border-b border-ink-100 align-top">
                 <td class="px-1.5 py-1">${f.pos || ''}</td>
-                <td class="px-1.5 py-1">${escapeHtml(desc)}${f.discount_pct > 0 ? `<br><span class="text-[10px] text-amber-700">Rabatt ${f.discount_pct}%</span>` : ''}</td>
+                <td class="px-1.5 py-1">${escapeHtml(desc)}${discAbs > 0 ? `<br><span class="text-[10px] text-amber-700">Rabatt: −${formatPrice(discAbs)} €</span>` : ''}</td>
                 <td class="px-1.5 py-1 text-right tabular-nums">${escapeHtml(String(f.qty || ''))}</td>
                 <td class="px-1.5 py-1">${escapeHtml(f.unit || '')}</td>
                 <td class="px-1.5 py-1 text-right font-mono tabular-nums">${formatPrice(f.unit_price_net || 0)}</td>
@@ -4956,6 +4994,145 @@ async function deleteTerm(id) {
   } catch (err) { toast(err.message, 'error'); }
 }
 
+/* ============================================================
+   ANHÄNGE (Attachment) — Verwaltung + Auswahl
+   ============================================================ */
+async function openAttachmentManagement(useModal2 = false) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  let all = [];
+  try { all = await readData('Attachment'); } catch (e) { toast(e.message, 'error'); return; }
+  const list = all.filter(a => (a.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const rows = list.length === 0
+    ? '<p class="px-3 py-4 text-sm text-ink-500 italic text-center">Noch keine Anhänge.</p>'
+    : list.map(r => {
+        const f = r.fields || {};
+        const fileCount = (f.file || []).length;
+        const fileName = (f.file || [])[0]?.filename || '–';
+        return `
+          <div class="flex items-center justify-between p-3 border-b border-ink-100 last:border-b-0">
+            <div class="flex-1 min-w-0">
+              <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(f.name || '–')}</p>
+              <p class="text-xs text-ink-500">${fileCount} Datei${fileCount===1?'':'en'} · ${escapeHtml(fileName)}</p>
+            </div>
+            <button type="button" onclick="deleteAttachment('${r.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+          </div>
+        `;
+      }).join('');
+  const html = `
+    <div class="p-6">
+      <div class="flex items-baseline justify-between mb-2">
+        <h3 class="text-lg font-bold text-ink-900">Anhänge</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+      <p class="text-xs text-ink-500 mb-3">Hier verwaltest du wiederverwendbare Anhänge (z.B. AGB.pdf, Datenblätter), die du beim Angebot anhaken kannst.</p>
+      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4 max-h-64 overflow-y-auto">${rows}</div>
+      <p class="text-xs text-ink-400 italic mb-3">Datei-Upload erfolgt direkt in Airtable (Tabelle „Attachment" → Spalte „file") — wenn das Feld zu Klick-Upload via Browser ausgebaut wird, kann das hier ergänzt werden.</p>
+      <div class="flex gap-2">
+        <input id="newAttName" type="text" placeholder="Anhang-Name (z.B. AGB)" onkeydown="if(event.key==='Enter'){event.preventDefault();addAttachment()}" class="flex-1 px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        <button type="button" onclick="addAttachment()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
+          <i data-lucide="plus" class="w-4 h-4"></i> Anlegen
+        </button>
+      </div>
+      <div class="flex justify-end mt-5">
+        <button type="button" onclick="${useModal2 ? 'closeModal2()' : 'closeModal()'}" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen</button>
+      </div>
+    </div>
+  `;
+  if (useModal2) openModal2(html); else openModal(html);
+  setTimeout(() => document.getElementById('newAttName')?.focus(), 50);
+}
+
+async function addAttachment() {
+  const cur = getCurrentCompany();
+  const inp = document.getElementById('newAttName');
+  const name = (inp?.value || '').trim();
+  if (!name) return toast('Name fehlt', 'error');
+  try {
+    await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
+    if (inp) inp.value = '';
+    toast('Angelegt — Datei kann jetzt in Airtable hochgeladen werden', 'success', 3500);
+    await openAttachmentManagement(_termMgmtCtx ? true : false);
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteAttachment(id) {
+  if (!confirm('Diesen Anhang wirklich löschen?')) return;
+  try {
+    await deleteData('Attachment', id);
+    await openAttachmentManagement(_termMgmtCtx ? true : false);
+    toast('Gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   PDF-EXPORT für Angebote
+   ============================================================ */
+async function exportQuoteAsPdf() {
+  const target = document.getElementById('quotePreview');
+  if (!target) {
+    // Wenn keine Preview im DOM (z.B. Mobile): rendern wir on the fly
+    await updateQuotePreview();
+  }
+  const previewHtml = document.getElementById('quotePreview')?.innerHTML || '';
+  if (!previewHtml) { toast('Vorschau nicht verfügbar', 'error'); return; }
+  // SVG-Symbol für Logo mitnehmen
+  const svgSymbolHtml = document.querySelector('svg[width="0"][height="0"]')?.outerHTML || '';
+  // Ausgewählte Anhänge auf einer Anhänge-Liste-Seite ankündigen
+  const attIds = collectSelectedAttachments();
+  let attListHtml = '';
+  if (attIds.length) {
+    try {
+      const all = await readData('Attachment');
+      const sel = all.filter(r => attIds.includes(r.id));
+      if (sel.length) {
+        attListHtml = `
+          <div style="page-break-before: always; padding-top: 1cm;">
+            <h2 style="font-size:18px;font-weight:bold;margin-bottom:12px;">Anhänge zum Angebot</h2>
+            <ul style="list-style:disc;padding-left:18px;font-size:11px;">
+              ${sel.map(s => `<li>${escapeHtml(s.fields.name || '–')}${(s.fields.file || []).length ? ' (' + (s.fields.file || []).length + ' Datei' + ((s.fields.file || []).length===1?'':'en') + ')' : ''}</li>`).join('')}
+            </ul>
+            <p style="font-size:10px;color:#888;margin-top:14px;">Hinweis: Die hier gelisteten Dateien werden als Beiblatt mitgesendet.</p>
+          </div>
+        `;
+      }
+    } catch (e) {}
+  }
+  const win = window.open('', '_blank');
+  if (!win) { toast('Pop-up blockiert — bitte freigeben', 'error'); return; }
+  win.document.write(`
+    <!doctype html>
+    <html lang="de"><head>
+    <meta charset="utf-8">
+    <title>Angebot</title>
+    <script src="https://cdn.tailwindcss.com"><\/script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; padding: 1.6cm 1.8cm; max-width: 21cm; margin: 0 auto; color:#0F172A; }
+      @media print { body { padding: 0.6cm 0.8cm; } }
+      table { border-collapse: collapse; }
+      .no-print { display: none !important; }
+    </style>
+    </head><body>
+      ${svgSymbolHtml}
+      ${previewHtml}
+      ${attListHtml}
+      <script>setTimeout(function(){ window.print(); }, 700);<\/script>
+    </body></html>
+  `);
+  win.document.close();
+}
+
+function collectSelectedAttachments() {
+  const ids = [];
+  document.querySelectorAll('#modalBox input[data-attachment-id]:checked').forEach(el => {
+    const id = el.getAttribute('data-attachment-id');
+    if (id) ids.push(id);
+  });
+  return ids;
+}
+
 async function toggleTermDefault(id, makeDefault) {
   const ctx = _termMgmtCtx;
   const cur = getCurrentCompany();
@@ -5003,10 +5180,12 @@ function quoteItemRow(quoteId, it) {
   const ek = +(f.purchase_price || 0);
   const lineEk = (+(f.qty || 0)) * ek;
   const margin = lineNet - lineEk;
+  const grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
+  const discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
   const meta = [
     (f.qty || 0) + (f.unit ? ' ' + f.unit : ''),
     '× ' + formatPrice(f.unit_price_net || 0) + ' €',
-    f.discount_pct > 0 ? '−' + (f.discount_pct) + '%' : '',
+    discAbs > 0 ? 'Rabatt: −' + formatPrice(discAbs) + ' €' : '',
     'MwSt ' + (f.vat_rate || 0) + '%'
   ].filter(Boolean).join(' · ');
   const internalLine = internalMode
@@ -5369,6 +5548,8 @@ async function saveQuote(e, id, keepOpen) {
   // Individuelle Felder als JSON
   const cv = collectCustomValues();
   fields.custom_values = Object.keys(cv).length ? JSON.stringify(cv) : '';
+  // Anhang-Auswahl
+  fields.attachment_ids = collectSelectedAttachments();
   const cidSel = (fd.get('customer_id') || '').trim();
   const conSel = (fd.get('contact_id')  || '').trim();
   fields.customer_id = cidSel ? [cidSel] : [];
@@ -5399,16 +5580,14 @@ async function saveQuote(e, id, keepOpen) {
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
     window._currentQuoteIdInModal = savedId;
     if (keepOpen) {
-      closeModal();
       toast('Gespeichert', 'success');
-      setTimeout(async () => {
-        await openQuoteModal(savedId);
-        if (_pendingPostQuoteAction) {
-          const act = _pendingPostQuoteAction;
-          _pendingPostQuoteAction = null;
-          setTimeout(act, 100);
-        }
-      }, 60);
+      // Modal NICHT schließen — Inhalt direkt mit aktualisierter ID neu rendern (Backdrop bleibt sichtbar)
+      await openQuoteModal(savedId);
+      if (_pendingPostQuoteAction) {
+        const act = _pendingPostQuoteAction;
+        _pendingPostQuoteAction = null;
+        setTimeout(act, 100);
+      }
     } else {
       closeModal();
       renderQuotes();
