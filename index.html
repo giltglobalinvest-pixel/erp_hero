@@ -435,7 +435,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.45';
+const APP_VERSION = 'v2.46';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1254,6 +1254,7 @@ async function openCompanyModal(id) {
     { name: 'bic',               type: 'singleLineText' },
     { name: 'blz',               type: 'singleLineText' },
     { name: 'logo',              type: 'multipleAttachments' },
+    { name: 'secondary_logo',    type: 'multipleAttachments' },
     { name: 'sub_logo',          type: 'multipleAttachments' },
   ]);
 
@@ -1366,6 +1367,23 @@ async function openCompanyModal(id) {
           </div>
           <p class="text-xs text-ink-500 mt-1">SVG, PNG oder JPG · max 5 MB · wird auf 40 px Höhe skaliert</p>
         </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">2. Logo (links neben dem Hauptlogo, optional)</label>
+          <div class="flex items-center gap-3 border border-ink-200 rounded-lg p-2 bg-ink-50/50">
+            <div class="bg-white rounded p-2 flex items-center justify-center" style="width:80px;height:48px;flex-shrink:0;">
+              ${(f.secondary_logo && f.secondary_logo[0]?.url)
+                ? `<img src="${escapeHtml(f.secondary_logo[0].url)}" style="max-height:36px;max-width:72px;display:block;" alt="2. Logo">`
+                : `<span class="text-[10px] text-ink-400 italic">kein 2. Logo</span>`}
+            </div>
+            <div class="flex-1">
+              ${id
+                ? `<input type="file" id="secondaryLogoUpload" accept="image/svg+xml,image/png,image/jpeg" onchange="uploadCompanySecondaryLogo('${id}', this)" class="text-xs">
+                   ${(f.secondary_logo && f.secondary_logo[0]?.url) ? `<button type="button" onclick="removeCompanySecondaryLogo('${id}')" class="block mt-1 text-xs text-red-600 hover:underline">2. Logo entfernen</button>` : ''}`
+                : `<p class="text-xs text-ink-500 italic">Bitte zuerst speichern, dann 2. Logo hochladen</p>`}
+            </div>
+          </div>
+          <p class="text-xs text-ink-500 mt-1">Wird direkt links vom Hauptlogo angezeigt · gleiche Höhe (40 px) · z.B. Partnerlogo, Marke</p>
+        </div>
         <div class="sm:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Sub-Logo (z.B. TÜV-Marke unter der Tagline)</label>
           <div class="flex items-center gap-3 border border-ink-200 rounded-lg p-2 bg-ink-50/50">
@@ -1434,6 +1452,33 @@ async function removeCompanyLogo(id) {
   try {
     await updateData('Company', id, { logo: [] });
     toast('Logo entfernt', 'success');
+    closeModal();
+    setTimeout(() => openCompanyEdit(id), 80);
+  } catch (err) {
+    toast('Entfernen fehlgeschlagen: ' + err.message, 'error');
+  }
+}
+
+async function uploadCompanySecondaryLogo(id, inputEl) {
+  const file = inputEl?.files?.[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { toast('Datei zu groß (max 5 MB)', 'error'); return; }
+  toast('2. Logo wird hochgeladen …', 'info', 1500);
+  try {
+    await uploadFileToRecord(id, 'secondary_logo', file);
+    toast('2. Logo hochgeladen', 'success');
+    closeModal();
+    setTimeout(() => openCompanyEdit(id), 80);
+  } catch (err) {
+    toast('Upload fehlgeschlagen: ' + err.message, 'error');
+  }
+}
+
+async function removeCompanySecondaryLogo(id) {
+  if (!confirm('2. Logo wirklich entfernen?')) return;
+  try {
+    await updateData('Company', id, { secondary_logo: [] });
+    toast('2. Logo entfernt', 'success');
     closeModal();
     setTimeout(() => openCompanyEdit(id), 80);
   } catch (err) {
@@ -5504,13 +5549,18 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     return [sal, fullName].filter(Boolean).join(' ');
   })();
 
-  // Header (oben jede Seite) — Tagline LINKS, FLP-Logo RECHTS (wie vorher).
+  // Header (oben jede Seite) — Tagline LINKS, optional 2. Logo + FLP-Logo RECHTS (gleiche Höhe).
   // Tagline kommt aus quote.quote_title (per Vorlage editierbar) mit Fallback auf FLP-Brand.
   const tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
+  const secondaryLogoUrl = (c?.secondary_logo || [])[0]?.url || '';
+  const secondaryLogoHtml = secondaryLogoUrl
+    ? `<img src="${escapeHtml(secondaryLogoUrl)}" crossorigin="anonymous" style="height:40px;width:auto;display:block;" alt="2. Logo">`
+    : '';
   const header = `
     <div class="flex items-start justify-between mb-1">
       <div class="${sz.small} text-ink-700 max-w-[55%] pt-2">${escapeHtml(tagline)}</div>
-      <div style="margin-left:auto;">
+      <div style="margin-left:auto;display:flex;align-items:center;gap:12px;">
+        ${secondaryLogoHtml}
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
