@@ -435,7 +435,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.49';
+const APP_VERSION = 'v2.50';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6290,71 +6290,160 @@ async function deleteTerm(id) {
 /* ============================================================
    ANHÄNGE (Attachment) — Verwaltung + Auswahl
    ============================================================ */
+function _formatFileSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+let _attMgmtModal2 = false;
 async function openAttachmentManagement(useModal2 = false) {
+  _attMgmtModal2 = useModal2;
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   let all = [];
   try { all = await readData('Attachment'); } catch (e) { toast(e.message, 'error'); return; }
   const list = all.filter(a => (a.fields.company_id || []).includes(cur.id))
     .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+
   const rows = list.length === 0
-    ? '<p class="px-3 py-4 text-sm text-ink-500 italic text-center">Noch keine Anhänge.</p>'
+    ? '<p class="px-3 py-6 text-sm text-ink-500 italic text-center">Noch keine Anhänge angelegt.</p>'
     : list.map(r => {
         const f = r.fields || {};
-        const fileCount = (f.file || []).length;
-        const fileName = (f.file || [])[0]?.filename || '–';
+        const files = f.file || [];
+        const filesHtml = files.length === 0
+          ? '<p class="text-xs text-ink-400 italic px-2">noch keine Datei</p>'
+          : files.map((fl, idx) => `
+              <div class="flex items-center gap-2 px-2 py-1 hover:bg-ink-50 rounded">
+                <i data-lucide="file" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>
+                <a href="${escapeHtml(fl.url)}" target="_blank" rel="noopener" class="text-xs text-brand-600 hover:underline truncate flex-1">${escapeHtml(fl.filename || '–')}</a>
+                <span class="text-[10px] text-ink-500 shrink-0">${_formatFileSize(fl.size)}</span>
+                <button type="button" onclick="removeAttachmentFile('${r.id}', ${idx})" class="p-0.5 text-ink-400 hover:text-red-600" title="Datei entfernen"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
+              </div>
+            `).join('');
         return `
-          <div class="flex items-center justify-between p-3 border-b border-ink-100 last:border-b-0">
-            <div class="flex-1 min-w-0">
-              <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(f.name || '–')}</p>
-              <p class="text-xs text-ink-500">${fileCount} Datei${fileCount===1?'':'en'} · ${escapeHtml(fileName)}</p>
+          <div class="border-b border-ink-100 last:border-b-0 p-3">
+            <div class="flex items-center justify-between mb-2 gap-2">
+              <div class="flex items-center gap-2 flex-1 min-w-0">
+                <i data-lucide="paperclip" class="w-4 h-4 text-ink-500 shrink-0"></i>
+                <span class="font-medium text-ink-900 text-sm truncate">${escapeHtml(f.name || '–')}</span>
+                <span class="text-[10px] text-ink-500">${files.length} Datei${files.length===1?'':'en'}</span>
+              </div>
+              <div class="flex gap-1 shrink-0">
+                <label class="cursor-pointer p-1.5 text-ink-500 hover:text-brand-600 hover:bg-brand-50 rounded" title="Datei hinzufügen">
+                  <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                  <input type="file" class="hidden" onchange="addAttachmentFile('${r.id}', this)">
+                </label>
+                <button type="button" onclick="renameAttachment('${r.id}', '${escapeHtml((f.name || '').replace(/'/g,"\\'"))}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Umbenennen"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+                <button type="button" onclick="deleteAttachment('${r.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Anhang löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+              </div>
             </div>
-            <button type="button" onclick="deleteAttachment('${r.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+            <div class="bg-ink-50/50 rounded-lg py-1 space-y-0.5">${filesHtml}</div>
           </div>
         `;
       }).join('');
+
   const html = `
     <div class="p-6">
       <div class="flex items-baseline justify-between mb-2">
         <h3 class="text-lg font-bold text-ink-900">Anhänge</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
-      <p class="text-xs text-ink-500 mb-3">Hier verwaltest du wiederverwendbare Anhänge (z.B. AGB.pdf, Datenblätter), die du beim Angebot anhaken kannst.</p>
-      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4 max-h-64 overflow-y-auto">${rows}</div>
-      <p class="text-xs text-ink-400 italic mb-3">Datei-Upload erfolgt direkt in Airtable (Tabelle „Attachment" → Spalte „file") — wenn das Feld zu Klick-Upload via Browser ausgebaut wird, kann das hier ergänzt werden.</p>
-      <div class="flex gap-2">
-        <input id="newAttName" type="text" placeholder="Anhang-Name (z.B. AGB)" onkeydown="if(event.key==='Enter'){event.preventDefault();addAttachment()}" class="flex-1 px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        <button type="button" onclick="addAttachment()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
-          <i data-lucide="plus" class="w-4 h-4"></i> Anlegen
-        </button>
+      <p class="text-xs text-ink-500 mb-3">Wiederverwendbare Anhänge (AGB, Datenblätter, Zertifikate, …) — werden beim Angebot per Klick mit ins PDF gehängt.</p>
+      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4 max-h-[55vh] overflow-y-auto">${rows}</div>
+
+      <div class="border border-brand-200 bg-brand-50/40 rounded-lg p-3">
+        <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Neuer Anhang</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+          <input id="newAttName" type="text" placeholder="Name (z.B. AGB)" class="px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="newAttFile" type="file" class="px-3 py-2 text-sm border border-ink-200 rounded-lg bg-white">
+        </div>
+        <div class="flex justify-end">
+          <button type="button" onclick="addAttachmentWithFile()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
+            <i data-lucide="plus" class="w-4 h-4"></i> Anlegen + Hochladen
+          </button>
+        </div>
+        <p class="text-[11px] text-ink-500 mt-2">Datei optional — kann auch nachträglich hochgeladen werden. Mehrere Dateien pro Anhang möglich (max 5 MB pro Datei).</p>
       </div>
+
       <div class="flex justify-end mt-5">
         <button type="button" onclick="${useModal2 ? 'closeModal2()' : 'closeModal()'}" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen</button>
       </div>
     </div>
   `;
   if (useModal2) openModal2(html); else openModal(html);
-  setTimeout(() => document.getElementById('newAttName')?.focus(), 50);
+  setTimeout(() => {
+    if (window.lucide) lucide.createIcons();
+    document.getElementById('newAttName')?.focus();
+  }, 50);
 }
 
-async function addAttachment() {
+async function addAttachmentWithFile() {
   const cur = getCurrentCompany();
-  const inp = document.getElementById('newAttName');
-  const name = (inp?.value || '').trim();
+  const nameInp = document.getElementById('newAttName');
+  const fileInp = document.getElementById('newAttFile');
+  const name = (nameInp?.value || '').trim();
+  const file = fileInp?.files?.[0];
   if (!name) return toast('Name fehlt', 'error');
+  if (file && file.size > 5 * 1024 * 1024) return toast('Datei zu groß (max 5 MB)', 'error');
   try {
-    await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
-    if (inp) inp.value = '';
-    toast('Angelegt — Datei kann jetzt in Airtable hochgeladen werden', 'success', 3500);
-    await openAttachmentManagement(_termMgmtCtx ? true : false);
+    const created = await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
+    if (file && created?.id) {
+      toast('Datei wird hochgeladen …', 'info', 1500);
+      await uploadFileToRecord(created.id, 'file', file);
+    }
+    if (nameInp) nameInp.value = '';
+    if (fileInp) fileInp.value = '';
+    toast('Angelegt' + (file ? ' + Datei hochgeladen' : ''), 'success');
+    await openAttachmentManagement(_attMgmtModal2);
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function addAttachmentFile(attachmentId, inputEl) {
+  const file = inputEl?.files?.[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) return toast('Datei zu groß (max 5 MB)', 'error');
+  try {
+    toast('Datei wird hochgeladen …', 'info', 1500);
+    await uploadFileToRecord(attachmentId, 'file', file);
+    toast('Datei hochgeladen', 'success');
+    await openAttachmentManagement(_attMgmtModal2);
+  } catch (err) { toast('Upload fehlgeschlagen: ' + err.message, 'error'); }
+}
+
+async function removeAttachmentFile(attachmentId, fileIndex) {
+  if (!confirm('Diese Datei aus dem Anhang entfernen?')) return;
+  try {
+    const all = await readData('Attachment');
+    const rec = all.find(r => r.id === attachmentId);
+    const files = (rec?.fields?.file || []).slice();
+    files.splice(fileIndex, 1);
+    // Airtable braucht fürs Update das ganze Array minus die Datei mit { id } pro Eintrag
+    const updatedFiles = files.map(f => ({ id: f.id }));
+    await updateData('Attachment', attachmentId, { file: updatedFiles });
+    toast('Datei entfernt', 'success');
+    await openAttachmentManagement(_attMgmtModal2);
+  } catch (err) { toast('Entfernen fehlgeschlagen: ' + err.message, 'error'); }
+}
+
+async function renameAttachment(id, currentName) {
+  const newName = prompt('Anhang umbenennen:', currentName);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) return toast('Name fehlt', 'error');
+  try {
+    await updateData('Attachment', id, { name: trimmed });
+    await openAttachmentManagement(_attMgmtModal2);
+    toast('Umbenannt', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
 
 async function deleteAttachment(id) {
-  if (!confirm('Diesen Anhang wirklich löschen?')) return;
+  if (!confirm('Diesen Anhang inkl. aller Dateien löschen?')) return;
   try {
     await deleteData('Attachment', id);
-    await openAttachmentManagement(_termMgmtCtx ? true : false);
+    await openAttachmentManagement(_attMgmtModal2);
     toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
