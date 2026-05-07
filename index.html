@@ -452,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.64';
+const APP_VERSION = 'v2.65';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6624,8 +6624,8 @@ function paginatePreview() {
         <div style="position:absolute;bottom:${PAD_B}px;left:${PAD_LR}px;right:${PAD_LR}px;">
           ${footerHtml}
         </div>
-        <!-- Seitenzahl rechts oben -->
-        ${numPages > 1 ? `<div style="position:absolute;top:14px;right:${PAD_LR + 4}px;font-size:9px;color:#94A3B8;">Seite ${i+1} von ${numPages}</div>` : ''}
+        <!-- Seitenzahl: ganz oben rechts in der weißen Zone, z-index über Logo -->
+        ${numPages > 1 ? `<div style="position:absolute;top:6px;right:${PAD_LR}px;font-size:9px;color:#94A3B8;z-index:5;background:#FFFFFF;padding:2px 4px;">Seite ${i+1} von ${numPages}</div>` : ''}
       </div>
     `;
   }
@@ -6657,7 +6657,7 @@ function paginatePreview() {
           ${footerHtml}
         </div>
         <!-- Seitenzahl -->
-        <div style="position:absolute;top:14px;right:${PAD_LR + 4}px;font-size:9px;color:#94A3B8;">Seite ${i+1} von ${numPages}</div>
+        <div style="position:absolute;top:6px;right:${PAD_LR}px;font-size:9px;color:#94A3B8;z-index:5;background:#FFFFFF;padding:2px 4px;">Seite ${i+1} von ${numPages}</div>
       </div>
     `;
   }
