@@ -84,6 +84,24 @@
   @supports (height: 100dvh) {
     html, body { height: 100dvh; }
   }
+  /* iOS Auto-Zoom bei Input-Fokus verhindern: Inputs/Selects/Textarea brauchen ≥ 16px */
+  @media (max-width: 1023px) {
+    input:not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea {
+      font-size: 16px !important;
+      line-height: 1.4 !important;
+    }
+  }
+  /* Modal-Backdrop auf Mobile: oben bündig + Backdrop selbst scrollbar (für lange Modals) */
+  @media (max-width: 1023px) {
+    #modalBackdrop, #modalBackdrop2 {
+      place-items: start center !important;
+      padding-top: max(env(safe-area-inset-top), 8px);
+      padding-bottom: max(env(safe-area-inset-bottom), 8px);
+      overflow-y: auto;
+    }
+  }
 </style>
 </head>
 <body class="bg-brand-500 text-ink-900">
@@ -402,7 +420,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.33';
+const APP_VERSION = 'v2.34';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4591,13 +4609,13 @@ async function openQuoteModal(id) {
 
   openModal(`
     <div class="lg:flex lg:items-stretch">
-    <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-6 lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto">
+    <form onsubmit="saveQuote(event, '${id || ''}', false)" class="p-4 sm:p-6 lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto">
       <div class="flex items-baseline justify-between mb-4">
         <h3 class="text-lg font-bold text-ink-900">${id ? 'Angebot bearbeiten' : 'Neues Angebot'}</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
 
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Angebots-Nr.</label>
           <input name="quote_no" value="${escapeHtml(f.quote_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
@@ -4701,12 +4719,12 @@ async function openQuoteModal(id) {
         <p class="text-[10px] text-ink-400 italic mt-1">Markierte Anhänge werden im PDF nach dem Angebot aufgeführt.</p>
       </div>
 
-      <div class="flex justify-end gap-2 flex-wrap">
-        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
-        <button type="button" onclick="exportQuoteAsPdf()" class="px-3 py-2 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center gap-1.5"><i data-lucide="file-down" class="w-4 h-4"></i> PDF</button>
-        <button type="button" onclick="emailQuote()" class="px-3 py-2 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center gap-1.5"><i data-lucide="mail" class="w-4 h-4"></i> E-Mail</button>
-        <button type="button" onclick="saveQuote(event, '${id || ''}', true)" class="px-3 py-2 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
-        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
+      <div class="grid grid-cols-2 sm:flex sm:justify-end gap-2 sm:flex-wrap mt-4">
+        <button type="button" onclick="closeModal()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 col-span-2 sm:col-span-1">Abbrechen</button>
+        <button type="button" onclick="exportQuoteAsPdf()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center justify-center gap-1.5"><i data-lucide="file-down" class="w-4 h-4"></i> PDF</button>
+        <button type="button" onclick="emailQuote()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center justify-center gap-1.5"><i data-lucide="mail" class="w-4 h-4"></i> E-Mail</button>
+        <button type="button" onclick="saveQuote(event, '${id || ''}', true)" class="px-3 py-2.5 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
+        <button type="submit" class="px-3 py-2.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 col-span-2 sm:col-span-1">Speichern &amp; schließen</button>
       </div>
     </form>
     <div class="hidden lg:block lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 p-4">
@@ -4721,11 +4739,25 @@ async function openQuoteModal(id) {
     </div>
     </div>
   `, { maxWidth: 'max-w-7xl' });
-  // Modal-Box: max-w-7xl + Outer-Overflow aushebeln (Spalten machen ihr eigenes Scrolling)
+  // Modal-Box: max-w-7xl. Auf Desktop scrollen die Spalten unabhängig (Outer-Overflow weg).
+  // Auf Mobile (< lg) MUSS der Modal-Box selbst scrollbar bleiben — sonst kommt der User
+  // nicht an die unteren Felder + Speichern-Button.
   const box = document.getElementById('modalBox');
   if (box) {
-    box.classList.remove('max-w-lg', 'max-w-5xl', 'max-h-[88vh]', 'overflow-y-auto');
+    box.classList.remove('max-w-lg', 'max-w-5xl');
     box.classList.add('max-w-7xl');
+    const applyResponsiveScroll = () => {
+      const isLg = window.matchMedia('(min-width: 1024px)').matches;
+      if (isLg) {
+        box.classList.remove('max-h-[88vh]', 'overflow-y-auto');
+      } else {
+        box.classList.add('max-h-[90vh]', 'overflow-y-auto');
+      }
+    };
+    applyResponsiveScroll();
+    const _mq = window.matchMedia('(min-width: 1024px)');
+    if (_mq.addEventListener) _mq.addEventListener('change', applyResponsiveScroll);
+    else if (_mq.addListener) _mq.addListener(applyResponsiveScroll);
   }
 
   // Bei neuem Angebot: Standardvorlagen automatisch einfügen (nur wenn Felder leer)
@@ -5667,15 +5699,15 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
   document.getElementById('addQiBtn')?.classList.add('hidden');
 
   document.getElementById('qiFormWrap').innerHTML = `
-    <div data-qi-form data-fid="${fid}" class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3">
+    <div data-qi-form data-fid="${fid}" class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-3 sm:p-4 space-y-3">
       <p class="text-sm font-semibold text-brand-700">${itemId ? 'Position bearbeiten' : 'Neue Position'}</p>
 
-      <div class="grid grid-cols-3 gap-2">
-        <div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div class="sm:col-span-1">
           <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
-          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
-        <div class="col-span-2">
+        <div class="sm:col-span-2">
           <label class="block text-xs font-medium text-ink-700 mb-1">Artikel (suchen oder leer = freie Position)</label>
           ${renderCombobox({ id: fid + '_article', name: '', items: articleItems, current: currentArticleId, placeholder: 'Artikel suchen…', onChange: 'onQiArticleChange' })}
         </div>
@@ -5683,39 +5715,39 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
 
       <div>
         <label class="block text-xs font-medium text-ink-700 mb-1">Beschreibung</label>
-        <textarea id="${fid}_description" rows="2" placeholder="Position-Beschreibung (mehrzeilig erlaubt)" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+        <textarea id="${fid}_description" rows="2" placeholder="Position-Beschreibung (mehrzeilig erlaubt)" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
       </div>
 
-      <div class="grid grid-cols-2 gap-2">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Lieferant</label>
-          <select id="${fid}_supplier" onchange="onQiSupplierChange('${fid}')" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <select id="${fid}_supplier" onchange="onQiSupplierChange('${fid}')" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
             <option value="">— kein Lieferant —</option>
             ${(currentArticleId && window._qiArticleSupplierCache[currentArticleId] || []).map(s => `<option value="${s.supplierId}" data-ek="${s.ek}" ${(f.supplier_id||[])[0]===s.supplierId?'selected':''}>${s.isDefault ? '★ ' : ''}${escapeHtml(s.supplierName)}${s.supplierNo ? ' (' + escapeHtml(s.supplierNo) + ')' : ''}</option>`).join('')}
           </select>
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
-          <input id="${fid}_purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
-      <div class="grid grid-cols-4 gap-2">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
-          <input id="${fid}_unit" value="${escapeHtml(f.unit || 'Stück')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit" value="${escapeHtml(f.unit || 'Stück')}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EP €</label>
-          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
-          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
