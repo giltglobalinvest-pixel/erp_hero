@@ -456,7 +456,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.53';
+const APP_VERSION = 'v2.54';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1094,6 +1094,9 @@ function closeModal() {
   // Quill-Editor-Referenzen freigeben
   if (window._tplQuill) window._tplQuill = null;
   if (window._quoteQuills) window._quoteQuills = null;
+  // Live-Layout-Preview-State freigeben
+  if (window._liveLayoutPreview) window._liveLayoutPreview = null;
+  if (typeof _liveLayoutState !== 'undefined') _liveLayoutState = null;
   // Quote-Tracking-Global zurücksetzen
   window._currentQuoteIdInModal = null;
   if (_currentLock) {
@@ -5339,7 +5342,8 @@ async function buildQuoteVariableContext() {
       valid_until:    (fd.get('valid_until') || '').trim(),
       payment_terms:  (fd.get('payment_terms') || '').trim(),
       delivery_terms: (fd.get('delivery_terms') || '').trim(),
-      layout_variant: (fd.get('layout_variant') || 'standard').trim()
+      layout_variant: (fd.get('layout_variant') || 'standard').trim(),
+      force_closing_new_page: fd.get('force_closing_new_page') === 'on'
     },
     customer, contact, company,
     user: APP_KEYS.user || {},
@@ -5513,6 +5517,194 @@ function onLayoutVariantChange(variant) {
   if (typeof updateQuotePreview === 'function') updateQuotePreview();
 }
 
+/* === Live-Layout-Anpassung per KI (Admin-only, im Quote-Modal-Toolbar) ===
+   - öffnet zweites Modal
+   - zeigt aktuelle Config (vom aktuell aktiven Layout — Standard/Klassisch/Custom)
+   - User beschreibt eine Änderung → AI generiert NEUE Config (incrementell)
+   - User kann iterieren — jedes Mal wird die Vorschau live aktualisiert
+   - Speichern-Optionen: in bestehendes Custom-Layout schreiben ODER neues anlegen */
+let _liveLayoutState = null;
+
+function _activeLayoutConfig() {
+  const hidden = document.querySelector('#modalBox input[name="layout_variant"]');
+  const lv = hidden?.value || 'standard';
+  if (lv.startsWith('layout:')) {
+    const id = lv.slice('layout:'.length);
+    const layout = (window._quoteLayouts || []).find(l => l.id === id);
+    if (layout) {
+      try { return { source: 'custom', id, name: layout.fields.name || '', config: { ...LAYOUT_DEFAULT_CONFIG, ...JSON.parse(layout.fields.config_json || '{}') } }; } catch(e) {}
+    }
+  }
+  // Standard / Klassisch — beide nutzen das Default-Schema als Ausgangspunkt
+  if (lv === 'klassisch') {
+    return { source: 'preset', id: null, name: 'Klassisch (abgeleitet)', config: {
+      ...LAYOUT_DEFAULT_CONFIG, fontBase:'14px', fontSmall:'12px', fontTable:'13px', fontTitle:'34px', titleWeight:'700', metaLabelBold:true, bezeichnungBold:true,
+    }};
+  }
+  return { source: 'preset', id: null, name: 'Standard (abgeleitet)', config: { ...LAYOUT_DEFAULT_CONFIG } };
+}
+
+function openLayoutLiveAdjust() {
+  if (!APP_KEYS.user?.is_admin) { toast('Nur für Admins', 'error'); return; }
+  if (!APP_KEYS.anthropicKey) { toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error'); return; }
+  const initial = _activeLayoutConfig();
+  _liveLayoutState = { ...initial }; // arbeitet mit dieser Working Copy
+  openModal2(`
+    <div class="p-4 sm:p-6 flex flex-col" style="max-height:88vh;">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="wand-2" class="w-5 h-5 text-amber-600"></i>
+        <h3 class="text-lg font-bold text-ink-900">Layout per KI anpassen</h3>
+      </div>
+      <p class="text-xs text-ink-500 mb-3">Aktuelles Layout: <strong>${escapeHtml(initial.name)}</strong>. Beschreibe schrittweise die gewünschte Änderung — die Vorschau aktualisiert sich live.</p>
+
+      <div class="flex gap-2 mb-3">
+        <input id="liveLayoutInput" type="text" placeholder="z.B. „Titel größer und dunkelblau", „Tabellenkopf fett mit hellgrauem Hintergrund"" onkeydown="if(event.key==='Enter'){event.preventDefault();applyLayoutLiveAdjust();}" class="flex-1 px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500/30">
+        <button type="button" id="liveLayoutBtn" onclick="applyLayoutLiveAdjust()" class="px-3 py-2 text-sm rounded-lg bg-amber-500 text-white hover:bg-amber-600 flex items-center gap-1.5"><i data-lucide="sparkles" class="w-4 h-4"></i> <span id="liveLayoutBtnLbl">Anpassen</span></button>
+      </div>
+
+      <div class="bg-ink-50 rounded-lg p-2 mb-3 max-h-60 overflow-y-auto">
+        <div id="liveLayoutHistory" class="space-y-1 text-xs"></div>
+      </div>
+
+      <details class="mb-3">
+        <summary class="text-xs text-ink-500 cursor-pointer">Aktuelle Config (JSON)</summary>
+        <textarea id="liveLayoutJson" rows="8" class="w-full mt-1 px-3 py-2 border border-ink-200 rounded-lg font-mono text-[11px]">${escapeHtml(JSON.stringify(initial.config, null, 2))}</textarea>
+      </details>
+
+      <div class="flex gap-2 justify-end mt-2 pt-3 border-t border-ink-200 flex-wrap">
+        <button type="button" onclick="closeModal2()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Schließen ohne Speichern</button>
+        ${initial.source === 'custom'
+          ? `<button type="button" onclick="saveLiveLayoutInPlace()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">In „${escapeHtml(initial.name)}" speichern</button>`
+          : ''}
+        <button type="button" onclick="saveLiveLayoutAsNew()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Als neues Layout speichern</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => {
+    if (window.lucide) lucide.createIcons();
+    document.getElementById('liveLayoutInput')?.focus();
+  }, 50);
+}
+
+async function applyLayoutLiveAdjust() {
+  if (!_liveLayoutState) return;
+  const inp = document.getElementById('liveLayoutInput');
+  const desc = (inp?.value || '').trim();
+  if (!desc) return;
+  const btn = document.getElementById('liveLayoutBtn');
+  const lbl = document.getElementById('liveLayoutBtnLbl');
+  if (btn) btn.disabled = true;
+  if (lbl) lbl.textContent = '…';
+
+  const currentJson = JSON.stringify(_liveLayoutState.config, null, 2);
+  const prompt = `Du bist Designer für Geschäftsdokumente. Hier ist die AKTUELLE Layout-Konfiguration:
+
+${currentJson}
+
+Wende folgende Änderung darauf an: "${desc}"
+
+Antworte NUR mit dem aktualisierten JSON-Objekt — gleiche Keys wie im aktuellen, alle erforderlich. Werte sind:
+- fontBase, fontSmall, fontTable, fontTitle: CSS-Größen mit "px"
+- titleWeight, tableHeaderWeight: 100-900 als String
+- titleColor, bodyColor, accentColor, tableHeaderColor: Hex-Farben "#xxxxxx"
+- titleAlign: "left" | "center" | "right"
+- colsGap, sectionGap: CSS-Werte z.B. "1.5rem"
+- metaLabelBold, bezeichnungBold, totalBold: true/false
+- tableHeaderBg: Hex oder "transparent"
+
+Nur die Keys, kein Text drumherum, keine Code-Blöcke.`;
+
+  try {
+    const result = await askAI(prompt, { maxTokens: 1200 });
+    let cleaned = result.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    _liveLayoutState.config = { ...LAYOUT_DEFAULT_CONFIG, ..._liveLayoutState.config, ...parsed };
+    // Live in Vorschau anwenden — temporäres Custom-Layout
+    window._liveLayoutPreview = _liveLayoutState.config;
+    if (typeof updateQuotePreview === 'function') updateQuotePreview();
+    // History anzeigen
+    const hist = document.getElementById('liveLayoutHistory');
+    if (hist) {
+      const item = document.createElement('div');
+      item.className = 'p-1.5 bg-white rounded border border-ink-200';
+      item.innerHTML = `<div class="text-amber-700 font-medium text-[11px]">› ${escapeHtml(desc)}</div>`;
+      hist.appendChild(item);
+    }
+    // JSON-Textarea aktualisieren
+    const ta = document.getElementById('liveLayoutJson');
+    if (ta) ta.value = JSON.stringify(_liveLayoutState.config, null, 2);
+    if (inp) inp.value = '';
+    inp?.focus();
+  } catch (err) {
+    toast('Anpassung fehlgeschlagen: ' + err.message, 'error', 4000);
+  } finally {
+    if (btn) btn.disabled = false;
+    if (lbl) lbl.textContent = 'Anpassen';
+  }
+}
+
+async function saveLiveLayoutInPlace() {
+  if (!_liveLayoutState || _liveLayoutState.source !== 'custom') return;
+  // Optional manuelle JSON-Edits aus Textarea übernehmen
+  try {
+    const ta = document.getElementById('liveLayoutJson');
+    if (ta) _liveLayoutState.config = JSON.parse(ta.value || '{}');
+  } catch (e) { return toast('JSON ungültig: ' + e.message, 'error'); }
+  try {
+    await updateData('Layout', _liveLayoutState.id, { config_json: JSON.stringify(_liveLayoutState.config) });
+    // Cache aktualisieren
+    const layout = (window._quoteLayouts || []).find(l => l.id === _liveLayoutState.id);
+    if (layout) layout.fields.config_json = JSON.stringify(_liveLayoutState.config);
+    window._liveLayoutPreview = null;
+    closeModal2();
+    if (typeof updateQuotePreview === 'function') updateQuotePreview();
+    toast('Layout gespeichert', 'success');
+  } catch (err) { toast('Speichern fehlgeschlagen: ' + err.message, 'error'); }
+}
+
+async function saveLiveLayoutAsNew() {
+  if (!_liveLayoutState) return;
+  const name = prompt('Name für das neue Layout:', _liveLayoutState.name + ' (Custom)');
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return toast('Name fehlt', 'error');
+  try {
+    const ta = document.getElementById('liveLayoutJson');
+    if (ta) _liveLayoutState.config = JSON.parse(ta.value || '{}');
+  } catch (e) { return toast('JSON ungültig: ' + e.message, 'error'); }
+  const cur = getCurrentCompany();
+  if (!cur) return;
+  try {
+    await ensureLayoutTable();
+    const created = await writeData('Layout', {
+      name: trimmed,
+      company_id: cur.id,
+      status: 'aktiv',
+      is_default: false,
+      description: 'Live-AI-Anpassung im Angebot',
+      config_json: JSON.stringify(_liveLayoutState.config),
+    });
+    // Cache aktualisieren
+    if (!window._quoteLayouts) window._quoteLayouts = [];
+    window._quoteLayouts.push({ id: created.id, fields: { name: trimmed, company_id: cur.id, status: 'aktiv', config_json: JSON.stringify(_liveLayoutState.config) } });
+    // Quote auf neues Layout setzen
+    const hidden = document.querySelector('#modalBox input[name="layout_variant"]');
+    if (hidden) hidden.value = 'layout:' + created.id;
+    const topSel = document.getElementById('quoteLayoutTopSelect');
+    if (topSel) {
+      const opt = document.createElement('option');
+      opt.value = 'layout:' + created.id;
+      opt.textContent = 'Layout: ' + trimmed;
+      opt.selected = true;
+      topSel.appendChild(opt);
+    }
+    window._liveLayoutPreview = null;
+    closeModal2();
+    if (typeof updateQuotePreview === 'function') updateQuotePreview();
+    toast('Layout „' + trimmed + '" angelegt + im Angebot aktiviert', 'success', 3000);
+  } catch (err) { toast('Speichern fehlgeschlagen: ' + err.message, 'error'); }
+}
+
 /* Wird vom Bundle-Picker aufgerufen — übernimmt das Paket in die Quote-Form */
 async function onQuoteBundlePick(bundleId) {
   if (!bundleId) return;
@@ -5675,10 +5867,11 @@ async function openQuoteModal(id) {
   // Quote-Felder bei Bedarf ergänzen (idempotent). title_template_id als Text-Feld
   // (statt linked record) — einfacher und reicht für unsere Zwecke.
   ensureFields('Quote', [
-    { name: 'quote_title',       type: 'singleLineText' },
-    { name: 'title_template_id', type: 'singleLineText' },
-    { name: 'layout_variant',    type: 'singleLineText' },
-    { name: 'bundle_id',         type: 'singleLineText' },
+    { name: 'quote_title',             type: 'singleLineText' },
+    { name: 'title_template_id',       type: 'singleLineText' },
+    { name: 'layout_variant',          type: 'singleLineText' },
+    { name: 'bundle_id',               type: 'singleLineText' },
+    { name: 'force_closing_new_page',  type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
   ]).catch(()=>{});
   // Brand-Color für die blaue Linie unten — pro Mandant in Company hinterlegt
   ensureFields('Company', [
@@ -5889,6 +6082,10 @@ async function openQuoteModal(id) {
             <button type="button" onclick="expandTextField('notes','Schlusstext')" class="p-1 text-ink-400 hover:text-brand-500 hover:bg-brand-50 rounded" title="Im Vollbild bearbeiten">
               <i data-lucide="maximize-2" class="w-3.5 h-3.5"></i>
             </button>
+            <label class="ml-2 flex items-center gap-1.5 text-xs text-ink-700 cursor-pointer select-none" title="Erzwingt einen Seitenumbruch vor dem Schlusstext">
+              <input type="checkbox" name="force_closing_new_page" ${f.force_closing_new_page ? 'checked' : ''} onchange="updateQuotePreview()" class="w-3.5 h-3.5 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+              <span>auf neuer Seite</span>
+            </label>
           </div>
           ${quoteTemplatePicker('notes', 'Schlusstext', (f.closing_template_id || [])[0] || (id ? '' : (defaultClosingTpl?.id || '')))}
         </div>
@@ -5954,6 +6151,11 @@ async function openQuoteModal(id) {
               <i data-lucide="maximize" class="w-3.5 h-3.5"></i>
             </button>
           </div>
+          ${APP_KEYS.user?.is_admin ? `
+            <button type="button" onclick="openLayoutLiveAdjust()" title="Layout per KI anpassen (Admin)" class="text-xs px-2 py-1 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 flex items-center gap-1">
+              <i data-lucide="wand-2" class="w-3.5 h-3.5"></i> Layout-AI
+            </button>
+          ` : ''}
           <button type="button" onclick="exportQuoteAsPdf()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF</button>
           <button type="button" onclick="emailQuote()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i> E-Mail</button>
         </div>
@@ -6131,10 +6333,13 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const closing = substituteVariables(closingRaw || '', 'Angebot', ctx);
   articleMap = articleMap || {};
   const footer = buildQuoteFooterData(c);
-  // Layout-Variante kann "standard", "klassisch" oder "layout:<id>" (Custom-Layout) sein
+  // Layout-Variante kann "standard", "klassisch" oder "layout:<id>" (Custom-Layout) sein.
+  // Live-Layout-Anpassung im Toolbar überschreibt temporär (window._liveLayoutPreview).
   const lv = q.layout_variant || 'standard';
   let customLayoutCfg = null;
-  if (lv.startsWith('layout:')) {
+  if (window._liveLayoutPreview) {
+    customLayoutCfg = { ...LAYOUT_DEFAULT_CONFIG, ...window._liveLayoutPreview };
+  } else if (lv.startsWith('layout:')) {
     const layoutId = lv.slice('layout:'.length);
     const layout = (window._quoteLayouts || []).find(l => l.id === layoutId);
     if (layout) {
@@ -6321,11 +6526,16 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
         ` : ''}
       </div>
 
-      <!-- CLOSING -->
-      ${closing ? `<div class="${sz.table} mt-4 leading-relaxed">${renderTemplateContent(closing)}</div>` : ''}
+      <!-- CLOSING (nur wenn nicht auf eigene Seite gezwungen) -->
+      ${closing && !q.force_closing_new_page ? `<div class="${sz.table} mt-4 leading-relaxed">${renderTemplateContent(closing)}</div>` : ''}
 
     </div>
   `;
+
+  // Extra-Block für erzwungenes Schlusstext-Auf-Seite-2 (von paginate aufgegriffen)
+  const closingExtraHtml = (closing && q.force_closing_new_page)
+    ? `<div data-quote-closing-extra class="${sz.table} ${bodyExtraClass}" style="font-family:Inter,system-ui,sans-serif;color:${customLayoutCfg ? customLayoutCfg.bodyColor : '#0F172A'};">${customStyleBlock}<div class="${bodyExtraClass} leading-relaxed" style="font-size:${customLayoutCfg ? customLayoutCfg.fontTable : ''};">${renderTemplateContent(closing)}</div></div>`
+    : '';
 
   // Wir liefern Header / Body / Footer als data-Attribute zurück, damit der Pager
   // beim Multi-Page-Aufbau jeden Block einzeln nutzen kann.
@@ -6334,6 +6544,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
       <div data-quote-header>${header}</div>
       <div data-quote-header-page1 style="display:none;">${leftLogosBlock}</div>
       ${body}
+      ${closingExtraHtml ? `<div data-closing-extra-wrap style="display:none;">${closingExtraHtml}</div>` : ''}
       <div data-quote-footer-html style="display:none;">${renderQuoteFooterHtml(footer)}</div>
     </div>
   `;
@@ -6349,11 +6560,13 @@ function paginatePreview() {
   const headerEl = docEl.querySelector('[data-quote-header]');
   const headerPage1El = docEl.querySelector('[data-quote-header-page1]');
   const bodyEl   = docEl.querySelector('[data-quote-body]');
+  const closingExtraWrap = docEl.querySelector('[data-closing-extra-wrap]');
   const footerWrap = docEl.querySelector('[data-quote-footer-html]');
   if (!headerEl || !bodyEl || !footerWrap) return;
   const headerHtml      = headerEl.innerHTML;
   const headerPage1Html = headerPage1El ? headerPage1El.innerHTML.trim() : '';
   const bodyHtml        = bodyEl.outerHTML;
+  const closingExtra    = closingExtraWrap ? closingExtraWrap.innerHTML.trim() : '';
   const footerHtml      = footerWrap.innerHTML;
 
   // A4 @ 96dpi
@@ -6374,10 +6587,12 @@ function paginatePreview() {
   const bodyHpx = bodyEl2 ? bodyEl2.scrollHeight : measure.scrollHeight;
   document.body.removeChild(measure);
 
-  const numPages = Math.max(1, Math.ceil(bodyHpx / usableH));
+  const numBodyPages = Math.max(1, Math.ceil(bodyHpx / usableH));
+  const hasClosingPage = !!closingExtra;
+  const numPages = numBodyPages + (hasClosingPage ? 1 : 0);
 
   let html = '<div data-pages-wrap>';
-  for (let i = 0; i < numPages; i++) {
+  for (let i = 0; i < numBodyPages; i++) {
     const offset = -i * usableH;
     const isPage1 = i === 0;
     const contentTop = PAD_T + HEADER_H + LOGOS_H + GAP;
@@ -6413,6 +6628,38 @@ function paginatePreview() {
         </div>
         <!-- Seitenzahl rechts oben -->
         ${numPages > 1 ? `<div style="position:absolute;top:14px;right:${PAD_LR + 4}px;font-size:9px;color:#94A3B8;">Seite ${i+1} von ${numPages}</div>` : ''}
+      </div>
+    `;
+  }
+  // Extra-Seite für erzwungenen Schlusstext (force_closing_new_page)
+  if (hasClosingPage) {
+    const i = numBodyPages;
+    html += `
+      <div class="quote-sheet" style="
+        position:relative;
+        width:${A4_W}px;
+        height:${A4_H}px;
+        background:#FFFFFF;
+        box-shadow:0 6px 24px rgba(0,0,0,0.12);
+        margin:0 auto 18px auto;
+        overflow:hidden;
+        font-family:Inter,system-ui,sans-serif;
+        color:#0F172A;
+      ">
+        <!-- Header (gleich wie auf den anderen Seiten — ohne Logos) -->
+        <div style="position:absolute;top:${PAD_T}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${HEADER_H}px;">
+          ${headerHtml}
+        </div>
+        <!-- Schlusstext-Inhalt -->
+        <div style="position:absolute;top:${PAD_T + HEADER_H + GAP}px;left:${PAD_LR}px;right:${PAD_LR}px;bottom:${PAD_B + 100}px;overflow:hidden;">
+          ${closingExtra}
+        </div>
+        <!-- Footer -->
+        <div style="position:absolute;bottom:${PAD_B}px;left:${PAD_LR}px;right:${PAD_LR}px;">
+          ${footerHtml}
+        </div>
+        <!-- Seitenzahl -->
+        <div style="position:absolute;top:14px;right:${PAD_LR + 4}px;font-size:9px;color:#94A3B8;">Seite ${i+1} von ${numPages}</div>
       </div>
     `;
   }
@@ -7677,6 +7924,7 @@ async function saveQuote(e, id, keepOpen) {
   ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
+  fields.force_closing_new_page = fd.get('force_closing_new_page') === 'on';
   // Template-IDs (für persistente Auswahl beim Wieder-Öffnen)
   const introTpl   = (fd.get('intro_template_id') || '').trim();
   const closingTpl = (fd.get('closing_template_id') || '').trim();
