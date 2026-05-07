@@ -84,6 +84,23 @@
   @supports (height: 100dvh) {
     html, body { height: 100dvh; }
   }
+  /* Quill-Editor: Custom Schriftgrößen-Picker (5-12pt) — Labels in der Dropdown anzeigen */
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="5pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="5pt"]::before { content: "5pt"; font-size: 10px; }
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="6pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="6pt"]::before { content: "6pt"; font-size: 11px; }
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="7pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="7pt"]::before { content: "7pt"; font-size: 11px; }
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="8pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="8pt"]::before { content: "8pt"; font-size: 12px; }
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="9pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="9pt"]::before { content: "9pt"; font-size: 13px; }
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="10pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="10pt"]::before { content: "10pt"; font-size: 13px; }
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="11pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="11pt"]::before { content: "11pt"; font-size: 14px; }
+  .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="12pt"]::before,
+  .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="12pt"]::before { content: "12pt"; font-size: 15px; }
   /* iOS Auto-Zoom bei Input-Fokus verhindern: Inputs/Selects/Textarea brauchen ≥ 16px */
   @media (max-width: 1023px) {
     input:not([type="checkbox"]):not([type="radio"]),
@@ -422,7 +439,7 @@
 <!-- MODAL                                                       -->
 <!-- ========================================================== -->
 <div id="modalBackdrop" class="hidden fixed inset-0 z-[70] bg-ink-900/50 grid place-items-center p-4 pt-safe pb-safe pl-safe pr-safe" onclick="if(event.target===this)closeModal()">
-  <div id="modalBox" class="w-full max-w-lg bg-white rounded-2xl shadow-card max-h-[88vh] overflow-y-auto"></div>
+  <div id="modalBox" class="w-full max-w-3xl bg-white rounded-2xl shadow-card max-h-[88vh] overflow-y-auto"></div>
 </div>
 <div id="modalBackdrop2" class="hidden fixed inset-0 z-[80] bg-ink-900/50 grid place-items-center p-4 pt-safe pb-safe pl-safe pr-safe" onclick="if(event.target===this)closeModal2()">
   <div id="modalBox2" class="w-full max-w-md bg-white rounded-2xl shadow-card max-h-[88vh] overflow-y-auto"></div>
@@ -435,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.50';
+const APP_VERSION = 'v2.51';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1055,8 +1072,9 @@ function viewModeToggle(currentMode, handlerName) {
    ============================================================ */
 function openModal(html, opts) {
   const box = document.getElementById('modalBox');
-  // Reset Klassen, optional weite Variante zulassen
-  const maxW = (opts && opts.maxWidth) || 'max-w-lg';
+  // Reset Klassen, optional weite Variante zulassen.
+  // Default max-w-3xl (768px) — Mobile bleibt durch w-full nahe der Viewport-Breite.
+  const maxW = (opts && opts.maxWidth) || 'max-w-3xl';
   box.className = 'w-full ' + maxW + ' bg-white rounded-2xl shadow-card max-h-[88vh] overflow-y-auto';
   box.innerHTML = html;
   document.getElementById('modalBackdrop').classList.remove('hidden');
@@ -1915,19 +1933,11 @@ async function initTemplateRichEditor(initialContent) {
   }
   const editorEl = document.getElementById('tpl_content_editor');
   if (!editorEl || !window.Quill) return;
+  registerQuillCustomSizes();
   const quill = new window.Quill(editorEl, {
     theme: 'snow',
     placeholder: 'Sehr {{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage …',
-    modules: {
-      toolbar: [
-        [{ header: [1, 2, 3, false] }],
-        [{ size: ['small', false, 'large', 'huge'] }],
-        ['bold', 'italic', 'underline'],
-        [{ list: 'ordered' }, { list: 'bullet' }],
-        [{ align: [] }],
-        ['link', 'clean']
-      ]
-    }
+    modules: { toolbar: quillStandardToolbar() }
   });
   // Initial-Content laden — HTML-erkennen, sonst als plain text
   if (initialContent) {
@@ -3420,13 +3430,13 @@ async function openArticleModal(id) {
   const articleSuppliers = id ? allArtSuppliers.filter(j => (j.fields.article_id || []).includes(id)) : [];
 
   openModal(`
-    <form onsubmit="saveArticle(event, '${id || ''}', false)" class="p-6">
+    <form onsubmit="saveArticle(event, '${id || ''}', false)" class="p-4 sm:p-6 lg:max-h-[88vh] lg:overflow-y-auto">
       <div class="flex items-baseline justify-between mb-4">
         <h3 class="text-lg font-bold text-ink-900">${id ? 'Artikel bearbeiten' : 'Neuer Artikel'}</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
 
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <div class="col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Name (Zeile 1) <span class="text-red-500">*</span></label>
           <input name="name1" required value="${escapeHtml(f.name1 || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
@@ -3446,9 +3456,10 @@ async function openArticleModal(id) {
             <option value="archiviert" ${f.status==='archiviert'?'selected':''}>archiviert</option>
           </select>
         </div>
-        <div class="col-span-2">
+        <div class="lg:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Beschreibung</label>
-          <textarea name="description" rows="2" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+          <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
+          <div id="article_description_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
         </div>
       </div>
 
@@ -3522,7 +3533,11 @@ async function openArticleModal(id) {
         <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
       </div>
     </form>
-  `);
+  `, { maxWidth: 'max-w-5xl' });
+  // Quill-Editor für Beschreibung
+  setTimeout(() => {
+    initSimpleQuillEditor('article_description_editor', 'description', f.description || '', 'Artikelbeschreibung — kann mit Größen 5-12pt formatiert werden.');
+  }, 80);
 }
 
 async function saveArticle(e, id, keepOpen) {
@@ -5037,6 +5052,83 @@ async function buildQuoteVariableContext() {
   };
 }
 
+/* Lazy-Load Quill-Lib einmalig. Verspricht erst, wenn window.Quill verfügbar ist. */
+async function ensureQuillLoaded() {
+  if (window.Quill) return;
+  await new Promise((resolve) => {
+    if (!document.getElementById('quillCss')) {
+      const css = document.createElement('link');
+      css.id = 'quillCss';
+      css.rel = 'stylesheet';
+      css.href = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css';
+      document.head.appendChild(css);
+    }
+    if (document.querySelector('script[data-quill]')) {
+      // schon im Laden
+      const wait = () => window.Quill ? resolve() : setTimeout(wait, 50);
+      wait();
+      return;
+    }
+    const script = document.createElement('script');
+    script.dataset.quill = '1';
+    script.src = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js';
+    script.onload = resolve;
+    script.onerror = resolve;
+    document.head.appendChild(script);
+  });
+}
+
+/* Generischer Quill-Editor-Initializer:
+   - bindet an Container-ID
+   - synct HTML in versteckten Input (name=hiddenInputName) bei jeder Änderung
+   - akzeptiert plain text oder HTML als initialContent */
+async function initSimpleQuillEditor(containerId, hiddenInputName, initialContent, placeholder) {
+  await ensureQuillLoaded();
+  const container = document.getElementById(containerId);
+  if (!container || !window.Quill) return null;
+  registerQuillCustomSizes();
+  const q = new window.Quill(container, {
+    theme: 'snow',
+    placeholder: placeholder || '',
+    modules: { toolbar: quillStandardToolbar() }
+  });
+  if (initialContent) {
+    if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initialContent)) {
+      q.root.innerHTML = initialContent;
+    } else {
+      q.setText(initialContent);
+    }
+  }
+  const hidden = document.querySelector(`#modalBox input[name="${hiddenInputName}"], #modalBox2 input[name="${hiddenInputName}"]`);
+  const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
+  q.on('text-change', sync);
+  sync();
+  return q;
+}
+
+/* Custom Schriftgrößen 5-12pt für alle Quill-Editoren. Muss EINMAL nach Quill-Load registriert werden. */
+function registerQuillCustomSizes() {
+  if (!window.Quill || window._quillSizesRegistered) return;
+  try {
+    const SizeStyle = window.Quill.import('attributors/style/size');
+    SizeStyle.whitelist = ['5pt','6pt','7pt','8pt','9pt','10pt','11pt','12pt'];
+    window.Quill.register(SizeStyle, true);
+    window._quillSizesRegistered = true;
+  } catch (e) { console.warn('Quill size registration failed:', e); }
+}
+
+/* Standard-Toolbar-Konfig für alle Quill-Editoren (Templates, Quote-Felder, Vollbild). */
+function quillStandardToolbar() {
+  return [
+    [{ header: [1, 2, 3, false] }],
+    [{ size: ['5pt','6pt','7pt','8pt','9pt','10pt','11pt','12pt'] }],
+    ['bold', 'italic', 'underline'],
+    [{ list: 'ordered' }, { list: 'bullet' }],
+    [{ align: [] }],
+    ['link', 'clean']
+  ];
+}
+
 /* Quill-Editoren für Einleitung + Schlusstext im Quote-Modal.
    Lazy-Load Quill bei Bedarf, Init beider Editoren auf den im Modal vorhandenen Containern.
    Hidden-Inputs (name="description"/"notes") werden bei jeder Änderung syncronisiert. */
@@ -5059,15 +5151,9 @@ async function initQuoteEditors() {
     }).catch(()=>{});
   }
   if (!window.Quill) return;
+  registerQuillCustomSizes();
   window._quoteQuills = {};
-  const toolbar = [
-    [{ header: [1, 2, 3, false] }],
-    [{ size: ['small', false, 'large', 'huge'] }],
-    ['bold', 'italic', 'underline'],
-    [{ list: 'ordered' }, { list: 'bullet' }],
-    [{ align: [] }],
-    ['link', 'clean']
-  ];
+  const toolbar = quillStandardToolbar();
   const setupOne = (containerId, fieldName, placeholder) => {
     const el = document.getElementById(containerId);
     if (!el) return null;
@@ -5217,16 +5303,10 @@ function expandTextField(fieldName, label) {
       });
     }
     if (!window.Quill) return;
+    registerQuillCustomSizes();
     const q = new window.Quill(document.getElementById('expandedQuillEditor'), {
       theme: 'snow',
-      modules: { toolbar: [
-        [{ header: [1, 2, 3, false] }],
-        [{ size: ['small', false, 'large', 'huge'] }],
-        ['bold', 'italic', 'underline'],
-        [{ list: 'ordered' }, { list: 'bullet' }],
-        [{ align: [] }],
-        ['link', 'clean']
-      ]}
+      modules: { toolbar: quillStandardToolbar() }
     });
     if (initialHtml) {
       if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initialHtml)) {
@@ -5575,7 +5655,7 @@ async function openQuoteModal(id) {
   // nicht an die unteren Felder + Speichern-Button.
   const box = document.getElementById('modalBox');
   if (box) {
-    box.classList.remove('max-w-lg', 'max-w-5xl');
+    box.classList.remove('max-w-lg', 'max-w-3xl', 'max-w-5xl');
     box.classList.add('max-w-7xl');
     const applyResponsiveScroll = () => {
       const isLg = window.matchMedia('(min-width: 1024px)').matches;
@@ -5765,15 +5845,14 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   })();
 
   // Header (oben JEDE Seite) — Tagline LINKS, FLP-Logo RECHTS.
-  // Sub-Logo + 2. Logo werden im Body-Start eingebettet (s.u.) — so erscheinen sie
-  // nur auf Seite 1 (durch das Pagination-Slicing) und nicht ab Seite 2.
   const tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
   const secondaryLogoUrl = (c?.secondary_logo || [])[0]?.url || '';
   const secondaryLogoHtml = secondaryLogoUrl
     ? `<img src="${escapeHtml(secondaryLogoUrl)}" crossorigin="anonymous" style="height:64px;width:auto;display:block;" alt="2. Logo">`
     : '';
+  // Sub-Logo + 2. Logo (linksbündig) — werden im Pager nur auf Seite 1 gerendert.
   const leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
-    ? `<div class="mb-3 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
+    ? `<div class="mt-1 mb-2 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
     : '';
   const header = `
     <div class="flex items-start justify-between mb-1">
@@ -5785,11 +5864,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   `;
 
   // Hauptinhalt — Layout-Varianten "standard" und "klassisch" via sz.* Tokens gesteuert.
-  // Sub-Logo + 2. Logo am Body-Anfang → sie erscheinen nur auf Seite 1 (Pagination cropping).
   const body = `
     <div data-quote-body class="${sz.base} text-ink-900" style="font-family:Inter,system-ui,sans-serif;">
-
-      ${leftLogosBlock}
 
       <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
       <div class="${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5">Angebot</div>
@@ -5847,19 +5923,27 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
               const grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
               const discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
-              const descLines = (f.description || '').split('\n').map(l => l.trim()).filter(Boolean);
-              const descMain = descLines[0] || '';
-              const descSub  = descLines.slice(1).join(' · ');
+              const rawDesc = f.description || '';
+              const isHtmlDesc = /<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(rawDesc);
               const aId = (f.article_id || [])[0];
               const aNo = aId ? (articleMap[aId] || '') : '';
+              let descCell;
+              if (isHtmlDesc) {
+                descCell = `<div class="${sz.fwBezeichnung}">${rawDesc}</div>`;
+              } else {
+                const descLines = rawDesc.split('\n').map(l => l.trim()).filter(Boolean);
+                const descMain = descLines[0] || '';
+                const descSub  = descLines.slice(1).join(' · ');
+                descCell = `<div class="${sz.fwBezeichnung}">${escapeHtml(descMain)}</div>` +
+                           (descSub ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic text-ink-600 leading-snug mt-0.5">${escapeHtml(descSub)}</div>` : '');
+              }
               return `<tr class="border-b border-ink-100 align-top">
                 <td class="px-1 py-1.5">${escapeHtml(String(f.pos || ''))}</td>
                 <td class="px-1 py-1.5">${escapeHtml(String(f.qty || ''))}</td>
                 <td class="px-1 py-1.5">${escapeHtml(f.unit || '')}</td>
                 <td class="px-1 py-1.5">${escapeHtml(aNo)}</td>
                 <td class="px-1 py-1.5">
-                  <div class="${sz.fwBezeichnung}">${escapeHtml(descMain)}</div>
-                  ${descSub ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic text-ink-600 leading-snug mt-0.5">${escapeHtml(descSub)}</div>` : ''}
+                  ${descCell}
                   ${discAbs > 0 ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} text-amber-700 mt-0.5">Rabatt: −${formatPrice(discAbs)} €</div>` : ''}
                 </td>
                 <td class="px-1 py-1.5 text-right tabular-nums">${formatPrice(f.unit_price_net || 0)} €</td>
@@ -5903,6 +5987,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   return `
     <div data-quote-doc data-quote-no="${escapeHtml(q.quote_no || '')}">
       <div data-quote-header>${header}</div>
+      <div data-quote-header-page1 style="display:none;">${leftLogosBlock}</div>
       ${body}
       <div data-quote-footer-html style="display:none;">${renderQuoteFooterHtml(footer)}</div>
     </div>
@@ -5917,18 +6002,23 @@ function paginatePreview() {
   const docEl = target.querySelector('[data-quote-doc]');
   if (!docEl) return;
   const headerEl = docEl.querySelector('[data-quote-header]');
+  const headerPage1El = docEl.querySelector('[data-quote-header-page1]');
   const bodyEl   = docEl.querySelector('[data-quote-body]');
   const footerWrap = docEl.querySelector('[data-quote-footer-html]');
   if (!headerEl || !bodyEl || !footerWrap) return;
-  const headerHtml = headerEl.innerHTML;
-  const bodyHtml   = bodyEl.outerHTML;
-  const footerHtml = footerWrap.innerHTML;
+  const headerHtml      = headerEl.innerHTML;
+  const headerPage1Html = headerPage1El ? headerPage1El.innerHTML.trim() : '';
+  const bodyHtml        = bodyEl.outerHTML;
+  const footerHtml      = footerWrap.innerHTML;
 
   // A4 @ 96dpi
   const A4_W = 794, A4_H = 1123;
   const PAD_T = 32, PAD_LR = 50, PAD_B = 24;
   const HEADER_H = 60, FOOTER_H = 92, GAP = 14;
-  const usableH = A4_H - PAD_T - HEADER_H - GAP - FOOTER_H - PAD_B;
+  // Logos-Höhe nur reservieren wenn welche existieren (sonst 0)
+  const LOGOS_H = headerPage1Html ? 76 : 0;
+  // usableH ist konstant — auf jeder Seite gleich. Logos-Bereich auf Seite 2+ bleibt einfach leer.
+  const usableH = A4_H - PAD_T - HEADER_H - LOGOS_H - GAP - FOOTER_H - PAD_B;
 
   // Body bei Referenz-Breite messen (gleicher CSS-Kontext wie im Sheet)
   const measure = document.createElement('div');
@@ -5944,6 +6034,8 @@ function paginatePreview() {
   let html = '<div data-pages-wrap>';
   for (let i = 0; i < numPages; i++) {
     const offset = -i * usableH;
+    const isPage1 = i === 0;
+    const contentTop = PAD_T + HEADER_H + LOGOS_H + GAP;
     html += `
       <div class="quote-sheet" style="
         position:relative;
@@ -5960,8 +6052,14 @@ function paginatePreview() {
         <div style="position:absolute;top:${PAD_T}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${HEADER_H}px;">
           ${headerHtml}
         </div>
+        ${isPage1 && headerPage1Html ? `
+          <!-- Logos (nur Seite 1) -->
+          <div style="position:absolute;top:${PAD_T + HEADER_H}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${LOGOS_H}px;">
+            ${headerPage1Html}
+          </div>
+        ` : ''}
         <!-- Content-Slice -->
-        <div style="position:absolute;top:${PAD_T + HEADER_H + GAP}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${usableH}px;overflow:hidden;">
+        <div style="position:absolute;top:${contentTop}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${usableH}px;overflow:hidden;">
           <div style="transform:translateY(${offset}px);">${bodyHtml}</div>
         </div>
         <!-- Footer (jede Seite) -->
@@ -7012,7 +7110,8 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
 
       <div>
         <label class="block text-xs font-medium text-ink-700 mb-1">Beschreibung</label>
-        <textarea id="${fid}_description" rows="2" placeholder="Position-Beschreibung (mehrzeilig erlaubt)" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+        <input type="hidden" id="${fid}_description" name="${fid}_description_hidden" value="${escapeHtml(f.description || '')}">
+        <div id="${fid}_description_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:120px;"></div>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-2">
@@ -7066,7 +7165,32 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
     </div>
   `;
   if (window.lucide) lucide.createIcons();
-  setTimeout(() => document.getElementById(fid + '_description')?.focus(), 50);
+  // Quill-Editor für die Position-Beschreibung initialisieren
+  setTimeout(async () => {
+    await ensureQuillLoaded();
+    const editorEl = document.getElementById(fid + '_description_editor');
+    const hidden   = document.getElementById(fid + '_description');
+    if (editorEl && window.Quill) {
+      registerQuillCustomSizes();
+      const q = new window.Quill(editorEl, {
+        theme: 'snow',
+        placeholder: 'Position-Beschreibung — mit Größe 5-12pt und Format formatierbar',
+        modules: { toolbar: quillStandardToolbar() }
+      });
+      const initial = hidden?.value || '';
+      if (initial) {
+        if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initial)) {
+          q.root.innerHTML = initial;
+        } else {
+          q.setText(initial);
+        }
+      }
+      const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
+      q.on('text-change', sync);
+      sync();
+      q.focus();
+    }
+  }, 80);
 }
 
 // Wird vom Article-Combobox aufgerufen (value, comboboxId)
