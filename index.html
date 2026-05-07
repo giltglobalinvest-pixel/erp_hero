@@ -456,7 +456,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.57';
+const APP_VERSION = 'v2.58';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2075,15 +2075,16 @@ async function ensureQuoteBundleTable() {
   ]).catch(()=>{});
   // Felder ergänzen (idempotent)
   await ensureFields('QuoteBundle', [
-    { name: 'company_id',          type: 'singleLineText' },
-    { name: 'status',              type: 'singleLineText' },
-    { name: 'is_default',          type: 'checkbox', options: { color: 'greenBright', icon: 'check' } },
-    { name: 'title_template_id',   type: 'singleLineText' },
-    { name: 'intro_template_id',   type: 'singleLineText' },
-    { name: 'closing_template_id', type: 'singleLineText' },
-    { name: 'attachment_ids',      type: 'multilineText' },
-    { name: 'layout_variant',      type: 'singleLineText' },
-    { name: 'variable_values',     type: 'multilineText' },
+    { name: 'company_id',             type: 'singleLineText' },
+    { name: 'status',                 type: 'singleLineText' },
+    { name: 'is_default',             type: 'checkbox', options: { color: 'greenBright', icon: 'check' } },
+    { name: 'title_template_id',      type: 'singleLineText' },
+    { name: 'intro_template_id',      type: 'singleLineText' },
+    { name: 'closing_template_id',    type: 'singleLineText' },
+    { name: 'attachment_ids',         type: 'multilineText' },
+    { name: 'layout_variant',         type: 'singleLineText' },
+    { name: 'variable_values',        type: 'multilineText' },
+    { name: 'force_closing_new_page', type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
   ]);
 }
 
@@ -2194,6 +2195,10 @@ async function openQuoteBundleEdit(id) {
             <option value="klassisch" ${f.layout_variant === 'klassisch' ? 'selected' : ''}>Klassisch (näher an alter FLP-Vorlage)</option>
           </select>
         </div>
+        <div class="flex items-center gap-2">
+          <input id="bdl_force_closing" name="force_closing_new_page" type="checkbox" ${f.force_closing_new_page ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+          <label for="bdl_force_closing" class="text-sm text-ink-700">Schlusstext immer auf neuer Seite (erzwingt Seitenumbruch)</label>
+        </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Anhänge (vorausgewählt im Angebot)</label>
           ${attachments.length === 0
@@ -2271,6 +2276,7 @@ async function saveQuoteBundle(e, id) {
     layout_variant: (fd.get('layout_variant') || 'standard').trim(),
     attachment_ids: JSON.stringify(fd.getAll('bundle_attachment')),
     variable_values: Object.keys(varValues).length ? JSON.stringify(varValues) : '',
+    force_closing_new_page: fd.get('force_closing_new_page') === 'on',
   };
   if (!fields.name) return toast('Name fehlt', 'error');
   try {
@@ -5775,6 +5781,9 @@ async function applyQuoteBundle(bundleId, opts = {}) {
     const layoutTop = document.getElementById('quoteLayoutTopSelect');
     if (layoutTop) layoutTop.value = f.layout_variant;
   }
+  // Schlusstext-auf-neuer-Seite-Checkbox aus Bundle übernehmen
+  const forceCb = document.querySelector('#modalBox input[name="force_closing_new_page"]');
+  if (forceCb) forceCb.checked = !!f.force_closing_new_page;
   // Anhänge: Checkboxen umsetzen
   try {
     const ids = JSON.parse(f.attachment_ids || '[]');
