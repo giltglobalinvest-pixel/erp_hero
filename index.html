@@ -456,7 +456,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.55';
+const APP_VERSION = 'v2.56';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1097,9 +1097,9 @@ function closeModal() {
   // Live-Layout-Preview-State freigeben
   if (window._liveLayoutPreview) window._liveLayoutPreview = null;
   if (typeof _liveLayoutState !== 'undefined') _liveLayoutState = null;
-  // Custom-Layout-Stylesheet im Head leeren
+  // Alten globalen Style-Tag entfernen, falls noch von älteren Versionen vorhanden
   const cls = document.getElementById('quote-custom-layout-styles');
-  if (cls) cls.textContent = '';
+  if (cls) cls.remove();
   // Quote-Tracking-Global zurücksetzen
   window._currentQuoteIdInModal = null;
   if (_currentLock) {
@@ -6351,33 +6351,27 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   }
   const variant = customLayoutCfg ? 'standard' : (lv === 'klassisch' ? 'klassisch' : 'standard');
   const isK = variant === 'klassisch';
-  // Wenn Custom-Layout: Body-Wrapper-Klasse + globaler <style>-Tag im Head als Override.
-  // (Globaler Tag, weil paginatePreview nur das data-quote-body Element clonet — ein lokaler
-  // <style>-Block würde dabei verloren gehen.)
+  // Wenn Custom-Layout: Body-Wrapper-Klasse + Style-Block INNERHALB des Bodys
+  // (NICHT im <head> — html2canvas captured den Body in einer iframe-Umgebung,
+  // dort sind dynamisch im Document-Head injizierte Styles nicht sichtbar.
+  // Style INSIDE body wird bei outerHTML mitgenommen.)
   let bodyExtraClass = '';
-  let styleEl = document.getElementById('quote-custom-layout-styles');
+  let inlineStyleHtml = '';
   if (customLayoutCfg) {
     bodyExtraClass = ' quote-body-custom';
     const cfg = customLayoutCfg;
-    if (!styleEl) {
-      styleEl = document.createElement('style');
-      styleEl.id = 'quote-custom-layout-styles';
-      document.head.appendChild(styleEl);
-    }
-    styleEl.textContent = `
+    inlineStyleHtml = `<style>
       .quote-body-custom { font-size: ${cfg.fontBase} !important; color: ${cfg.bodyColor} !important; }
-      .quote-body-custom > div:first-child { font-size: ${cfg.fontTitle} !important; font-weight: ${cfg.titleWeight} !important; color: ${cfg.titleColor} !important; text-align: ${cfg.titleAlign} !important; }
+      .quote-body-custom .quote-doc-title { font-size: ${cfg.fontTitle} !important; font-weight: ${cfg.titleWeight} !important; color: ${cfg.titleColor} !important; text-align: ${cfg.titleAlign} !important; }
       .quote-body-custom table { font-size: ${cfg.fontTable} !important; }
       .quote-body-custom table thead tr { background: ${cfg.tableHeaderBg} !important; color: ${cfg.tableHeaderColor} !important; font-weight: ${cfg.tableHeaderWeight} !important; }
-      .quote-body-custom table thead th { color: ${cfg.tableHeaderColor} !important; font-weight: ${cfg.tableHeaderWeight} !important; }
+      .quote-body-custom table thead th { color: ${cfg.tableHeaderColor} !important; font-weight: ${cfg.tableHeaderWeight} !important; background: ${cfg.tableHeaderBg} !important; }
       .quote-body-custom .quote-total-row { font-weight: ${cfg.totalBold ? '700' : '400'} !important; }
+      .quote-body-custom .quote-total-row td { font-weight: ${cfg.totalBold ? '700' : '400'} !important; }
       .quote-body-custom .quote-bezeichnung { font-weight: ${cfg.bezeichnungBold ? '600' : '400'} !important; }
       .quote-body-custom .quote-meta-label { font-weight: ${cfg.metaLabelBold ? '600' : '400'} !important; }
-    `;
+    </style>`;
     if (cfg.accentColor) footer.brandColor = cfg.accentColor;
-  } else if (styleEl) {
-    // Style entfernen, wenn Standard/Klassisch wieder aktiv
-    styleEl.textContent = '';
   }
   // Schrift noch eine Stufe größer (User-Feedback "alle eine Nummer größer")
   const sz = {
@@ -6426,12 +6420,13 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   `;
 
   // Hauptinhalt — Layout-Varianten "standard" und "klassisch" via sz.* Tokens gesteuert.
-  // Custom-Layouts: globaler <style>-Tag im Head (siehe oben) wirkt via .quote-body-custom Klasse.
+  // Custom-Layouts via inlineStyleHtml im Body — html2canvas-kompatibel.
   const body = `
     <div data-quote-body class="${sz.base} text-ink-900${bodyExtraClass}" style="font-family:Inter,system-ui,sans-serif;">
+      ${inlineStyleHtml}
 
       <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
-      <div class="${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5">Angebot</div>
+      <div class="quote-doc-title ${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5">Angebot</div>
 
       <!-- ADRESSZEILE + EMPFÄNGER + META (im Klassisch-Variant enger gesetzt) -->
       <div class="grid grid-cols-2 ${sz.colsGap} ${sz.sectionGap}">
