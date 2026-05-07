@@ -345,6 +345,10 @@
               <i data-lucide="file-text" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Textvorlagen</span>
             </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-bundles">
+              <i data-lucide="package" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Vorlagenpakete</span>
+            </button>
           </div>
         </div>
       </nav>
@@ -431,7 +435,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.43';
+const APP_VERSION = 'v2.44';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1175,6 +1179,7 @@ function dispatchRoute(route) {
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
     case 'admin-templates': renderAdminTextemplates(); break;
+    case 'admin-bundles':   renderAdminQuoteBundles(); break;
     default:                renderWelcome();
   }
 }
@@ -1909,6 +1914,214 @@ async function deleteTemplate(id) {
   try {
     await deleteData('Textemplate', id);
     renderAdminTextemplates();
+    toast('Gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   ADMIN: VORLAGENPAKETE (QuoteBundle)
+   Bundles bündeln Titel/Einleitung/Schlusstext + Anhänge + Layout für ein Angebot,
+   damit der User per Klick alles auswählt statt jedes Feld einzeln.
+   ============================================================ */
+async function ensureQuoteBundleTable() {
+  // Tabelle anlegen falls nötig (idempotent)
+  await ensureTable('QuoteBundle', [
+    { name: 'name', type: 'singleLineText' },
+  ]).catch(()=>{});
+  // Felder ergänzen (idempotent)
+  await ensureFields('QuoteBundle', [
+    { name: 'company_id',          type: 'singleLineText' },
+    { name: 'status',              type: 'singleLineText' },
+    { name: 'is_default',          type: 'checkbox', options: { color: 'greenBright', icon: 'check' } },
+    { name: 'title_template_id',   type: 'singleLineText' },
+    { name: 'intro_template_id',   type: 'singleLineText' },
+    { name: 'closing_template_id', type: 'singleLineText' },
+    { name: 'attachment_ids',      type: 'multilineText' },
+    { name: 'layout_variant',      type: 'singleLineText' },
+  ]);
+}
+
+async function renderAdminQuoteBundles() {
+  setPageTitle('Vorlagenpakete');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Bitte erst Mandant wählen.</p>';
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Vorlagenpakete…</p>';
+  await ensureQuoteBundleTable();
+  let all = [];
+  try { all = await readData('QuoteBundle'); } catch (e) {}
+  const bundles = all.filter(b => (b.fields.company_id === cur.id) && (b.fields.status || 'aktiv') !== 'archiviert')
+    .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+
+  const rows = bundles.length === 0
+    ? '<p class="text-ink-500 italic text-sm p-4 text-center">Noch keine Pakete angelegt.</p>'
+    : bundles.map(b => {
+        const f = b.fields;
+        return `
+          <div class="flex items-center justify-between gap-3 px-4 py-3 hover:bg-ink-50 border-b border-ink-100">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-ink-900">${escapeHtml(f.name || '–')}</span>
+                ${f.is_default ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Standard</span>' : ''}
+                <span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded">${escapeHtml(f.layout_variant || 'standard')}</span>
+              </div>
+              <div class="text-xs text-ink-500 mt-1">
+                ${f.title_template_id ? '✓ Titel ' : ''}${f.intro_template_id ? '✓ Einleitung ' : ''}${f.closing_template_id ? '✓ Schluss ' : ''}
+                ${(() => { try { const a = JSON.parse(f.attachment_ids || '[]'); return a.length ? `· ${a.length} Anhang${a.length===1?'':'-Auswahl'}` : ''; } catch(e) { return ''; } })()}
+              </div>
+            </div>
+            <div class="flex gap-1 shrink-0">
+              <button onclick="openQuoteBundleEdit('${b.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+              <button onclick="toggleQuoteBundleDefault('${b.id}', ${!f.is_default})" class="p-1.5 text-ink-500 hover:text-amber-600 hover:bg-ink-100 rounded" title="${f.is_default ? 'Standard entfernen' : 'Als Standard'}"><i data-lucide="star" class="w-3.5 h-3.5"${f.is_default?' style="fill:currentColor;color:#f59e0b"':''}></i></button>
+              <button onclick="deleteQuoteBundle('${b.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-5xl mx-auto">
+      <div class="flex items-center justify-between mb-4">
+        <p class="text-sm text-ink-600">Vorlagenpakete bündeln Titel, Einleitung, Schluss + Anhänge + Layout für Angebote — wähle bei einem neuen Angebot ein Paket aus, statt alles einzeln.</p>
+        <button onclick="openQuoteBundleEdit()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2 shrink-0 ml-3"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>
+      </div>
+      <div class="bg-white rounded-2xl shadow-card overflow-hidden">${rows}</div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function openQuoteBundleEdit(id) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  let f = {};
+  if (id) {
+    const all = await readData('QuoteBundle').catch(()=>[]);
+    f = all.find(r => r.id === id)?.fields || {};
+  }
+  // Vorhandene Templates + Anhänge laden
+  const [allTpl, allAtt] = await Promise.all([readData('Textemplate'), readData('Attachment')]);
+  const templates = allTpl.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.doc_type === 'Angebot') && (t.fields.status || 'aktiv') === 'aktiv');
+  const titleTpls   = templates.filter(t => (t.fields.section || '') === 'Titel');
+  const introTpls   = templates.filter(t => (t.fields.section || '') === 'Einleitung');
+  const closingTpls = templates.filter(t => (t.fields.section || '') === 'Schlusstext');
+  const attachments = allAtt.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.name||'').localeCompare(b.fields.name||'','de'));
+  const selectedAtt = (() => { try { return JSON.parse(f.attachment_ids || '[]'); } catch(e) { return []; } })();
+
+  const tplOptions = (list, current) => `
+    <option value="">— keine —</option>
+    ${list.map(t => `<option value="${t.id}" ${t.id===current?'selected':''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '–')}</option>`).join('')}
+  `;
+
+  openModal(`
+    <form onsubmit="saveQuoteBundle(event, '${id || ''}')" class="p-6">
+      <h3 class="text-lg font-bold text-ink-900 mb-4">${id ? 'Vorlagenpaket bearbeiten' : 'Vorlagenpaket anlegen'}</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Name <span class="text-red-500">*</span></label>
+          <input name="name" required value="${escapeHtml(f.name || '')}" placeholder="z.B. „Reparaturangebot Standard"" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="bdl_default" name="is_default" type="checkbox" ${f.is_default ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+          <label for="bdl_default" class="text-sm text-ink-700">Als Standard markieren (wird bei neuen Angeboten automatisch gewählt)</label>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Titel-Vorlage</label>
+          <select name="title_template_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${tplOptions(titleTpls, f.title_template_id || '')}</select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Einleitungs-Vorlage</label>
+          <select name="intro_template_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${tplOptions(introTpls, f.intro_template_id || '')}</select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Schlusstext-Vorlage</label>
+          <select name="closing_template_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${tplOptions(closingTpls, f.closing_template_id || '')}</select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Layout-Variante</label>
+          <select name="layout_variant" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="standard" ${(f.layout_variant || 'standard') === 'standard' ? 'selected' : ''}>Standard (modern)</option>
+            <option value="klassisch" ${f.layout_variant === 'klassisch' ? 'selected' : ''}>Klassisch (näher an alter FLP-Vorlage)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Anhänge (vorausgewählt im Angebot)</label>
+          ${attachments.length === 0
+            ? '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Noch keine Anhänge angelegt.</p>'
+            : `<div class="border border-ink-200 rounded-lg p-2 space-y-1 max-h-48 overflow-y-auto">
+                ${attachments.map(a => `
+                  <label class="flex items-center gap-2 px-2 py-1 rounded hover:bg-ink-50 cursor-pointer">
+                    <input type="checkbox" name="bundle_attachment" value="${a.id}" ${selectedAtt.includes(a.id) ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500">
+                    <span class="text-sm text-ink-900">${escapeHtml(a.fields.name || '–')}</span>
+                  </label>
+                `).join('')}
+              </div>`}
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </form>
+  `);
+}
+
+async function saveQuoteBundle(e, id) {
+  e.preventDefault();
+  const cur = getCurrentCompany();
+  if (!cur) return toast('Mandant fehlt', 'error');
+  const fd = new FormData(e.target);
+  const fields = {
+    name: (fd.get('name') || '').trim(),
+    company_id: cur.id,
+    status: 'aktiv',
+    is_default: fd.get('is_default') === 'on',
+    title_template_id:   (fd.get('title_template_id')   || '').trim(),
+    intro_template_id:   (fd.get('intro_template_id')   || '').trim(),
+    closing_template_id: (fd.get('closing_template_id') || '').trim(),
+    layout_variant: (fd.get('layout_variant') || 'standard').trim(),
+    attachment_ids: JSON.stringify(fd.getAll('bundle_attachment')),
+  };
+  if (!fields.name) return toast('Name fehlt', 'error');
+  try {
+    // Wenn als Standard: andere Standards entflaggen
+    if (fields.is_default) {
+      const all = await readData('QuoteBundle').catch(()=>[]);
+      const others = all.filter(b => b.fields.company_id === cur.id && b.fields.is_default && b.id !== id);
+      for (const o of others) {
+        try { await updateData('QuoteBundle', o.id, { is_default: false }); } catch(e) {}
+      }
+    }
+    if (id) await updateData('QuoteBundle', id, fields);
+    else    await writeData('QuoteBundle', fields);
+    closeModal();
+    renderAdminQuoteBundles();
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleQuoteBundleDefault(id, makeDefault) {
+  const cur = getCurrentCompany();
+  try {
+    if (makeDefault) {
+      const all = await readData('QuoteBundle').catch(()=>[]);
+      const others = all.filter(b => b.fields.company_id === cur.id && b.fields.is_default && b.id !== id);
+      for (const o of others) {
+        try { await updateData('QuoteBundle', o.id, { is_default: false }); } catch(e) {}
+      }
+    }
+    await updateData('QuoteBundle', id, { is_default: makeDefault });
+    renderAdminQuoteBundles();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteQuoteBundle(id) {
+  if (!confirm('Vorlagenpaket wirklich löschen?')) return;
+  try {
+    await deleteData('QuoteBundle', id);
+    renderAdminQuoteBundles();
     toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -4693,6 +4906,62 @@ async function buildQuoteVariableContext() {
   };
 }
 
+/* Wird vom Bundle-Picker aufgerufen — übernimmt das Paket in die Quote-Form */
+async function onQuoteBundlePick(bundleId) {
+  if (!bundleId) return;
+  const hasContent = ['quote_title','description','notes'].some(n => {
+    const el = document.querySelector(`#modalBox [name="${n}"]`);
+    return el && el.value && el.value.trim();
+  });
+  if (hasContent) {
+    if (!confirm('Aktuelle Eingaben durch das Paket ersetzen?')) {
+      // Bundle-Auswahl wieder zurücksetzen auf altes
+      const sel = document.querySelector('#modalBox select[name="bundle_id"]');
+      if (sel) sel.value = sel.dataset.prev || '';
+      return;
+    }
+  }
+  await applyQuoteBundle(bundleId);
+  const sel = document.querySelector('#modalBox select[name="bundle_id"]');
+  if (sel) sel.dataset.prev = bundleId;
+}
+
+/* Wendet ein Vorlagenpaket auf die geöffnete Quote-Form an: Titel + Einleitung + Schluss
+   + Anhänge + Layout. */
+async function applyQuoteBundle(bundleId, opts = {}) {
+  const bundle = (window._quoteBundles || []).find(b => b.id === bundleId);
+  if (!bundle) return;
+  const f = bundle.fields || {};
+  const ctx = await buildQuoteVariableContext();
+  // Hilfsfunktion: Template-ID → Inhalt befüllen + Picker-Select setzen
+  const apply = (tplId, fieldName, hiddenName) => {
+    const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
+    const sel = document.querySelector(`#modalBox select[data-tpl-field="${fieldName}"]`);
+    if (sel) sel.value = tplId || '';
+    const hidden = document.querySelector(`#modalBox input[name="${hiddenName}"]`);
+    if (hidden) hidden.value = tplId || '';
+    if (!tpl) return;
+    const target = document.querySelector(`#modalBox [name="${fieldName}"]`);
+    if (target) target.value = substituteVariables(tpl.fields.content || '', 'Angebot', ctx);
+  };
+  if (f.title_template_id)   apply(f.title_template_id,   'quote_title',  'title_template_id');
+  if (f.intro_template_id)   apply(f.intro_template_id,   'description',  'intro_template_id');
+  if (f.closing_template_id) apply(f.closing_template_id, 'notes',        'closing_template_id');
+  // Layout-Variante
+  const layoutSel = document.querySelector('#modalBox select[name="layout_variant"]');
+  if (layoutSel && f.layout_variant) layoutSel.value = f.layout_variant;
+  // Anhänge: Checkboxen umsetzen
+  try {
+    const ids = JSON.parse(f.attachment_ids || '[]');
+    document.querySelectorAll('#modalBox [data-attachment-id]').forEach(cb => {
+      cb.checked = ids.includes(cb.dataset.attachmentId);
+    });
+  } catch (e) {}
+  // Live-Vorschau aktualisieren
+  if (typeof updateQuotePreview === 'function') updateQuotePreview();
+  if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
+}
+
 /* Vollbild-Editor für lange Texte (Einleitung/Schlusstext). Öffnet Modal-2 mit großem Textarea. */
 function expandTextField(fieldName, label) {
   const ta = document.querySelector(`#modalBox [name="${fieldName}"]`);
@@ -4764,6 +5033,7 @@ async function openQuoteModal(id) {
     { name: 'quote_title',       type: 'singleLineText' },
     { name: 'title_template_id', type: 'singleLineText' },
     { name: 'layout_variant',    type: 'singleLineText' },
+    { name: 'bundle_id',         type: 'singleLineText' },
   ]).catch(()=>{});
   // Brand-Color für die blaue Linie unten — pro Mandant in Company hinterlegt
   ensureFields('Company', [
@@ -4802,6 +5072,13 @@ async function openQuoteModal(id) {
   const defaultTitleTpl   = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Titel'       && t.fields.is_default);
   const defaultIntroTpl   = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Einleitung'  && t.fields.is_default);
   const defaultClosingTpl = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Schlusstext' && t.fields.is_default);
+  // Vorlagenpakete (Bundles) laden — pro Mandant
+  let allBundles = [];
+  try { allBundles = await readData('QuoteBundle'); } catch (e) {}
+  window._quoteBundles = allBundles
+    .filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert')
+    .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const defaultBundle = window._quoteBundles.find(b => b.fields.is_default);
 
   if (id) {
     const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
@@ -4854,6 +5131,19 @@ async function openQuoteModal(id) {
         <h3 class="text-lg font-bold text-ink-900">${id ? 'Angebot bearbeiten' : 'Neues Angebot'}</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
+
+      ${(window._quoteBundles || []).length > 0 ? `
+        <div class="mb-4 p-3 bg-brand-50/50 border border-brand-200 rounded-lg">
+          <label class="block text-sm font-medium text-brand-700 mb-1 flex items-center gap-1.5">
+            <i data-lucide="package" class="w-4 h-4"></i> Vorlagenpaket
+          </label>
+          <select name="bundle_id" onchange="onQuoteBundlePick(this.value)" class="w-full px-3 py-2 border border-brand-300 bg-white rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— kein Paket / manuell —</option>
+            ${(window._quoteBundles || []).map(b => `<option value="${b.id}" ${(f.bundle_id || (id ? '' : (defaultBundle?.id || '')))===b.id?'selected':''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
+          </select>
+          <p class="text-xs text-ink-500 mt-1">Bei Auswahl werden Titel + Texte + Anhänge + Layout aus dem Paket übernommen.</p>
+        </div>
+      ` : `<input type="hidden" name="bundle_id" value="${escapeHtml(f.bundle_id || '')}">`}
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <div>
@@ -5043,12 +5333,16 @@ async function openQuoteModal(id) {
     else if (_mq.addListener) _mq.addListener(applyResponsiveScroll);
   }
 
-  // Bei neuem Angebot: Standardvorlagen automatisch einfügen (nur wenn Felder leer)
+  // Bei neuem Angebot: Default-Bundle anwenden (oder Standard-Vorlagen falls kein Bundle existiert)
   if (!id) {
     setTimeout(async () => {
-      await applyDefaultTemplate('quote_title', 'Titel');
-      await applyDefaultTemplate('description', 'Einleitung');
-      await applyDefaultTemplate('notes', 'Schlusstext');
+      if (defaultBundle) {
+        await applyQuoteBundle(defaultBundle.id, { silent: true });
+      } else {
+        await applyDefaultTemplate('quote_title', 'Titel');
+        await applyDefaultTemplate('description', 'Einleitung');
+        await applyDefaultTemplate('notes', 'Schlusstext');
+      }
     }, 80);
   }
 
@@ -6237,7 +6531,7 @@ async function _silentSaveQuoteHeader() {
   if (!form) return null;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
@@ -6552,7 +6846,7 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   // Template-IDs (für persistente Auswahl beim Wieder-Öffnen)
