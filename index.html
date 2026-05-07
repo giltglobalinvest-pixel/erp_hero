@@ -431,7 +431,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.42';
+const APP_VERSION = 'v2.43';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5245,19 +5245,18 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
           </div>
         </div>
         <div class="${isK ? 'text-[11px]' : 'text-[10px]'}">
-          <table class="w-full">
-            <tbody>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">Angebots-Nr.:</td><td class="text-right ${sz.cellPad}">${escapeHtml(q.quote_no || '–')}</td></tr>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">Kunden-Nr.:</td><td class="text-right ${sz.cellPad}">${escapeHtml(cu.customer_no || '–')}</td></tr>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">Datum:</td><td class="text-right ${sz.cellPad}">${escapeHtml(formatDeDate(q.date))}</td></tr>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">Gültigkeit:</td><td class="text-right ${sz.cellPad}">${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : '30 Tage'}</td></tr>
-              <tr><td colspan="2" class="py-1.5"></td></tr>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">Kontakt:</td><td class="${sz.cellPad}"></td></tr>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">Telefon:</td><td class="text-right ${sz.cellPad}">${escapeHtml(footer.tel)}</td></tr>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">Fax:</td><td class="text-right ${sz.cellPad}">${escapeHtml(footer.fax)}</td></tr>
-              <tr><td class="text-ink-700 ${sz.cellPad} ${sz.fwLabel}">E-Mail:</td><td class="text-right ${sz.cellPad}">${escapeHtml(footer.email)}</td></tr>
-            </tbody>
-          </table>
+          <!-- Meta-Block rechtsbündig, kompakt: Label + 16px Gap + Wert -->
+          <div style="margin-left:auto;width:fit-content;max-width:100%;">
+            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Angebots-Nr.:</span><span>${escapeHtml(q.quote_no || '–')}</span></div>
+            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kunden-Nr.:</span><span>${escapeHtml(cu.customer_no || '–')}</span></div>
+            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Datum:</span><span>${escapeHtml(formatDeDate(q.date))}</span></div>
+            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Gültigkeit:</span><span>${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : '30 Tage'}</span></div>
+            <div class="${sz.cellPad}" style="height:8px;"></div>
+            <div class="${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kontakt:</span></div>
+            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Telefon:</span><span>${escapeHtml(footer.tel)}</span></div>
+            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Fax:</span><span>${escapeHtml(footer.fax)}</span></div>
+            <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">E-Mail:</span><span>${escapeHtml(footer.email)}</span></div>
+          </div>
         </div>
       </div>
 
