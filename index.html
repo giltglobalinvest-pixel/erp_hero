@@ -435,7 +435,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.47';
+const APP_VERSION = 'v2.48';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1017,6 +1017,18 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* renderTemplateContent: Wenn Inhalt HTML-Tags enthält (Rich-Text aus Quill),
+   als HTML rendern. Sonst escapen + Zeilenumbrüche zu <br>. Erlaubt Backward-Kompatibilität
+   mit alten Plain-Text-Vorlagen. */
+function renderTemplateContent(s) {
+  const txt = String(s ?? '');
+  if (!txt) return '';
+  if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(txt)) {
+    return txt;
+  }
+  return escapeHtml(txt).replace(/\n/g, '<br>');
+}
+
 /* ============================================================
    VIEW-MODE-TOGGLE (Standard / Kompakt / Tabellarisch)
    ============================================================ */
@@ -1057,6 +1069,8 @@ function closeModal() {
   if (typeof _inquirySpeech !== 'undefined' && _inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
   if (typeof _inquiryImages !== 'undefined') _inquiryImages = [];
   if (typeof _inquiryWizard !== 'undefined') _inquiryWizard = null;
+  // Quill-Editor-Referenz freigeben
+  if (window._tplQuill) window._tplQuill = null;
   // Quote-Tracking-Global zurücksetzen
   window._currentQuoteIdInModal = null;
   if (_currentLock) {
@@ -1860,7 +1874,9 @@ async function openTemplateModal(id) {
       </div>
 
       <label class="block text-sm font-medium text-ink-700 mt-4 mb-1">Inhalt (mit Platzhaltern in <code class="text-xs bg-ink-100 px-1 rounded">{{…}}</code>)</label>
-      <textarea id="tpl_content" name="content" rows="10" placeholder="Sehr {{kontakt.anrede}} {{kontakt.nachname}},&#10;&#10;vielen Dank für Ihre Anfrage…" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.content || '')}</textarea>
+      <input type="hidden" name="content" id="tpl_content_hidden" value="${escapeHtml(f.content || '')}">
+      <div id="tpl_content_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:240px;"></div>
+      <p class="text-[11px] text-ink-500 mt-1">Tipp: Text markieren und über die Toolbar fett, kursiv, oder als Liste formatieren.</p>
 
       <div class="mt-4">
         <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-2">Verfügbare Variablen — Klick fügt am Cursor ein</p>
@@ -1874,6 +1890,59 @@ async function openTemplateModal(id) {
     </form>
   `);
   updateTemplateVariablesPanel();
+  // Rich-Text-Editor (Quill) lazy laden + initialisieren
+  initTemplateRichEditor(f.content || '');
+}
+
+async function initTemplateRichEditor(initialContent) {
+  // Quill via CDN nachladen, falls noch nicht vorhanden
+  if (!window.Quill) {
+    await new Promise((resolve, reject) => {
+      if (!document.getElementById('quillCss')) {
+        const css = document.createElement('link');
+        css.id = 'quillCss';
+        css.rel = 'stylesheet';
+        css.href = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css';
+        document.head.appendChild(css);
+      }
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    }).catch(() => {});
+  }
+  const editorEl = document.getElementById('tpl_content_editor');
+  if (!editorEl || !window.Quill) return;
+  const quill = new window.Quill(editorEl, {
+    theme: 'snow',
+    placeholder: 'Sehr {{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage …',
+    modules: {
+      toolbar: [
+        [{ header: [1, 2, 3, false] }],
+        ['bold', 'italic', 'underline'],
+        [{ list: 'ordered' }, { list: 'bullet' }],
+        [{ align: [] }],
+        ['link', 'clean']
+      ]
+    }
+  });
+  // Initial-Content laden — HTML-erkennen, sonst als plain text
+  if (initialContent) {
+    if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initialContent)) {
+      quill.root.innerHTML = initialContent;
+    } else {
+      quill.setText(initialContent);
+    }
+  }
+  // Bei jeder Änderung Hidden-Input synchronisieren
+  const sync = () => {
+    const hidden = document.getElementById('tpl_content_hidden');
+    if (hidden) hidden.value = quill.root.innerHTML;
+  };
+  quill.on('text-change', sync);
+  sync();
+  window._tplQuill = quill;
 }
 
 async function updateTemplateVariablesPanel() {
@@ -1906,9 +1975,17 @@ async function updateTemplateVariablesPanel() {
 }
 
 function insertTemplateVariable(varName) {
+  const placeholder = '{{' + varName + '}}';
+  // Bevorzugt Quill, Fallback auf altes Textarea
+  if (window._tplQuill) {
+    const q = window._tplQuill;
+    const range = q.getSelection(true) || { index: q.getLength(), length: 0 };
+    q.insertText(range.index, placeholder, 'user');
+    q.setSelection(range.index + placeholder.length, 0);
+    return;
+  }
   const ta = document.getElementById('tpl_content');
   if (!ta) return;
-  const placeholder = '{{' + varName + '}}';
   const start = ta.selectionStart || 0;
   const end   = ta.selectionEnd || 0;
   const before = ta.value.slice(0, start);
@@ -2282,9 +2359,9 @@ async function generateTemplateWithAI() {
   if (!APP_KEYS.anthropicKey) { toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error'); return; }
   const docType = document.getElementById('tpl_doc_type')?.value || 'Angebot';
   const section = document.querySelector('#modalBox select[name="section"]')?.value || 'Einleitung';
-  const ta = document.getElementById('tpl_content');
-  if (!ta) return;
-  if (ta.value.trim() && !confirm('Aktuellen Inhalt durch KI-generierten Text ersetzen?')) return;
+  const quill = window._tplQuill;
+  const currentText = quill ? quill.getText().trim() : (document.getElementById('tpl_content')?.value || '').trim();
+  if (currentText && !confirm('Aktuellen Inhalt durch KI-generierten Text ersetzen?')) return;
 
   const vars = TEMPLATE_VARIABLES[docType] || [];
   const varsList = vars.map(v => `- {{${v.name}}} → ${v.label}`).join('\n');
@@ -2316,7 +2393,15 @@ WICHTIG:
     // Falls die KI doch Code-Block-Markdown drum macht, abstreifen
     let cleaned = result.trim();
     cleaned = cleaned.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/, '').trim();
-    ta.value = cleaned;
+    if (quill) {
+      quill.setText(cleaned);
+      // Hidden-Input syncen
+      const hidden = document.getElementById('tpl_content_hidden');
+      if (hidden) hidden.value = quill.root.innerHTML;
+    } else {
+      const ta = document.getElementById('tpl_content');
+      if (ta) ta.value = cleaned;
+    }
     toast('Vorlage generiert', 'success');
   } catch (err) {
     toast(err.message, 'error');
@@ -4951,6 +5036,14 @@ async function buildQuoteVariableContext() {
   };
 }
 
+/* Layout-Variante (Standard/Klassisch) wird im Toolbar oberhalb der Vorschau gewählt.
+   Hidden-Feld in der Form syncen + Live-Preview neu rendern. */
+function onLayoutVariantChange(variant) {
+  const hidden = document.querySelector('#modalBox input[name="layout_variant"]');
+  if (hidden) hidden.value = variant || 'standard';
+  if (typeof updateQuotePreview === 'function') updateQuotePreview();
+}
+
 /* Wird vom Bundle-Picker aufgerufen — übernimmt das Paket in die Quote-Form */
 async function onQuoteBundlePick(bundleId) {
   if (!bundleId) return;
@@ -4992,9 +5085,13 @@ async function applyQuoteBundle(bundleId, opts = {}) {
   if (f.title_template_id)   apply(f.title_template_id,   'quote_title',  'title_template_id');
   if (f.intro_template_id)   apply(f.intro_template_id,   'description',  'intro_template_id');
   if (f.closing_template_id) apply(f.closing_template_id, 'notes',        'closing_template_id');
-  // Layout-Variante
-  const layoutSel = document.querySelector('#modalBox select[name="layout_variant"]');
-  if (layoutSel && f.layout_variant) layoutSel.value = f.layout_variant;
+  // Layout-Variante: Hidden-Field UND Toolbar-Select syncen
+  if (f.layout_variant) {
+    const layoutHidden = document.querySelector('#modalBox input[name="layout_variant"]');
+    if (layoutHidden) layoutHidden.value = f.layout_variant;
+    const layoutTop = document.getElementById('quoteLayoutTopSelect');
+    if (layoutTop) layoutTop.value = f.layout_variant;
+  }
   // Anhänge: Checkboxen umsetzen
   try {
     const ids = JSON.parse(f.attachment_ids || '[]');
@@ -5243,13 +5340,7 @@ async function openQuoteModal(id) {
             </button>
           </div>
         </div>
-        <div class="sm:col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Layout-Variante</label>
-          <select name="layout_variant" onchange="updateQuotePreview()" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-            <option value="standard" ${(f.layout_variant || 'standard') === 'standard' ? 'selected' : ''}>Standard (modern)</option>
-            <option value="klassisch" ${f.layout_variant === 'klassisch' ? 'selected' : ''}>Klassisch (näher an alter FLP-Vorlage)</option>
-          </select>
-        </div>
+        <input type="hidden" name="layout_variant" value="${escapeHtml(f.layout_variant || 'standard')}">
         <div class="sm:col-span-2">
           <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
             <label class="text-sm font-medium text-ink-700">Kopfzeile / Tagline</label>
@@ -5330,7 +5421,13 @@ async function openQuoteModal(id) {
     </form>
     <div class="lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 border-t border-ink-200 p-3 sm:p-4">
       <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
-        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
+        <div class="flex items-center gap-2 flex-wrap">
+          <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
+          <select id="quoteLayoutTopSelect" onchange="onLayoutVariantChange(this.value)" class="text-xs border border-ink-200 rounded-md px-2 py-1 bg-white">
+            <option value="standard" ${(f.layout_variant || 'standard') === 'standard' ? 'selected' : ''}>Layout: Standard</option>
+            <option value="klassisch" ${f.layout_variant === 'klassisch' ? 'selected' : ''}>Layout: Klassisch</option>
+          </select>
+        </div>
         <div class="flex gap-1.5 items-center flex-wrap">
           <!-- Zoom Controls -->
           <div class="flex items-center gap-0.5 bg-white border border-ink-200 rounded-lg overflow-hidden">
@@ -5522,12 +5619,13 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const footer = buildQuoteFooterData(c);
   const variant = (q.layout_variant === 'klassisch') ? 'klassisch' : 'standard';
   const isK = variant === 'klassisch';
-  // Klassisch nutzt durchweg leicht größere Schrift, mehr Bold und engere Abstände
+  // Schrift insgesamt größer als vorher (User-Feedback "Texte sind zu klein").
+  // Klassisch: noch eine Stufe größer + mehr Bold.
   const sz = {
-    base:  isK ? 'text-[12px]' : 'text-[11px]',
-    small: isK ? 'text-[10px]' : 'text-[9px]',
-    table: isK ? 'text-[11px]' : 'text-[10px]',
-    title: isK ? 'text-[28px]' : 'text-[26px]',
+    base:  isK ? 'text-[13px]' : 'text-[12px]',
+    small: isK ? 'text-[11px]' : 'text-[10px]',
+    table: isK ? 'text-[12px]' : 'text-[11px]',
+    title: isK ? 'text-[32px]' : 'text-[30px]',
     cellPad: isK ? 'py-1' : 'py-0.5',
     colsGap: isK ? 'gap-3' : 'gap-6',
     sectionGap: isK ? 'mb-4' : 'mb-6',
@@ -5573,8 +5671,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const body = `
     <div data-quote-body class="${sz.base} text-ink-900" style="font-family:Inter,system-ui,sans-serif;">
 
-      <!-- Dokumenten-Überschrift bleibt fix 'Angebot' -->
-      <div class="${sz.title} text-ink-700 font-light tracking-tight leading-tight text-right mb-5">Angebot</div>
+      <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
+      <div class="${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5">Angebot</div>
 
       <!-- ADRESSZEILE + EMPFÄNGER + META (im Klassisch-Variant enger gesetzt) -->
       <div class="grid grid-cols-2 ${sz.colsGap} ${sz.sectionGap}">
@@ -5607,7 +5705,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
       </div>
 
       <!-- INTRO / GREETING -->
-      ${intro ? `<div class="whitespace-pre-line ${sz.base} mb-4 leading-relaxed">${escapeHtml(intro)}</div>` : `<p class="${sz.base} text-ink-400 italic mb-4">— Einleitung —</p>`}
+      ${intro ? `<div class="${sz.base} mb-4 leading-relaxed">${renderTemplateContent(intro)}</div>` : `<p class="${sz.base} text-ink-400 italic mb-4">— Einleitung —</p>`}
 
       <!-- POSITIONEN -->
       ${items.length > 0 ? `
@@ -5675,7 +5773,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
       </div>
 
       <!-- CLOSING -->
-      ${closing ? `<div class="whitespace-pre-line ${sz.table} mt-4 leading-relaxed">${escapeHtml(closing)}</div>` : ''}
+      ${closing ? `<div class="${sz.table} mt-4 leading-relaxed">${renderTemplateContent(closing)}</div>` : ''}
 
     </div>
   `;
