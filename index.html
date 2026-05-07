@@ -420,7 +420,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.36';
+const APP_VERSION = 'v2.37';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1321,6 +1321,18 @@ async function openCompanyModal(id) {
         </div>
       </div>
 
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Branding</h4>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Brand-Farbe (Footer-Linie)</label>
+          <div class="flex gap-2 items-center">
+            <input name="brand_color" type="color" value="${escapeHtml(f.brand_color || '#1FA8D6')}" class="h-10 w-12 border border-ink-200 rounded cursor-pointer">
+            <input id="brand_color_text" value="${escapeHtml(f.brand_color || '#1FA8D6')}" placeholder="#1FA8D6" oninput="document.querySelector('input[name=brand_color]').value = this.value;" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          <p class="text-xs text-ink-500 mt-1">Wird unten als Linie auf jeder Angebotsseite angezeigt</p>
+        </div>
+      </div>
+
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Bankverbindung</h4>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div class="sm:col-span-2">
@@ -1353,7 +1365,7 @@ async function saveCompany(e, id) {
   e.preventDefault();
   const fd = new FormData(e.target);
   const fields = {};
-  ['name','status','street','zip','city','country','phone','fax','email','web','managing_director','hrb','ag','tax_no','vat_id','eori','bank_name','iban','bic','blz'].forEach(k => {
+  ['name','status','street','zip','city','country','phone','fax','email','web','managing_director','hrb','ag','tax_no','vat_id','eori','bank_name','iban','bic','blz','brand_color'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   if (!fields.name) return toast('Firma fehlt', 'error');
@@ -1540,7 +1552,7 @@ async function toggleUserStatus(id, currentlyInactive) {
 const _templateListState = { docType: 'alle' };
 
 const TEMPLATE_DOCTYPES = ['Angebot','Auftrag','Rechnung','Lieferschein','Artikel','E-Mail','Allgemein'];
-const TEMPLATE_SECTIONS = ['Einleitung','Schlusstext'];
+const TEMPLATE_SECTIONS = ['Titel','Einleitung','Schlusstext'];
 
 async function renderAdminTextemplates() {
   setPageTitle('Textvorlagen');
@@ -4534,7 +4546,7 @@ function refreshTemplate(fieldName, docType) {
   if (!tplId) { toast('Keine Vorlage ausgewählt', 'warn'); return; }
   const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
   if (!tpl) return;
-  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"]`);
+  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"], #modalBox input[name="${fieldName}"]`);
   if (!ta) return;
   buildQuoteVariableContext().then(ctx => {
     ta.value = substituteVariables(tpl.fields.content || '', docType, ctx);
@@ -4543,7 +4555,7 @@ function refreshTemplate(fieldName, docType) {
 }
 
 async function applyDefaultTemplate(fieldName, section) {
-  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"]`);
+  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"], #modalBox input[name="${fieldName}"]`);
   if (!ta || ta.value.trim()) return; // nur wenn Feld leer ist
   const tpl = (window._quoteTemplates || []).find(t =>
     (t.fields.section || '') === section && t.fields.is_default
@@ -4566,6 +4578,7 @@ async function buildQuoteVariableContext() {
   return {
     quote: {
       quote_no:       (fd.get('quote_no') || '').trim(),
+      quote_title:    (fd.get('quote_title') || '').trim(),
       date:           (fd.get('date') || '').trim(),
       valid_until:    (fd.get('valid_until') || '').trim(),
       payment_terms:  (fd.get('payment_terms') || '').trim(),
@@ -4579,14 +4592,19 @@ async function buildQuoteVariableContext() {
 
 function onTemplatePicked(selectEl, fieldName, docType) {
   const tplId = selectEl.value;
-  // Hidden-Feld für Speicherung mitführen
-  const hiddenName = fieldName === 'description' ? 'intro_template_id' : 'closing_template_id';
-  const hidden = document.querySelector(`#modalBox input[name="${hiddenName}"]`);
-  if (hidden) hidden.value = tplId || '';
+  // Hidden-Feld für Speicherung mitführen (verschiedene Sections nutzen verschiedene Hidden-Felder)
+  const hiddenName = fieldName === 'description' ? 'intro_template_id'
+                   : fieldName === 'notes'       ? 'closing_template_id'
+                   : fieldName === 'quote_title' ? 'title_template_id'
+                   : null;
+  if (hiddenName) {
+    const hidden = document.querySelector(`#modalBox input[name="${hiddenName}"]`);
+    if (hidden) hidden.value = tplId || '';
+  }
   if (!tplId) return; // keine Vorlage
   const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
   if (!tpl) return;
-  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"]`);
+  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"], #modalBox input[name="${fieldName}"]`);
   if (!ta) return;
   if (ta.value.trim() && !confirm('Aktuellen Text durch Vorlage ersetzen?')) {
     // Auswahl behalten, aber Text nicht überschreiben
@@ -4594,6 +4612,8 @@ function onTemplatePicked(selectEl, fieldName, docType) {
   }
   buildQuoteVariableContext().then(ctx => {
     ta.value = substituteVariables(tpl.fields.content || '', docType, ctx);
+    // Live-Vorschau anstoßen, da `change` nicht von select->input dispatched
+    if (typeof updateQuotePreview === 'function') updateQuotePreview();
   });
 }
 
@@ -4604,6 +4624,16 @@ async function openQuoteModal(id) {
   window._currentQuoteIdInModal = id || null;
   // Internen Modus standardmäßig aus
   if (typeof window._quoteInternalMode === 'undefined') window._quoteInternalMode = false;
+  // Quote-Felder bei Bedarf ergänzen (idempotent). title_template_id als Text-Feld
+  // (statt linked record) — einfacher und reicht für unsere Zwecke.
+  ensureFields('Quote', [
+    { name: 'quote_title',       type: 'singleLineText' },
+    { name: 'title_template_id', type: 'singleLineText' },
+  ]).catch(()=>{});
+  // Brand-Color für die blaue Linie unten — pro Mandant in Company hinterlegt
+  ensureFields('Company', [
+    { name: 'brand_color', type: 'singleLineText' },
+  ]).catch(()=>{});
   let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [], allAttachments = [];
   try {
     [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms, allAttachments] = await Promise.all([
@@ -4634,6 +4664,7 @@ async function openQuoteModal(id) {
   ).sort((a,b) => (a.fields.label || a.fields.name || '').localeCompare(b.fields.label || b.fields.name || '', 'de'));
 
   // Default-Templates für Auto-Auswahl bei neuen Dokumenten
+  const defaultTitleTpl   = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Titel'       && t.fields.is_default);
   const defaultIntroTpl   = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Einleitung'  && t.fields.is_default);
   const defaultClosingTpl = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Schlusstext' && t.fields.is_default);
 
@@ -4742,7 +4773,15 @@ async function openQuoteModal(id) {
             </button>
           </div>
         </div>
-        <div class="col-span-2">
+        <div class="sm:col-span-2">
+          <div class="flex items-center justify-between mb-1">
+            <label class="text-sm font-medium text-ink-700">Titel im PDF</label>
+            ${quoteTemplatePicker('quote_title', 'Titel', (f.title_template_id || (id ? '' : (defaultTitleTpl?.id || ''))))}
+          </div>
+          <input type="hidden" name="title_template_id" value="${escapeHtml(f.title_template_id || (id ? '' : (defaultTitleTpl?.id || '')))}">
+          <input name="quote_title" placeholder="z.B. „Angebot" oder „Reparaturangebot"" value="${escapeHtml(f.quote_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="sm:col-span-2">
           <div class="flex items-center justify-between mb-1">
             <label class="text-sm font-medium text-ink-700">Einleitung</label>
             ${quoteTemplatePicker('description', 'Einleitung', (f.intro_template_id || [])[0] || (id ? '' : (defaultIntroTpl?.id || '')))}
@@ -4802,14 +4841,31 @@ async function openQuoteModal(id) {
       </div>
     </form>
     <div class="lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 border-t border-ink-200 p-3 sm:p-4">
-      <div class="flex items-center justify-between mb-3">
+      <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
         <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
-        <div class="flex gap-1.5">
+        <div class="flex gap-1.5 items-center flex-wrap">
+          <!-- Zoom Controls -->
+          <div class="flex items-center gap-0.5 bg-white border border-ink-200 rounded-lg overflow-hidden">
+            <button type="button" onclick="zoomQuotePreview(-0.1)" class="px-2 py-1 hover:bg-ink-50 text-ink-600" title="Zoom raus">
+              <i data-lucide="minus" class="w-3.5 h-3.5"></i>
+            </button>
+            <span id="quoteZoomLabel" class="text-[10px] text-ink-600 w-10 text-center font-mono">100%</span>
+            <button type="button" onclick="zoomQuotePreview(0.1)" class="px-2 py-1 hover:bg-ink-50 text-ink-600" title="Zoom rein">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+            </button>
+            <button type="button" onclick="zoomQuotePreview(0)" class="px-2 py-1 hover:bg-ink-50 text-ink-600 border-l border-ink-200" title="Zoom zurücksetzen">
+              <i data-lucide="maximize" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
           <button type="button" onclick="exportQuoteAsPdf()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF</button>
           <button type="button" onclick="emailQuote()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i> E-Mail</button>
         </div>
       </div>
-      <div id="quotePreview" class="mx-auto" style="width:100%;"></div>
+      <div id="quotePreviewScroll" style="overflow:auto;max-width:100%;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y pinch-zoom;">
+        <div id="quotePreviewZoom" style="transform-origin:top left;transition:transform 0.05s ease-out;width:100%;">
+          <div id="quotePreview" class="mx-auto" style="width:100%;"></div>
+        </div>
+      </div>
     </div>
     </div>
   `, { maxWidth: 'max-w-7xl' });
@@ -4837,14 +4893,18 @@ async function openQuoteModal(id) {
   // Bei neuem Angebot: Standardvorlagen automatisch einfügen (nur wenn Felder leer)
   if (!id) {
     setTimeout(async () => {
+      await applyDefaultTemplate('quote_title', 'Titel');
       await applyDefaultTemplate('description', 'Einleitung');
       await applyDefaultTemplate('notes', 'Schlusstext');
     }, 80);
   }
 
   // Live-Vorschau initial befüllen + Listener für Änderungen
+  _quotePreviewZoom = 1; // Reset bei Modal-Open
   setTimeout(() => {
     updateQuotePreview();
+    attachPinchZoom();
+    applyQuoteZoom();
     const form = document.querySelector('#modalBox form');
     if (form) {
       let dbTimer = null;
@@ -4893,6 +4953,11 @@ function buildQuoteFooterData(c) {
   c = c || {};
   const cityLine = (c.zip && c.city) ? `D - ${c.zip} ${c.city}` : (c.city ? `D - ${c.city}` : FLP_BRAND.cityLine);
   const senderParts = [c.name || FLP_BRAND.companyName, c.street || FLP_BRAND.street, [c.zip, c.city].filter(Boolean).join(' '), 'DE'].filter(Boolean);
+  // Brand-Color: aus Company.brand_color oder Default-Brand-Blau (#1FA8D6).
+  // Akzeptiert "#hex" oder reine "hex" Werte.
+  let brandColor = (c.brand_color || '').trim();
+  if (brandColor && !brandColor.startsWith('#')) brandColor = '#' + brandColor;
+  if (!/^#[0-9A-Fa-f]{3,8}$/.test(brandColor)) brandColor = '#1FA8D6';
   return {
     taglineTop: FLP_BRAND.taglineTop, // bleibt brand-default; kann später eigenes Company-Feld werden
     companyName: c.name || FLP_BRAND.companyName,
@@ -4911,19 +4976,14 @@ function buildQuoteFooterData(c) {
     bic: c.bic || FLP_BRAND.bic,
     blz: c.blz || FLP_BRAND.blz,
     senderAddressLine: senderParts.join(' · '),
+    brandColor,
   };
 }
 
 // Footer-HTML als eigene Funktion — wird im Preview unter dem Inhalt UND auf jeder PDF-Seite gerendert.
 function renderQuoteFooterHtml(footer) {
   return `
-    <div class="grid gap-3 items-start" style="grid-template-columns:28px 1.4fr 1fr auto 1.2fr;">
-      <div class="flex items-start pt-0.5">
-        <svg viewBox="50.2 112.3 41.5 73.5" style="width:22px;height:auto;display:block;" aria-hidden="true">
-          <polygon fill="#575756" points="91.7,112.3 50.2,112.3 50.2,185.8 91.7,185.8 91.7,138.2 91.7,112.3 "/>
-          <path fill="#F6F6F6" d="M69,131.6v-5.1h22.2v5.1H75.5 M75.5,146.4h14.4v5.1H75.5v20.2H69v-25.3"/>
-        </svg>
-      </div>
+    <div class="grid gap-3 items-start" style="grid-template-columns:1.4fr 1fr auto 1.2fr;">
       <div class="text-[7.5px] leading-[1.5]">
         <div class="font-bold text-ink-900 text-[8.5px] mb-0.5">${escapeHtml(footer.companyName)}</div>
         <div class="text-ink-700">${escapeHtml(footer.managingDirector)}</div>
@@ -4954,7 +5014,7 @@ function renderQuoteFooterHtml(footer) {
         </div>
       </div>
     </div>
-    <div class="mt-2 h-1.5 bg-brand-500"></div>
+    <div class="mt-2 h-1.5" style="background:${escapeHtml(footer.brandColor || '#1FA8D6')};"></div>
   `;
 }
 
@@ -4992,8 +5052,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const body = `
     <div data-quote-body class="text-[11px] text-ink-900" style="font-family:Inter,system-ui,sans-serif;">
 
-      <!-- 'Angebot' Titel -->
-      <div class="text-[26px] text-ink-700 font-light tracking-tight leading-none text-right mb-5">Angebot</div>
+      <!-- Dokumenten-Titel (aus Quote.quote_title oder Default 'Angebot') -->
+      <div class="text-[26px] text-ink-700 font-light tracking-tight leading-tight text-right mb-5">${escapeHtml(q.quote_title || 'Angebot')}</div>
 
       <!-- ADRESSZEILE + EMPFÄNGER + META -->
       <div class="grid grid-cols-2 gap-6 mb-6">
@@ -5199,6 +5259,53 @@ window.addEventListener('resize', () => {
   clearTimeout(_quoteScaleTimer);
   _quoteScaleTimer = setTimeout(applyQuoteSheetScale, 80);
 });
+
+/* === Zoom / Pinch-Zoom === */
+let _quotePreviewZoom = 1;
+function applyQuoteZoom() {
+  const wrap = document.getElementById('quotePreviewZoom');
+  if (!wrap) return;
+  wrap.style.transform = `scale(${_quotePreviewZoom})`;
+  // Width gleichzeitig invertiert skalieren, damit der Container nicht horizontal scrollt
+  // wenn Zoom < 1; bei Zoom > 1 erlauben wir Scroll.
+  wrap.style.width = _quotePreviewZoom < 1 ? '100%' : `${100 / _quotePreviewZoom}%`;
+  const lbl = document.getElementById('quoteZoomLabel');
+  if (lbl) lbl.textContent = Math.round(_quotePreviewZoom * 100) + '%';
+}
+function zoomQuotePreview(delta) {
+  if (delta === 0) { _quotePreviewZoom = 1; }
+  else { _quotePreviewZoom = Math.max(0.5, Math.min(3, _quotePreviewZoom + delta)); }
+  applyQuoteZoom();
+}
+
+// Pinch-Zoom auf Touch-Geräten innerhalb des Preview-Bereichs
+function attachPinchZoom() {
+  const scroll = document.getElementById('quotePreviewScroll');
+  if (!scroll || scroll._pinchAttached) return;
+  scroll._pinchAttached = true;
+  let initialDist = 0;
+  let initialZoom = 1;
+  scroll.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      initialDist = Math.hypot(dx, dy);
+      initialZoom = _quotePreviewZoom;
+    }
+  }, { passive: true });
+  scroll.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2 && initialDist > 0) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      const ratio = dist / initialDist;
+      _quotePreviewZoom = Math.max(0.5, Math.min(3, initialZoom * ratio));
+      applyQuoteZoom();
+      e.preventDefault();
+    }
+  }, { passive: false });
+  scroll.addEventListener('touchend', () => { initialDist = 0; });
+}
 
 /* === Echte PDF-Vorschau ===
    Nach dem HTML-Rendering werden alle .quote-sheet Elemente via html2canvas zu echten
@@ -5779,6 +5886,29 @@ async function exportQuoteAsPdf() {
 }
 
 /* E-Mail vorbereiten — öffnet mailto:-Link mit Empfänger + vorgefülltem Subject + Body. PDF muss vorher heruntergeladen sein. */
+// Hilfsfunktion: PDF als Blob erzeugen (nutzt gecachte Canvases aus der Vorschau).
+async function buildQuotePdfBlob() {
+  await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
+  if (!window._quoteCanvases || !window._quoteCanvases.length) {
+    // Vorschau erst aufbauen
+    clearTimeout(_quoteCanvasTimer);
+    await refreshQuoteCanvasPreview();
+  }
+  const canvases = window._quoteCanvases || [];
+  if (!canvases.length) return null;
+  const { PDFDocument } = window.PDFLib;
+  const pdfDoc = await PDFDocument.create();
+  const A4_W = 595.28, A4_H = 841.89;
+  for (const c of canvases) {
+    const imgData = c.toDataURL('image/png');
+    const png = await pdfDoc.embedPng(imgData);
+    const page = pdfDoc.addPage([A4_W, A4_H]);
+    page.drawImage(png, { x: 0, y: 0, width: A4_W, height: A4_H });
+  }
+  const bytes = await pdfDoc.save();
+  return new Blob([bytes], { type: 'application/pdf' });
+}
+
 async function emailQuote() {
   const ctx = await buildQuoteVariableContext();
   const customer = ctx.customer || {};
@@ -5791,8 +5921,44 @@ async function emailQuote() {
   const greeting = (sal.trim() === 'Sehr geehrte Damen und Herren') ? sal : sal + (contact.last_name || '');
   const company = (window._quoteCompanyCache || {}).name || 'FLP';
   const subject = `Angebot ${quoteNo} vom ${datum}`;
-  const body = `${greeting},\n\nanbei senden wir Ihnen unser Angebot ${quoteNo} vom ${datum} als PDF.\n\nFür Rückfragen stehen wir jederzeit zur Verfügung.\n\nMit freundlichen Grüßen\n${company}\n\nP.S. Bitte denken Sie daran, das soeben heruntergeladene PDF dieser E-Mail anzuhängen.`;
-  const url = 'mailto:' + encodeURIComponent(recipient) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+  const body = `${greeting},\n\nanbei senden wir Ihnen unser Angebot ${quoteNo} vom ${datum} als PDF.\n\nFür Rückfragen stehen wir jederzeit zur Verfügung.\n\nMit freundlichen Grüßen\n${company}`;
+
+  toast('PDF wird erstellt …', 'info', 1500);
+
+  let blob = null;
+  try { blob = await buildQuotePdfBlob(); } catch(e) { console.error(e); }
+
+  // Web Share API (mobile + manche Desktop-Browser): PDF als Anhang teilen.
+  // Öffnet die System-Share-Sheet inkl. Mail-App mit Datei dran.
+  if (blob && navigator.canShare && navigator.share) {
+    const fileName = _safeFilename('Angebot_' + (quoteNo || 'Entwurf') + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
+    const file = new File([blob], fileName, { type: 'application/pdf' });
+    try {
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: subject,
+          text: body,
+        });
+        return; // erfolgreich geteilt
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') return; // User hat Share abgebrochen
+      // sonst Fallback unten
+    }
+  }
+
+  // Fallback: PDF herunterladen + mailto öffnen mit Hinweis
+  if (blob) {
+    const fileName = _safeFilename('Angebot_' + (quoteNo || 'Entwurf') + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+  const bodyWithNote = body + '\n\nP.S. Bitte das soeben heruntergeladene PDF dieser E-Mail anhängen.';
+  const url = 'mailto:' + encodeURIComponent(recipient) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(bodyWithNote);
   window.location.href = url;
 }
 
@@ -5887,7 +6053,7 @@ async function _silentSaveQuoteHeader() {
   if (!form) return null;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
@@ -5898,8 +6064,10 @@ async function _silentSaveQuoteHeader() {
   fields.company_id = [cur.id];
   const introTpl   = (fd.get('intro_template_id') || '').trim();
   const closingTpl = (fd.get('closing_template_id') || '').trim();
+  const titleTpl   = (fd.get('title_template_id')  || '').trim();
   if (introTpl)   fields.intro_template_id   = [introTpl];
   if (closingTpl) fields.closing_template_id = [closingTpl];
+  if (titleTpl)   fields.title_template_id   = titleTpl;
   const cv = collectCustomValues();
   if (Object.keys(cv).length) fields.custom_values = JSON.stringify(cv);
   try {
@@ -6200,14 +6368,16 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   // Template-IDs (für persistente Auswahl beim Wieder-Öffnen)
   const introTpl   = (fd.get('intro_template_id') || '').trim();
   const closingTpl = (fd.get('closing_template_id') || '').trim();
+  const titleTpl   = (fd.get('title_template_id')  || '').trim();
   fields.intro_template_id   = introTpl   ? [introTpl]   : [];
   fields.closing_template_id = closingTpl ? [closingTpl] : [];
+  fields.title_template_id   = titleTpl;  // singleLineText, kein Array
   // Individuelle Felder als JSON
   const cv = collectCustomValues();
   fields.custom_values = Object.keys(cv).length ? JSON.stringify(cv) : '';
