@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.25';
+const APP_VERSION = 'v2.26';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -4681,6 +4681,7 @@ async function openQuoteModal(id) {
       <div class="flex justify-end gap-2 flex-wrap">
         <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
         <button type="button" onclick="exportQuoteAsPdf()" class="px-3 py-2 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center gap-1.5"><i data-lucide="file-down" class="w-4 h-4"></i> PDF</button>
+        <button type="button" onclick="emailQuote()" class="px-3 py-2 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center gap-1.5"><i data-lucide="mail" class="w-4 h-4"></i> E-Mail</button>
         <button type="button" onclick="saveQuote(event, '${id || ''}', true)" class="px-3 py-2 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
         <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
       </div>
@@ -5067,61 +5068,17 @@ async function deleteAttachment(id) {
 }
 
 /* ============================================================
-   PDF-EXPORT für Angebote
+   PDF-EXPORT für Angebote (echtes PDF via html2pdf.js)
    ============================================================ */
-async function exportQuoteAsPdf() {
-  const target = document.getElementById('quotePreview');
-  if (!target) {
-    // Wenn keine Preview im DOM (z.B. Mobile): rendern wir on the fly
-    await updateQuotePreview();
-  }
-  const previewHtml = document.getElementById('quotePreview')?.innerHTML || '';
-  if (!previewHtml) { toast('Vorschau nicht verfügbar', 'error'); return; }
-  // SVG-Symbol für Logo mitnehmen
-  const svgSymbolHtml = document.querySelector('svg[width="0"][height="0"]')?.outerHTML || '';
-  // Ausgewählte Anhänge auf einer Anhänge-Liste-Seite ankündigen
-  const attIds = collectSelectedAttachments();
-  let attListHtml = '';
-  if (attIds.length) {
-    try {
-      const all = await readData('Attachment');
-      const sel = all.filter(r => attIds.includes(r.id));
-      if (sel.length) {
-        attListHtml = `
-          <div style="page-break-before: always; padding-top: 1cm;">
-            <h2 style="font-size:18px;font-weight:bold;margin-bottom:12px;">Anhänge zum Angebot</h2>
-            <ul style="list-style:disc;padding-left:18px;font-size:11px;">
-              ${sel.map(s => `<li>${escapeHtml(s.fields.name || '–')}${(s.fields.file || []).length ? ' (' + (s.fields.file || []).length + ' Datei' + ((s.fields.file || []).length===1?'':'en') + ')' : ''}</li>`).join('')}
-            </ul>
-            <p style="font-size:10px;color:#888;margin-top:14px;">Hinweis: Die hier gelisteten Dateien werden als Beiblatt mitgesendet.</p>
-          </div>
-        `;
-      }
-    } catch (e) {}
-  }
-  const win = window.open('', '_blank');
-  if (!win) { toast('Pop-up blockiert — bitte freigeben', 'error'); return; }
-  win.document.write(`
-    <!doctype html>
-    <html lang="de"><head>
-    <meta charset="utf-8">
-    <title>Angebot</title>
-    <script src="https://cdn.tailwindcss.com"><\/script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-      body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; padding: 1.6cm 1.8cm; max-width: 21cm; margin: 0 auto; color:#0F172A; }
-      @media print { body { padding: 0.6cm 0.8cm; } }
-      table { border-collapse: collapse; }
-      .no-print { display: none !important; }
-    </style>
-    </head><body>
-      ${svgSymbolHtml}
-      ${previewHtml}
-      ${attListHtml}
-      <script>setTimeout(function(){ window.print(); }, 700);<\/script>
-    </body></html>
-  `);
-  win.document.close();
+function _loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    if (Array.from(document.scripts).some(s => s.src === src)) return resolve();
+    const sc = document.createElement('script');
+    sc.src = src;
+    sc.onload = () => resolve();
+    sc.onerror = () => reject(new Error('Script konnte nicht geladen werden: ' + src));
+    document.head.appendChild(sc);
+  });
 }
 
 function collectSelectedAttachments() {
@@ -5131,6 +5088,101 @@ function collectSelectedAttachments() {
     if (id) ids.push(id);
   });
   return ids;
+}
+
+function _safeFilename(s) {
+  return String(s || '').replace(/[^a-zA-Z0-9_.\- ]/g, '_').replace(/\s+/g, '_').replace(/_+/g, '_').slice(0, 80);
+}
+
+async function exportQuoteAsPdf() {
+  // Aktuelle Vorschau-Daten neu zusammenstellen (nicht aus DOM klauen, weil DOM-Layout für 50%-Pane ausgelegt ist)
+  const ctx = await buildQuoteVariableContext();
+  const cur = getCurrentCompany();
+  const form = document.querySelector('#modalBox form');
+  const fd = form ? new FormData(form) : null;
+  const intro   = fd ? (fd.get('description') || '') : '';
+  const closing = fd ? (fd.get('notes')       || '') : '';
+  const qid = window._currentQuoteIdInModal;
+  let items = [];
+  if (qid) {
+    try {
+      const all = await readData('QuoteItem');
+      items = all.filter(it => (it.fields.quote_id || []).includes(qid))
+        .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+    } catch (e) {}
+  }
+
+  // Anhang-Liste
+  let attListHtml = '';
+  const attIds = collectSelectedAttachments();
+  if (attIds.length) {
+    try {
+      const all = await readData('Attachment');
+      const sel = all.filter(r => attIds.includes(r.id));
+      if (sel.length) {
+        attListHtml = `
+          <div style="page-break-before: always; padding-top: 1cm;">
+            <h2 style="font-size:18px;font-weight:700;margin:0 0 12px 0;">Anhänge zum Angebot</h2>
+            <ul style="list-style:disc;padding-left:18px;font-size:11pt;line-height:1.6;">
+              ${sel.map(s => {
+                const cnt = (s.fields.file || []).length;
+                return `<li>${escapeHtml(s.fields.name || '–')}${cnt ? ' (' + cnt + ' Datei' + (cnt===1?'':'en') + ')' : ''}</li>`;
+              }).join('')}
+            </ul>
+            <p style="font-size:10pt;color:#888;margin-top:14px;font-style:italic;">Diese Dateien sind dieser E-Mail beigefügt.</p>
+          </div>
+        `;
+      }
+    } catch (e) {}
+  }
+
+  // Off-screen-Container in A4-Maßen
+  const previewHtml = renderQuotePreviewHtml(ctx, items, intro, closing);
+  // SVG-Symbol klonen (für <use> im Briefkopf)
+  const svgSymbol = document.querySelector('svg[aria-hidden="true"]')?.outerHTML || '';
+  const container = document.createElement('div');
+  container.style.cssText = 'position:fixed;left:-99999px;top:0;width:210mm;padding:18mm 20mm;background:white;font-family:Inter,system-ui,sans-serif;color:#0F172A;font-size:11pt;line-height:1.45;';
+  container.innerHTML = svgSymbol + previewHtml + attListHtml;
+  document.body.appendChild(container);
+
+  toast('PDF wird erstellt …', 'info', 1500);
+  try {
+    await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js');
+    const customer = ctx.customer || {};
+    const quoteNo = ctx.quote?.quote_no || 'Entwurf';
+    const filename = _safeFilename('Angebot_' + quoteNo + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
+    await window.html2pdf().set({
+      margin: 0,
+      filename,
+      image: { type: 'jpeg', quality: 0.97 },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#FFFFFF' },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
+      pagebreak: { mode: ['css', 'legacy'] }
+    }).from(container).save();
+    toast('PDF erstellt: ' + filename, 'success');
+  } catch (err) {
+    toast('PDF-Erstellung fehlgeschlagen: ' + (err.message || err), 'error');
+  } finally {
+    if (container.parentNode) container.parentNode.removeChild(container);
+  }
+}
+
+/* E-Mail vorbereiten — öffnet mailto:-Link mit Empfänger + vorgefülltem Subject + Body. PDF muss vorher heruntergeladen sein. */
+async function emailQuote() {
+  const ctx = await buildQuoteVariableContext();
+  const customer = ctx.customer || {};
+  const contact  = ctx.contact  || {};
+  const quote    = ctx.quote    || {};
+  const recipient = contact.email || customer.email || '';
+  const quoteNo = quote.quote_no || '';
+  const datum   = formatDeDate(quote.date) || '';
+  const sal = (() => { const g = contact?.gender; return g === 'männlich' ? 'Sehr geehrter Herr ' : g === 'weiblich' ? 'Sehr geehrte Frau ' : 'Sehr geehrte Damen und Herren'; })();
+  const greeting = (sal.trim() === 'Sehr geehrte Damen und Herren') ? sal : sal + (contact.last_name || '');
+  const company = (window._quoteCompanyCache || {}).name || 'FLP';
+  const subject = `Angebot ${quoteNo} vom ${datum}`;
+  const body = `${greeting},\n\nanbei senden wir Ihnen unser Angebot ${quoteNo} vom ${datum} als PDF.\n\nFür Rückfragen stehen wir jederzeit zur Verfügung.\n\nMit freundlichen Grüßen\n${company}\n\nP.S. Bitte denken Sie daran, das soeben heruntergeladene PDF dieser E-Mail anzuhängen.`;
+  const url = 'mailto:' + encodeURIComponent(recipient) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+  window.location.href = url;
 }
 
 async function toggleTermDefault(id, makeDefault) {
