@@ -435,7 +435,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.48';
+const APP_VERSION = 'v2.49';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1069,8 +1069,9 @@ function closeModal() {
   if (typeof _inquirySpeech !== 'undefined' && _inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
   if (typeof _inquiryImages !== 'undefined') _inquiryImages = [];
   if (typeof _inquiryWizard !== 'undefined') _inquiryWizard = null;
-  // Quill-Editor-Referenz freigeben
+  // Quill-Editor-Referenzen freigeben
   if (window._tplQuill) window._tplQuill = null;
+  if (window._quoteQuills) window._quoteQuills = null;
   // Quote-Tracking-Global zurücksetzen
   window._currentQuoteIdInModal = null;
   if (_currentLock) {
@@ -1920,6 +1921,7 @@ async function initTemplateRichEditor(initialContent) {
     modules: {
       toolbar: [
         [{ header: [1, 2, 3, false] }],
+        [{ size: ['small', false, 'large', 'huge'] }],
         ['bold', 'italic', 'underline'],
         [{ list: 'ordered' }, { list: 'bullet' }],
         [{ align: [] }],
@@ -4991,23 +4993,22 @@ function refreshTemplate(fieldName, docType) {
   if (!tplId) { toast('Keine Vorlage ausgewählt', 'warn'); return; }
   const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
   if (!tpl) return;
-  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"], #modalBox input[name="${fieldName}"]`);
-  if (!ta) return;
   buildQuoteVariableContext().then(ctx => {
-    ta.value = substituteVariables(tpl.fields.content || '', docType, ctx);
+    setQuoteFieldValue(fieldName, substituteVariables(tpl.fields.content || '', docType, ctx));
+    if (typeof updateQuotePreview === 'function') updateQuotePreview();
     toast('Aktualisiert', 'success', 1200);
   });
 }
 
 async function applyDefaultTemplate(fieldName, section) {
-  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"], #modalBox input[name="${fieldName}"]`);
-  if (!ta || ta.value.trim()) return; // nur wenn Feld leer ist
+  const current = (getQuoteFieldValue(fieldName) || '').replace(/<[^>]+>/g, '').trim();
+  if (current) return; // nur wenn Feld leer ist
   const tpl = (window._quoteTemplates || []).find(t =>
     (t.fields.section || '') === section && t.fields.is_default
   );
   if (!tpl) return;
   const ctx = await buildQuoteVariableContext();
-  ta.value = substituteVariables(tpl.fields.content || '', 'Angebot', ctx);
+  setQuoteFieldValue(fieldName, substituteVariables(tpl.fields.content || '', 'Angebot', ctx));
 }
 
 async function buildQuoteVariableContext() {
@@ -5034,6 +5035,93 @@ async function buildQuoteVariableContext() {
     user: APP_KEYS.user || {},
     customFields: collectCustomValues()
   };
+}
+
+/* Quill-Editoren für Einleitung + Schlusstext im Quote-Modal.
+   Lazy-Load Quill bei Bedarf, Init beider Editoren auf den im Modal vorhandenen Containern.
+   Hidden-Inputs (name="description"/"notes") werden bei jeder Änderung syncronisiert. */
+async function initQuoteEditors() {
+  // Quill bei Bedarf nachladen
+  if (!window.Quill) {
+    await new Promise((resolve, reject) => {
+      if (!document.getElementById('quillCss')) {
+        const css = document.createElement('link');
+        css.id = 'quillCss';
+        css.rel = 'stylesheet';
+        css.href = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css';
+        document.head.appendChild(css);
+      }
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    }).catch(()=>{});
+  }
+  if (!window.Quill) return;
+  window._quoteQuills = {};
+  const toolbar = [
+    [{ header: [1, 2, 3, false] }],
+    [{ size: ['small', false, 'large', 'huge'] }],
+    ['bold', 'italic', 'underline'],
+    [{ list: 'ordered' }, { list: 'bullet' }],
+    [{ align: [] }],
+    ['link', 'clean']
+  ];
+  const setupOne = (containerId, fieldName, placeholder) => {
+    const el = document.getElementById(containerId);
+    if (!el) return null;
+    const hidden = document.querySelector(`#modalBox input[name="${fieldName}"]`);
+    const initial = hidden?.value || '';
+    const q = new window.Quill(el, {
+      theme: 'snow',
+      placeholder,
+      modules: { toolbar },
+    });
+    if (initial) {
+      if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initial)) {
+        q.root.innerHTML = initial;
+      } else {
+        q.setText(initial);
+      }
+    }
+    const sync = () => {
+      if (hidden) hidden.value = q.root.innerHTML;
+      // Live-Preview triggern
+      if (typeof updateQuotePreview === 'function') {
+        clearTimeout(window._quoteEditorPreviewTimer);
+        window._quoteEditorPreviewTimer = setTimeout(updateQuotePreview, 250);
+      }
+    };
+    q.on('text-change', sync);
+    sync();
+    return q;
+  };
+  window._quoteQuills.description = setupOne('quote_intro_editor', 'description', 'Sehr geehrte Damen und Herren, …');
+  window._quoteQuills.notes       = setupOne('quote_notes_editor', 'notes',       'z.B. Grußformel, Bankverbindung, Hinweise…');
+}
+
+/* Lese/Schreibe einheitlich aus Quote-Quill ODER Hidden-Input */
+function getQuoteFieldValue(fieldName) {
+  const q = window._quoteQuills?.[fieldName];
+  if (q) return q.root.innerHTML;
+  const el = document.querySelector(`#modalBox [name="${fieldName}"]`);
+  return el ? el.value : '';
+}
+function setQuoteFieldValue(fieldName, value) {
+  const q = window._quoteQuills?.[fieldName];
+  if (q) {
+    if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(value)) {
+      q.root.innerHTML = value || '';
+    } else {
+      q.setText(value || '');
+    }
+    const hidden = document.querySelector(`#modalBox input[name="${fieldName}"]`);
+    if (hidden) hidden.value = q.root.innerHTML;
+    return;
+  }
+  const el = document.querySelector(`#modalBox [name="${fieldName}"]`);
+  if (el) el.value = value || '';
 }
 
 /* Layout-Variante (Standard/Klassisch) wird im Toolbar oberhalb der Vorschau gewählt.
@@ -5079,8 +5167,7 @@ async function applyQuoteBundle(bundleId, opts = {}) {
     const hidden = document.querySelector(`#modalBox input[name="${hiddenName}"]`);
     if (hidden) hidden.value = tplId || '';
     if (!tpl) return;
-    const target = document.querySelector(`#modalBox [name="${fieldName}"]`);
-    if (target) target.value = substituteVariables(tpl.fields.content || '', 'Angebot', ctx);
+    setQuoteFieldValue(fieldName, substituteVariables(tpl.fields.content || '', 'Angebot', ctx));
   };
   if (f.title_template_id)   apply(f.title_template_id,   'quote_title',  'title_template_id');
   if (f.intro_template_id)   apply(f.intro_template_id,   'description',  'intro_template_id');
@@ -5104,14 +5191,15 @@ async function applyQuoteBundle(bundleId, opts = {}) {
   if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
 }
 
-/* Vollbild-Editor für lange Texte (Einleitung/Schlusstext). Öffnet Modal-2 mit großem Textarea. */
+/* Vollbild-Editor für lange Texte (Einleitung/Schlusstext) — Quill mit voller Toolbar. */
 function expandTextField(fieldName, label) {
-  const ta = document.querySelector(`#modalBox [name="${fieldName}"]`);
-  if (!ta) return;
+  const initialHtml = getQuoteFieldValue(fieldName) || '';
   const html = `
-    <form onsubmit="event.preventDefault();applyExpandedField('${fieldName}');" class="p-4 sm:p-6 flex flex-col" style="height:88vh;max-height:600px;">
+    <form onsubmit="event.preventDefault();applyExpandedField('${fieldName}');" class="p-4 sm:p-6 flex flex-col" style="height:88vh;max-height:720px;">
       <h3 class="text-lg font-bold mb-3">${escapeHtml(label)} bearbeiten</h3>
-      <textarea id="expandedTextarea" autofocus class="flex-1 w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30" style="min-height:320px;">${escapeHtml(ta.value || '')}</textarea>
+      <div id="expandedQuillContainer" class="flex-1 overflow-hidden flex flex-col">
+        <div id="expandedQuillEditor" class="bg-white" style="flex:1;min-height:340px;"></div>
+      </div>
       <div class="flex justify-end gap-2 mt-4">
         <button type="button" onclick="closeModal2()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
         <button type="submit" class="px-3 py-2.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Übernehmen</button>
@@ -5119,18 +5207,45 @@ function expandTextField(fieldName, label) {
     </form>
   `;
   openModal2(html);
-  setTimeout(() => {
-    const exp = document.getElementById('expandedTextarea');
-    if (exp) { exp.focus(); exp.setSelectionRange(exp.value.length, exp.value.length); }
+  setTimeout(async () => {
+    if (!window.Quill) {
+      await new Promise((resolve) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js';
+        s.onload = resolve; s.onerror = resolve;
+        document.head.appendChild(s);
+      });
+    }
+    if (!window.Quill) return;
+    const q = new window.Quill(document.getElementById('expandedQuillEditor'), {
+      theme: 'snow',
+      modules: { toolbar: [
+        [{ header: [1, 2, 3, false] }],
+        [{ size: ['small', false, 'large', 'huge'] }],
+        ['bold', 'italic', 'underline'],
+        [{ list: 'ordered' }, { list: 'bullet' }],
+        [{ align: [] }],
+        ['link', 'clean']
+      ]}
+    });
+    if (initialHtml) {
+      if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initialHtml)) {
+        q.root.innerHTML = initialHtml;
+      } else {
+        q.setText(initialHtml);
+      }
+    }
+    q.focus();
+    window._expandedQuill = q;
   }, 80);
 }
 
 function applyExpandedField(fieldName) {
-  const ta = document.querySelector(`#modalBox [name="${fieldName}"]`);
-  const exp = document.getElementById('expandedTextarea');
-  if (ta && exp) {
-    ta.value = exp.value;
-    ta.dispatchEvent(new Event('input', { bubbles: true })); // löst Preview-Update + Auto-Save aus
+  const q = window._expandedQuill;
+  if (q) {
+    setQuoteFieldValue(fieldName, q.root.innerHTML);
+    if (typeof updateQuotePreview === 'function') updateQuotePreview();
+    window._expandedQuill = null;
   }
   closeModal2();
 }
@@ -5149,15 +5264,14 @@ function onTemplatePicked(selectEl, fieldName, docType) {
   if (!tplId) return; // keine Vorlage
   const tpl = (window._quoteTemplates || []).find(t => t.id === tplId);
   if (!tpl) return;
-  const ta = document.querySelector(`#modalBox textarea[name="${fieldName}"], #modalBox input[name="${fieldName}"]`);
-  if (!ta) return;
-  if (ta.value.trim() && !confirm('Aktuellen Text durch Vorlage ersetzen?')) {
+  const currentText = (getQuoteFieldValue(fieldName) || '').replace(/<[^>]+>/g, '').trim();
+  if (currentText && !confirm('Aktuellen Text durch Vorlage ersetzen?')) {
     // Auswahl behalten, aber Text nicht überschreiben
     return;
   }
   buildQuoteVariableContext().then(ctx => {
-    ta.value = substituteVariables(tpl.fields.content || '', docType, ctx);
-    // Live-Vorschau anstoßen, da `change` nicht von select->input dispatched
+    setQuoteFieldValue(fieldName, substituteVariables(tpl.fields.content || '', docType, ctx));
+    // Live-Vorschau anstoßen
     if (typeof updateQuotePreview === 'function') updateQuotePreview();
   });
 }
@@ -5361,7 +5475,8 @@ async function openQuoteModal(id) {
             ${quoteTemplatePicker('description', 'Einleitung', (f.intro_template_id || [])[0] || (id ? '' : (defaultIntroTpl?.id || '')))}
           </div>
           <input type="hidden" name="intro_template_id" value="${escapeHtml((f.intro_template_id || [])[0] || (id ? '' : (defaultIntroTpl?.id || '')))}">
-          <textarea name="description" rows="3" placeholder="Anrede + Einleitung — z.B. „Sehr geehrte Damen und Herren, …"" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+          <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
+          <div id="quote_intro_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
         </div>
       </div>
 
@@ -5383,7 +5498,8 @@ async function openQuoteModal(id) {
           ${quoteTemplatePicker('notes', 'Schlusstext', (f.closing_template_id || [])[0] || (id ? '' : (defaultClosingTpl?.id || '')))}
         </div>
         <input type="hidden" name="closing_template_id" value="${escapeHtml((f.closing_template_id || [])[0] || (id ? '' : (defaultClosingTpl?.id || '')))}">
-        <textarea name="notes" rows="3" placeholder="z.B. Grußformel + Bankverbindung + Hinweise" class="w-full px-3 py-2 border border-ink-200 rounded-lg mb-5 focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+        <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
+        <div id="quote_notes_editor" class="bg-white border border-ink-200 rounded-lg mb-5" style="min-height:140px;"></div>
       </div>
 
       ${customFieldsSection(window._quoteCustomFields, parseQuoteCustomValues(f.custom_values))}
@@ -5490,7 +5606,9 @@ async function openQuoteModal(id) {
 
   // Live-Vorschau initial befüllen + Listener für Änderungen
   _quotePreviewZoom = 1; // Reset bei Modal-Open
-  setTimeout(() => {
+  setTimeout(async () => {
+    // Quill-Editoren für Einleitung + Schluss initialisieren
+    await initQuoteEditors();
     updateQuotePreview();
     attachPinchZoom();
     applyQuoteZoom();
@@ -5619,13 +5737,12 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const footer = buildQuoteFooterData(c);
   const variant = (q.layout_variant === 'klassisch') ? 'klassisch' : 'standard';
   const isK = variant === 'klassisch';
-  // Schrift insgesamt größer als vorher (User-Feedback "Texte sind zu klein").
-  // Klassisch: noch eine Stufe größer + mehr Bold.
+  // Schrift noch eine Stufe größer (User-Feedback "alle eine Nummer größer")
   const sz = {
-    base:  isK ? 'text-[13px]' : 'text-[12px]',
-    small: isK ? 'text-[11px]' : 'text-[10px]',
-    table: isK ? 'text-[12px]' : 'text-[11px]',
-    title: isK ? 'text-[32px]' : 'text-[30px]',
+    base:  isK ? 'text-[14px]' : 'text-[13px]',
+    small: isK ? 'text-[12px]' : 'text-[11px]',
+    table: isK ? 'text-[13px]' : 'text-[12px]',
+    title: isK ? 'text-[34px]' : 'text-[32px]',
     cellPad: isK ? 'py-1' : 'py-0.5',
     colsGap: isK ? 'gap-3' : 'gap-6',
     sectionGap: isK ? 'mb-4' : 'mb-6',
@@ -5647,15 +5764,16 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     return [sal, fullName].filter(Boolean).join(' ');
   })();
 
-  // Header (oben jede Seite) — Tagline LINKS, FLP-Logo RECHTS.
-  // Darunter: Sub-Logo (z.B. TÜV) + optional 2. Logo Seite-an-Seite linksbündig (gleiche Höhe 64px).
+  // Header (oben JEDE Seite) — Tagline LINKS, FLP-Logo RECHTS.
+  // Sub-Logo + 2. Logo werden im Body-Start eingebettet (s.u.) — so erscheinen sie
+  // nur auf Seite 1 (durch das Pagination-Slicing) und nicht ab Seite 2.
   const tagline = (q.quote_title && q.quote_title.trim()) ? q.quote_title : footer.taglineTop;
   const secondaryLogoUrl = (c?.secondary_logo || [])[0]?.url || '';
   const secondaryLogoHtml = secondaryLogoUrl
     ? `<img src="${escapeHtml(secondaryLogoUrl)}" crossorigin="anonymous" style="height:64px;width:auto;display:block;" alt="2. Logo">`
     : '';
-  const leftLogosHtml = (subLogoHtml || secondaryLogoHtml)
-    ? `<div class="mt-1 mb-2 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
+  const leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
+    ? `<div class="mb-3 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
     : '';
   const header = `
     <div class="flex items-start justify-between mb-1">
@@ -5664,12 +5782,14 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
-    ${leftLogosHtml}
   `;
 
-  // Hauptinhalt — Layout-Varianten "standard" und "klassisch" via sz.* Tokens gesteuert
+  // Hauptinhalt — Layout-Varianten "standard" und "klassisch" via sz.* Tokens gesteuert.
+  // Sub-Logo + 2. Logo am Body-Anfang → sie erscheinen nur auf Seite 1 (Pagination cropping).
   const body = `
     <div data-quote-body class="${sz.base} text-ink-900" style="font-family:Inter,system-ui,sans-serif;">
+
+      ${leftLogosBlock}
 
       <!-- Dokumenten-Überschrift bleibt fix 'Angebot' (fett + größer) -->
       <div class="${sz.title} text-ink-900 font-bold tracking-tight leading-tight text-right mb-5">Angebot</div>
