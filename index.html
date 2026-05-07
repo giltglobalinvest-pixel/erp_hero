@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.26';
+const APP_VERSION = 'v2.27';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -4686,12 +4686,15 @@ async function openQuoteModal(id) {
         <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern und schließen</button>
       </div>
     </form>
-    <div class="hidden lg:block lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-50 lg:border-l border-ink-200 p-6">
-      <div class="flex items-center justify-between mb-2">
-        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau</p>
-        <button type="button" onclick="exportQuoteAsPdf()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF</button>
+    <div class="hidden lg:block lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 p-4">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
+        <div class="flex gap-1.5">
+          <button type="button" onclick="exportQuoteAsPdf()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF</button>
+          <button type="button" onclick="emailQuote()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="mail" class="w-3.5 h-3.5"></i> E-Mail</button>
+        </div>
       </div>
-      <div id="quotePreview" class="bg-white shadow-card rounded-lg p-6 min-h-[200px]"></div>
+      <div id="quotePreview" class="bg-white shadow-card mx-auto" style="aspect-ratio:210/297;padding:8% 9%;width:100%;"></div>
     </div>
     </div>
   `, { maxWidth: 'max-w-7xl' });
@@ -5094,10 +5097,24 @@ function _safeFilename(s) {
   return String(s || '').replace(/[^a-zA-Z0-9_.\- ]/g, '_').replace(/\s+/g, '_').replace(/_+/g, '_').slice(0, 80);
 }
 
+// Liefert das FLP-Logo als komplett selbst-tragendes inline SVG (ohne <use>-Verweis),
+// damit html2canvas es zuverlässig rendern kann.
+function flpLogoInlineSvg(heightPx) {
+  const symbol = document.getElementById('flp-logo');
+  const inner = symbol ? symbol.innerHTML : '';
+  const viewBox = symbol?.getAttribute('viewBox') || '50.2 112.3 319.9 73.5';
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" style="height:${heightPx}px;width:auto;display:block;">${inner}</svg>`;
+}
+
+// Ersetzt im Preview-HTML den <use>-Logo-Aufruf durch echtes Inline-SVG (für PDF-Export, da html2canvas SVG-Symbole nicht zuverlässig rendert)
+function _inlineLogosInHtml(html) {
+  if (!html) return html;
+  // Ersetzt jedes <svg>...</svg> das ein <use href="#flp-logo"> enthält durch ein selbst-tragendes SVG.
+  return html.replace(/<svg[^>]*>[\s\S]*?<use\s+href="#flp-logo"[^>]*\/>[\s\S]*?<\/svg>/gi, () => flpLogoInlineSvg(28));
+}
+
 async function exportQuoteAsPdf() {
-  // Aktuelle Vorschau-Daten neu zusammenstellen (nicht aus DOM klauen, weil DOM-Layout für 50%-Pane ausgelegt ist)
   const ctx = await buildQuoteVariableContext();
-  const cur = getCurrentCompany();
   const form = document.querySelector('#modalBox form');
   const fd = form ? new FormData(form) : null;
   const intro   = fd ? (fd.get('description') || '') : '';
@@ -5121,7 +5138,7 @@ async function exportQuoteAsPdf() {
       const sel = all.filter(r => attIds.includes(r.id));
       if (sel.length) {
         attListHtml = `
-          <div style="page-break-before: always; padding-top: 1cm;">
+          <div style="page-break-before: always; padding-top: 30px;">
             <h2 style="font-size:18px;font-weight:700;margin:0 0 12px 0;">Anhänge zum Angebot</h2>
             <ul style="list-style:disc;padding-left:18px;font-size:11pt;line-height:1.6;">
               ${sel.map(s => {
@@ -5136,18 +5153,23 @@ async function exportQuoteAsPdf() {
     } catch (e) {}
   }
 
-  // Off-screen-Container in A4-Maßen
-  const previewHtml = renderQuotePreviewHtml(ctx, items, intro, closing);
-  // SVG-Symbol klonen (für <use> im Briefkopf)
-  const svgSymbol = document.querySelector('svg[aria-hidden="true"]')?.outerHTML || '';
+  const previewHtml = _inlineLogosInHtml(renderQuotePreviewHtml(ctx, items, intro, closing));
+  // Container: A4-Format in Pixel (794 × 1123 bei 96dpi). Position absolut top weit unten – nicht aus dem Viewport raus geschoben (html2canvas reagiert sensibel)
   const container = document.createElement('div');
-  container.style.cssText = 'position:fixed;left:-99999px;top:0;width:210mm;padding:18mm 20mm;background:white;font-family:Inter,system-ui,sans-serif;color:#0F172A;font-size:11pt;line-height:1.45;';
-  container.innerHTML = svgSymbol + previewHtml + attListHtml;
+  container.style.cssText = 'position:absolute;top:0;left:0;z-index:-1;width:794px;min-height:1123px;padding:68px 76px;box-sizing:border-box;background:#FFFFFF;font-family:Inter,system-ui,sans-serif;color:#0F172A;font-size:11pt;line-height:1.5;opacity:1;';
+  container.innerHTML = previewHtml + attListHtml;
   document.body.appendChild(container);
+  // Außerhalb des sichtbaren Bereichs verstecken (visuell nicht sichtbar, aber für html2canvas erfassbar)
+  container.style.position = 'fixed';
+  container.style.top = '0';
+  container.style.left = '-9000px';
 
   toast('PDF wird erstellt …', 'info', 1500);
   try {
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js');
+    // Auf Fonts warten, damit Inter geladen ist bevor wir capture machen
+    if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch(e){} }
+    await new Promise(r => setTimeout(r, 80));
     const customer = ctx.customer || {};
     const quoteNo = ctx.quote?.quote_no || 'Entwurf';
     const filename = _safeFilename('Angebot_' + quoteNo + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
@@ -5155,7 +5177,7 @@ async function exportQuoteAsPdf() {
       margin: 0,
       filename,
       image: { type: 'jpeg', quality: 0.97 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#FFFFFF' },
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#FFFFFF', logging: false, windowWidth: 794 },
       jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
       pagebreak: { mode: ['css', 'legacy'] }
     }).from(container).save();
