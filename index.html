@@ -402,7 +402,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.29';
+const APP_VERSION = 'v2.30';
 // Read-Token wird zur Laufzeit zusammengesetzt, damit GitHub Push Protection
 // das Muster nicht als Secret erkennt. Token ist read-only und bewusst öffentlich.
 const _TKP1 = 'patu8KWM8aWByxCGL';
@@ -5297,7 +5297,7 @@ async function exportQuoteAsPdf() {
   </div>
   ${previewHtml}
   ${attListHtml}
-  <script>
+  <` + `script>
     window.addEventListener('load', () => {
       // Kurz warten bis Fonts und SVG gerendert sind, dann Print-Dialog
       setTimeout(() => {
@@ -5311,7 +5311,7 @@ async function exportQuoteAsPdf() {
     window.addEventListener('afterprint', () => {
       setTimeout(() => { try { window.close(); } catch(e) {} }, 300);
     });
-  </script>
+  </` + `script>
 </body>
 </html>`;
 
