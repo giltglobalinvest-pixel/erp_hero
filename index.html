@@ -452,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.59';
+const APP_VERSION = 'v2.60';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6363,8 +6363,6 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const theadInlineStyle = '';
   const totalRowInlineStyle = '';
   const bezeichnungInlineStyle = '';
-  // sectionGap überschreiben — User möchte Inhalt enger an die Logos
-  sz.sectionGap = 'mb-3';
   // Schrift noch eine Stufe größer (User-Feedback "alle eine Nummer größer")
   const sz = {
     base:  isK ? 'text-[14px]' : 'text-[13px]',
@@ -6373,7 +6371,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     title: isK ? 'text-[34px]' : 'text-[32px]',
     cellPad: isK ? 'py-1' : 'py-0.5',
     colsGap: isK ? 'gap-3' : 'gap-6',
-    sectionGap: isK ? 'mb-4' : 'mb-6',
+    sectionGap: isK ? 'mb-3' : 'mb-3',
     fwLabel: isK ? 'font-semibold' : '',
     fwTotal: 'font-bold',
     fwBezeichnung: isK ? 'font-semibold' : '',
