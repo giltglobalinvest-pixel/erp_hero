@@ -452,7 +452,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.70';
+const APP_VERSION = 'v2.71';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6398,13 +6398,11 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   // Tagline einzeilig + kleinere Schrift, garantiert sichtbar.
   // FLP-Logo position:absolute auf der rechten Seite (z-index überdeckt Überlauf falls nötig).
   // Tagline mit padding-right damit sie nicht hinter dem Logo verschwindet.
-  // Tagline im NORMALEN Flow (nicht absolute) — html2canvas rendert das zuverlässiger
-  // als absolute positioning. Logo überlappt rechts via z-index.
-  // padding-top gibt vertikalen Safety-Raum, padding-right reserviert Platz fürs Logo.
+  // Tagline im NORMALEN Flow + großzügige Höhe — html2canvas-stabil
   const header = `
-    <div style="position:relative;margin-bottom:4px;padding:10px 184px 0 0;min-height:46px;">
-      <div class="text-ink-700" style="font-size:12px;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tagline)}</div>
-      <div style="position:absolute;top:4px;right:0;z-index:2;">
+    <div style="position:relative;margin-bottom:4px;padding:18px 184px 6px 0;min-height:52px;box-sizing:border-box;">
+      <div class="text-ink-700" style="font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:18px;">${escapeHtml(tagline)}</div>
+      <div style="position:absolute;top:6px;right:0;z-index:2;">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
@@ -6573,7 +6571,7 @@ function paginatePreview() {
   // A4 @ 96dpi
   const A4_W = 794, A4_H = 1123;
   const PAD_T = 36, PAD_LR = 50, PAD_B = 24;
-  const HEADER_H = 48, FOOTER_H = 92, GAP = 0;
+  const HEADER_H = 54, FOOTER_H = 92, GAP = 0;
   // Logos-Höhe nur reservieren wenn welche existieren (sonst 0) — 70px Logos
   const LOGOS_H = headerPage1Html ? 72 : 0;
   // usableH ist konstant — auf jeder Seite gleich. Logos-Bereich auf Seite 2+ bleibt einfach leer.
