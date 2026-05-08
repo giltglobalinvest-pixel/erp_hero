@@ -471,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.73';
+const APP_VERSION = 'v2.74';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6557,11 +6557,12 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   // Tagline einzeilig + kleinere Schrift, garantiert sichtbar.
   // FLP-Logo position:absolute auf der rechten Seite (z-index überdeckt Überlauf falls nötig).
   // Tagline mit padding-right damit sie nicht hinter dem Logo verschwindet.
-  // Tagline + Logo: jeweils data-adjustable für Layout-Anpassen-Modus
+  // Tagline mit großzügiger Line-Height, damit html2canvas nicht clippt.
+  // Container höher (line-height 28 + padding) → Buchstaben-Ascender immer sichtbar.
   const header = `
-    <div style="position:relative;margin-bottom:4px;padding:18px 184px 6px 0;min-height:52px;box-sizing:border-box;">
-      <div data-adjustable="tagline" class="text-ink-700" style="font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:18px;${ofs('tagline')}">${escapeHtml(tagline)}</div>
-      <div data-adjustable="flp_logo" style="position:absolute;top:6px;right:0;z-index:2;${ofs('flp_logo')}">
+    <div style="position:relative;margin-bottom:4px;padding:14px 184px 6px 0;min-height:56px;box-sizing:border-box;">
+      <div data-adjustable="tagline" class="text-ink-700" style="font-size:12px;line-height:28px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:28px;${ofs('tagline')}">${escapeHtml(tagline)}</div>
+      <div data-adjustable="flp_logo" style="position:absolute;top:8px;right:0;z-index:2;${ofs('flp_logo')}">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
@@ -6730,7 +6731,7 @@ function paginatePreview() {
   // A4 @ 96dpi
   const A4_W = 794, A4_H = 1123;
   const PAD_T = 36, PAD_LR = 50, PAD_B = 24;
-  const HEADER_H = 54, FOOTER_H = 92, GAP = 0;
+  const HEADER_H = 60, FOOTER_H = 92, GAP = 0;
   // Logos-Höhe nur reservieren wenn welche existieren (sonst 0) — 70px Logos
   const LOGOS_H = headerPage1Html ? 72 : 0;
   // usableH ist konstant — auf jeder Seite gleich. Logos-Bereich auf Seite 2+ bleibt einfach leer.
