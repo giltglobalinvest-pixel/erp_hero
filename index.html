@@ -471,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.78';
+const APP_VERSION = 'v2.79';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2989,11 +2989,13 @@ async function openCustomerModal(id) {
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   let f = {};
   let contacts = [];
+  let addresses = [];
   if (id) {
-    const [allCust, allCont] = await Promise.all([readData('Customer'), readData('Contact')]);
+    const [allCust, allCont, allAddr] = await Promise.all([readData('Customer'), readData('Contact'), readData('Address').catch(() => [])]);
     const rec = allCust.find(r => r.id === id);
     f = rec?.fields || {};
     contacts = allCont.filter(c => (c.fields.customer_id || []).includes(id));
+    addresses = allAddr;
     // Lock akquirieren
     const lockRes = await acquireLock('Customer', id, rec);
     if (!lockRes.ok) {
@@ -3060,6 +3062,12 @@ async function openCustomerModal(id) {
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Ansprechpartner</h4>
       <div id="entityContactsWrap">${renderEntityContacts('customer', id || '', contacts)}</div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-1.5"><i data-lucide="truck" class="w-3.5 h-3.5"></i> Lieferadressen</h4>
+      <div id="entityAddressesWrap_delivery">${renderEntityAddresses(id || '', addresses, 'delivery')}</div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-1.5"><i data-lucide="receipt" class="w-3.5 h-3.5"></i> Rechnungsadressen</h4>
+      <div id="entityAddressesWrap_billing">${renderEntityAddresses(id || '', addresses, 'billing')}</div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Buchhaltung</h4>
       <div class="grid grid-cols-2 gap-3">
@@ -5469,6 +5477,13 @@ async function buildQuoteVariableContext() {
   const customer = cache.byId?.[cidSel];
   const contact  = cache.contacts?.find(c => c.id === conSel)?.fields;
   const company  = window._quoteCompanyCache || {};
+  // Adressen auflösen
+  const customerObj = cidSel ? { id: cidSel, fields: customer || {} } : null;
+  const addresses = cache.addresses || [];
+  const deliveryAddrId = (fd.get('delivery_address_id') || '').trim();
+  const invoiceAddrId  = (fd.get('invoice_address_id')  || '').trim();
+  const deliveryAddress = resolveAddress({ customer: customerObj, addresses, addressId: deliveryAddrId, kind: 'delivery' });
+  const invoiceAddress  = resolveAddress({ customer: customerObj, addresses, addressId: invoiceAddrId,  kind: 'billing'  });
   return {
     quote: {
       quote_no:       (fd.get('quote_no') || '').trim(),
@@ -5479,12 +5494,24 @@ async function buildQuoteVariableContext() {
       delivery_terms: (fd.get('delivery_terms') || '').trim(),
       layout_variant: (fd.get('layout_variant') || 'standard').trim(),
       force_closing_new_page: fd.get('force_closing_new_page') === 'on',
-      layout_offsets: (fd.get('layout_offsets') || '').trim()
+      layout_offsets: (fd.get('layout_offsets') || '').trim(),
+      delivery_address_id: deliveryAddrId,
+      invoice_address_id:  invoiceAddrId
     },
-    customer, contact, company,
+    customer, contact, company, deliveryAddress, invoiceAddress,
     user: APP_KEYS.user || {},
     customFields: collectCustomValues()
   };
+}
+
+// Vergleicht zwei Adressen, ob sie effektiv identisch sind (für "nur eine zeigen wenn gleich").
+function addressesEqual(a, b) {
+  if (!a || !b) return false;
+  return (a.street || '') === (b.street || '')
+      && (a.zip || '')    === (b.zip || '')
+      && (a.city || '')   === (b.city || '')
+      && (a.country || '') === (b.country || '')
+      && (a.recipient || '') === (b.recipient || '');
 }
 
 /* Lazy-Load Quill-Lib einmalig. Verspricht erst, wenn window.Quill verfügbar ist. */
@@ -6152,16 +6179,33 @@ async function openQuoteModal(id) {
     { name: 'bundle_id',               type: 'singleLineText' },
     { name: 'force_closing_new_page',  type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
     { name: 'layout_offsets',          type: 'multilineText' },
+    { name: 'delivery_address_id',     type: 'singleLineText' },
+    { name: 'invoice_address_id',      type: 'singleLineText' },
+  ]).catch(()=>{});
+  // Adress-Tabelle (Liefer- und Rechnungsadressen pro Kunde)
+  ensureTable('Address', [
+    { name: 'name', type: 'singleLineText' }
+  ]).catch(()=>{});
+  ensureFields('Address', [
+    { name: 'customer_id', type: 'singleLineText' },
+    { name: 'kind',        type: 'singleLineText' },
+    { name: 'is_primary',  type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
+    { name: 'street',      type: 'singleLineText' },
+    { name: 'zip',         type: 'singleLineText' },
+    { name: 'city',        type: 'singleLineText' },
+    { name: 'country',     type: 'singleLineText' },
+    { name: 'recipient',   type: 'singleLineText' },
+    { name: 'notes',       type: 'multilineText' },
   ]).catch(()=>{});
   // Brand-Color für die blaue Linie unten — pro Mandant in Company hinterlegt
   ensureFields('Company', [
     { name: 'brand_color', type: 'singleLineText' },
   ]).catch(()=>{});
-  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [], allAttachments = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [], allAttachments = [], allAddresses = [];
   try {
-    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms, allAttachments] = await Promise.all([
+    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms, allAttachments, allAddresses] = await Promise.all([
       readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company'), readData('CustomField'),
-      readData('PaymentTerm'), readData('DeliveryTerm'), readData('Attachment')
+      readData('PaymentTerm'), readData('DeliveryTerm'), readData('Attachment'), readData('Address').catch(() => [])
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
   const attachments = allAttachments.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.name||'').localeCompare(b.fields.name||'','de'));
@@ -6243,9 +6287,16 @@ async function openQuoteModal(id) {
       label: contactDisplayName(c.fields),
       secondary: [c.fields.role, c.fields.email].filter(Boolean).join(' · ')
     }));
-  // Globaler Customer-Daten-Cache für Defaults bei Wechsel (payment_terms / delivery_terms / contacts)
-  window._quoteCustomerCache = { byId: {}, contacts: allContacts };
+  // Globaler Customer-Daten-Cache für Defaults bei Wechsel (payment_terms / delivery_terms / contacts / addresses)
+  window._quoteCustomerCache = { byId: {}, contacts: allContacts, addresses: allAddresses };
   customersInCompany.forEach(c => { window._quoteCustomerCache.byId[c.id] = c.fields; });
+  // Initiale Adress-Auswahl: bei Neuanlage Hauptadressen vorbelegen, sonst gespeicherte IDs
+  let currentDeliveryAddressId = (f.delivery_address_id || '').trim();
+  let currentInvoiceAddressId  = (f.invoice_address_id  || '').trim();
+  if (!id && currentCustomerId) {
+    if (!currentDeliveryAddressId) currentDeliveryAddressId = findPrimaryAddressId(allAddresses, currentCustomerId, 'delivery');
+    if (!currentInvoiceAddressId)  currentInvoiceAddressId  = findPrimaryAddressId(allAddresses, currentCustomerId, 'billing');
+  }
 
   openModal(`
     <div class="lg:flex lg:items-stretch">
@@ -6298,6 +6349,29 @@ async function openQuoteModal(id) {
         <div class="col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
           ${renderCombobox({ id: 'qc_contact', name: 'contact_id', items: contactItemsFor(currentCustomerId), current: currentContactId, placeholder: 'Ansprechpartner suchen…' })}
+        </div>
+        <div class="col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Adressen</label>
+          <input type="hidden" name="delivery_address_id" id="qc_delivery_address_id" value="${escapeHtml(currentDeliveryAddressId)}">
+          <input type="hidden" name="invoice_address_id"  id="qc_invoice_address_id"  value="${escapeHtml(currentInvoiceAddressId)}">
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="qc_btn_delivery" onclick="openAddressPicker('delivery')" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-left text-sm">
+              <i data-lucide="truck" class="w-4 h-4 text-brand-600 shrink-0"></i>
+              <span class="flex-1 min-w-0">
+                <span class="block text-[10px] uppercase tracking-wider text-ink-500">Lieferadresse</span>
+                <span id="qc_label_delivery" class="block truncate text-ink-900">${escapeHtml(addressShortLabel(resolveAddress({ customer: customersInCompany.find(c => c.id === currentCustomerId), addresses: allAddresses, addressId: currentDeliveryAddressId, kind: 'delivery' })))}</span>
+              </span>
+              <i data-lucide="pencil" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>
+            </button>
+            <button type="button" id="qc_btn_billing" onclick="openAddressPicker('billing')" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-left text-sm">
+              <i data-lucide="receipt" class="w-4 h-4 text-brand-600 shrink-0"></i>
+              <span class="flex-1 min-w-0">
+                <span class="block text-[10px] uppercase tracking-wider text-ink-500">Rechnungsadresse</span>
+                <span id="qc_label_billing" class="block truncate text-ink-900">${escapeHtml(addressShortLabel(resolveAddress({ customer: customersInCompany.find(c => c.id === currentCustomerId), addresses: allAddresses, addressId: currentInvoiceAddressId, kind: 'billing' })))}</span>
+              </span>
+              <i data-lucide="pencil" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>
+            </button>
+          </div>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
@@ -6698,10 +6772,20 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
             ${cu.name1 ? `<div>${escapeHtml(cu.name1)}</div>` : '<div class="text-ink-400 italic">— Empfänger —</div>'}
             ${cu.name2 ? `<div>${escapeHtml(cu.name2)}</div>` : ''}
             ${recipientSalutation ? `<div>${escapeHtml(recipientSalutation)}</div>` : ''}
-            ${cu.street ? `<div>${escapeHtml(cu.street)}</div>` : ''}
-            ${(cu.zip || cu.city) ? `<div>${escapeHtml([cu.zip, cu.city].filter(Boolean).join(' '))}</div>` : ''}
-            ${cu.country ? `<div>${escapeHtml(cu.country)}</div>` : ''}
+            ${(ctx.invoiceAddress?.recipient) ? `<div>${escapeHtml(ctx.invoiceAddress.recipient)}</div>` : ''}
+            ${(ctx.invoiceAddress?.street || cu.street) ? `<div>${escapeHtml(ctx.invoiceAddress?.street || cu.street)}</div>` : ''}
+            ${((ctx.invoiceAddress?.zip || cu.zip) || (ctx.invoiceAddress?.city || cu.city)) ? `<div>${escapeHtml([ctx.invoiceAddress?.zip || cu.zip, ctx.invoiceAddress?.city || cu.city].filter(Boolean).join(' '))}</div>` : ''}
+            ${(ctx.invoiceAddress?.country || cu.country) ? `<div>${escapeHtml(ctx.invoiceAddress?.country || cu.country)}</div>` : ''}
           </div>
+          ${(ctx.deliveryAddress && !addressesEqual(ctx.deliveryAddress, ctx.invoiceAddress) && (ctx.deliveryAddress.street || ctx.deliveryAddress.city)) ? `
+            <div class="${sz.base} leading-[1.5] mt-3 pt-2 border-t border-ink-200 text-[10px]">
+              <div class="font-semibold text-ink-700">Lieferadresse:</div>
+              ${ctx.deliveryAddress.recipient ? `<div>${escapeHtml(ctx.deliveryAddress.recipient)}</div>` : ''}
+              ${ctx.deliveryAddress.street ? `<div>${escapeHtml(ctx.deliveryAddress.street)}</div>` : ''}
+              ${(ctx.deliveryAddress.zip || ctx.deliveryAddress.city) ? `<div>${escapeHtml([ctx.deliveryAddress.zip, ctx.deliveryAddress.city].filter(Boolean).join(' '))}</div>` : ''}
+              ${ctx.deliveryAddress.country ? `<div>${escapeHtml(ctx.deliveryAddress.country)}</div>` : ''}
+            </div>
+          ` : ''}
         </div>
         <div>
           <!-- 'Angebot' Titel — in der RECHTEN Spalte, oben, rechtsbündig.
@@ -7101,6 +7185,111 @@ function quoteSumsHtml(sums) {
 }
 
 // Wird vom Customer-Combobox aufgerufen (value, comboboxId)
+// Aktualisiert die Beschriftung eines Adress-Buttons im Angebots-Modal nach Auswahl/Customer-Wechsel.
+function refreshQuoteAddressButton(kind) {
+  const labelEl = document.getElementById('qc_label_' + kind);
+  const valEl   = document.getElementById('qc_' + (kind === 'billing' ? 'invoice' : 'delivery') + '_address_id');
+  if (!labelEl || !valEl) return;
+  const cidEl = document.getElementById('qc_customer_value');
+  const cid = cidEl?.value || '';
+  const cache = window._quoteCustomerCache || {};
+  const customer = cid ? { id: cid, fields: (cache.byId || {})[cid] || {} } : null;
+  const addresses = cache.addresses || [];
+  const resolved = resolveAddress({ customer, addresses, addressId: valEl.value, kind });
+  labelEl.textContent = addressShortLabel(resolved) || '–';
+}
+
+function openAddressPicker(kind) {
+  const cidEl = document.getElementById('qc_customer_value');
+  const cid = cidEl?.value || '';
+  if (!cid) { toast('Bitte erst Kunde auswählen', 'warn'); return; }
+  const cache = window._quoteCustomerCache || {};
+  const valEl = document.getElementById('qc_' + (kind === 'billing' ? 'invoice' : 'delivery') + '_address_id');
+  const currentId = valEl?.value || '';
+  const customer = { id: cid, fields: (cache.byId || {})[cid] || {} };
+  const addresses = (cache.addresses || []).filter(a => (a.fields.customer_id || '') === cid && (a.fields.kind || '') === kind);
+  const primaryId = findPrimaryAddressId(cache.addresses || [], cid, kind);
+
+  // Optionen: erst Customer-Basis-Fallback, dann gepflegte Adressen
+  const cf = customer.fields;
+  const baseFallbackHtml = `
+    <label class="flex items-start gap-2 p-3 border-2 border-ink-200 rounded-lg cursor-pointer hover:bg-ink-50 ${!currentId && !primaryId ? 'border-brand-400 bg-brand-50/40' : ''}">
+      <input type="radio" name="addr_pick" value="" ${!currentId ? 'checked' : ''} class="mt-0.5 w-4 h-4 text-brand-500">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-1.5 mb-0.5">
+          <span class="text-xs font-semibold text-ink-700">Hauptadresse vom Kunden</span>
+          <span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1 rounded">Standard</span>
+        </div>
+        <div class="text-xs text-ink-600">
+          ${escapeHtml(cf.street || '–')}<br>
+          ${escapeHtml([cf.zip, cf.city].filter(Boolean).join(' ') || '–')}<br>
+          ${escapeHtml(cf.country || '')}
+        </div>
+      </div>
+    </label>
+  `;
+  const optionsHtml = addresses.length === 0
+    ? '<p class="text-xs text-ink-500 italic px-2 py-3">Noch keine separaten ' + escapeHtml(addressKindLabelPlural(kind)) + ' beim Kunden gepflegt.</p>'
+    : addresses.map(a => {
+        const af = a.fields || {};
+        const checked = currentId === a.id;
+        return `
+          <label class="flex items-start gap-2 p-3 border-2 ${checked ? 'border-brand-400 bg-brand-50/40' : 'border-ink-200'} rounded-lg cursor-pointer hover:bg-ink-50">
+            <input type="radio" name="addr_pick" value="${a.id}" ${checked ? 'checked' : ''} class="mt-0.5 w-4 h-4 text-brand-500">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                ${af.is_primary ? '<i data-lucide="star" class="w-3 h-3 text-amber-500" style="fill:currentColor"></i>' : ''}
+                <span class="text-xs font-semibold text-ink-900">${escapeHtml(af.name || addressKindLabel(kind))}</span>
+                ${af.is_primary ? '<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1 rounded">Haupt</span>' : ''}
+              </div>
+              <div class="text-xs text-ink-600">
+                ${af.recipient ? escapeHtml(af.recipient) + '<br>' : ''}
+                ${escapeHtml(af.street || '')}<br>
+                ${escapeHtml([af.zip, af.city].filter(Boolean).join(' '))}<br>
+                ${escapeHtml(af.country || '')}
+              </div>
+            </div>
+          </label>
+        `;
+      }).join('');
+
+  openModal2(`
+    <div class="p-5">
+      <h3 class="text-base font-bold text-ink-900 mb-1 flex items-center gap-2">
+        <i data-lucide="${addressKindIcon(kind)}" class="w-4 h-4 text-brand-600"></i> ${escapeHtml(addressKindLabel(kind))} wählen
+      </h3>
+      <p class="text-xs text-ink-500 mb-3">${escapeHtml(cf.name1 || '–')}${cf.customer_no ? ' · ' + escapeHtml(cf.customer_no) : ''}</p>
+      <div class="space-y-2 mb-4 max-h-[60vh] overflow-y-auto">
+        ${baseFallbackHtml}
+        ${optionsHtml}
+      </div>
+      <div class="flex justify-between items-center gap-2">
+        <a href="#" onclick="event.preventDefault();closeModal2();editCustomerFromAddressPicker('${cid}')" class="text-xs text-brand-600 hover:text-brand-700">+ Adressen am Kunden verwalten</a>
+        <div class="flex gap-2">
+          <button type="button" onclick="closeModal2()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+          <button type="button" onclick="confirmAddressPick('${kind}')" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Übernehmen</button>
+        </div>
+      </div>
+    </div>
+  `);
+  if (window.lucide) lucide.createIcons();
+}
+
+function confirmAddressPick(kind) {
+  const picked = document.querySelector('input[name="addr_pick"]:checked');
+  const value = picked ? picked.value : '';
+  const valEl = document.getElementById('qc_' + (kind === 'billing' ? 'invoice' : 'delivery') + '_address_id');
+  if (valEl) valEl.value = value;
+  refreshQuoteAddressButton(kind);
+  closeModal2();
+  if (typeof updateQuotePreview === 'function') updateQuotePreview();
+}
+
+function editCustomerFromAddressPicker(customerId) {
+  // Fallback-Hinweis: aktuelle Quote-Bearbeitung wird verworfen, wenn Customer-Modal aufgeht
+  toast('Tipp: Adressen werden im Kundenstamm gepflegt — schließe ggf. dieses Angebot zuerst.', 'info', 3500);
+}
+
 function onQuoteCustomerChange(value) {
   const cid = value || document.getElementById('qc_customer_value')?.value || '';
   const cache = window._quoteCustomerCache || {};
@@ -7151,6 +7340,22 @@ function onQuoteCustomerChange(value) {
       applyDefaultTemplate('description', 'Einleitung');
       applyDefaultTemplate('notes', 'Schlusstext');
     }, 50);
+    // 4) Adressen: bei Kundenwechsel auf Hauptadressen des neuen Kunden zurücksetzen
+    const addresses = cache.addresses || [];
+    const dlvEl = document.getElementById('qc_delivery_address_id');
+    const invEl = document.getElementById('qc_invoice_address_id');
+    if (dlvEl) dlvEl.value = findPrimaryAddressId(addresses, cid, 'delivery');
+    if (invEl) invEl.value = findPrimaryAddressId(addresses, cid, 'billing');
+    refreshQuoteAddressButton('delivery');
+    refreshQuoteAddressButton('billing');
+  } else {
+    // Kein Kunde → Adressen leeren
+    const dlvEl = document.getElementById('qc_delivery_address_id');
+    const invEl = document.getElementById('qc_invoice_address_id');
+    if (dlvEl) dlvEl.value = '';
+    if (invEl) invEl.value = '';
+    refreshQuoteAddressButton('delivery');
+    refreshQuoteAddressButton('billing');
   }
 }
 
@@ -7503,14 +7708,24 @@ function renderQuotePdfHtml(ctx, items, introRaw, closingRaw) {
     .pdf-empty { color:#94A3B8; font-style:italic; font-size:10pt; }
     .pdf-discount { color:#B45309; font-size:9pt; }
   `;
+  const inv = ctx.invoiceAddress || {};
+  const dlv = ctx.deliveryAddress || {};
   const recipientLines = [
     cu.name1,
     cu.name2,
     (co.first_name || co.last_name) ? [co.first_name, co.last_name].filter(Boolean).join(' ') : null,
-    cu.street,
-    [cu.zip, cu.city].filter(Boolean).join(' '),
-    cu.country
+    inv.recipient || null,
+    inv.street || cu.street,
+    [inv.zip || cu.zip, inv.city || cu.city].filter(Boolean).join(' '),
+    inv.country || cu.country
   ].filter(Boolean);
+  const showDeliveryBlock = dlv && !addressesEqual(dlv, inv) && (dlv.street || dlv.city);
+  const deliveryLines = showDeliveryBlock ? [
+    dlv.recipient || null,
+    dlv.street,
+    [dlv.zip, dlv.city].filter(Boolean).join(' '),
+    dlv.country
+  ].filter(Boolean) : [];
   return `
     <style>${css}</style>
     <div class="pdf-root">
@@ -7521,6 +7736,7 @@ function renderQuotePdfHtml(ctx, items, introRaw, closingRaw) {
       <div class="pdf-cols">
         <div class="pdf-recipient">
           ${recipientLines.length ? recipientLines.map(l => escapeHtml(l)).join('<br>') : '<span class="pdf-empty">— Empfänger —</span>'}
+          ${showDeliveryBlock ? `<div style="margin-top:10px;padding-top:6px;border-top:1px solid #E2E8F0;font-size:9pt;"><strong>Lieferadresse:</strong><br>${deliveryLines.map(l => escapeHtml(l)).join('<br>')}</div>` : ''}
         </div>
         <div class="pdf-meta">
           <div class="pdf-meta-row"><span class="l">Angebots-Nr.:</span><span class="v">${escapeHtml(q.quote_no || '–')}</span></div>
@@ -7859,7 +8075,7 @@ async function _silentSaveQuoteHeader() {
   if (!form) return null;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id','delivery_address_id','invoice_address_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
@@ -8200,7 +8416,7 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id','layout_offsets'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id','layout_offsets','delivery_address_id','invoice_address_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   fields.force_closing_new_page = fd.get('force_closing_new_page') === 'on';
@@ -9052,6 +9268,277 @@ async function refreshEntityContactsSection(entity, entityId) {
     const all = await readData('Contact');
     const contacts = all.filter(c => (c.fields[linkField] || []).includes(entityId));
     wrap.innerHTML = renderEntityContacts(entity, entityId, contacts);
+    if (window.lucide) lucide.createIcons();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* ============================================================
+   STAMMDATEN: ADRESSEN (Liefer- und Rechnungsadressen)
+   Address.customer_id = String (Customer-Record-ID)
+   Address.kind        = 'delivery' | 'billing'
+   Address.is_primary  = Boolean (eine Hauptadresse pro Kind & Kunde)
+   ============================================================ */
+function addressKindLabel(kind) {
+  return kind === 'billing' ? 'Rechnungsadresse' : 'Lieferadresse';
+}
+function addressKindLabelPlural(kind) {
+  return kind === 'billing' ? 'Rechnungsadressen' : 'Lieferadressen';
+}
+function addressKindIcon(kind) {
+  return kind === 'billing' ? 'receipt' : 'truck';
+}
+
+// Sucht die Hauptadresse eines Kunden für einen bestimmten Typ. Liefert Address-Record-ID oder ''.
+function findPrimaryAddressId(addresses, customerId, kind) {
+  if (!customerId || !Array.isArray(addresses)) return '';
+  const peers = addresses.filter(a => (a.fields.customer_id || '') === customerId && (a.fields.kind || '') === kind);
+  if (peers.length === 0) return '';
+  const primary = peers.find(a => a.fields.is_primary);
+  if (primary) return primary.id;
+  if (peers.length === 1) return peers[0].id;
+  return '';
+}
+
+// Auflösung einer Adresse für ein Dokument. Reihenfolge:
+// 1. Wenn addressId gesetzt und vorhanden → diese
+// 2. Sonst: Hauptadresse des Kunden vom Typ kind
+// 3. Sonst: Customer-Basis-Adresse (street/zip/city/country auf Customer-Record)
+// Liefert Objekt { recipient, street, zip, city, country, name, source }
+function resolveAddress({ customer, addresses, addressId, kind }) {
+  if (addressId && Array.isArray(addresses)) {
+    const hit = addresses.find(a => a.id === addressId);
+    if (hit) {
+      const f = hit.fields || {};
+      return {
+        recipient: f.recipient || '',
+        street: f.street || '',
+        zip: f.zip || '',
+        city: f.city || '',
+        country: f.country || '',
+        name: f.name || '',
+        source: 'override',
+        id: hit.id,
+      };
+    }
+  }
+  if (customer && Array.isArray(addresses)) {
+    const primaryId = findPrimaryAddressId(addresses, customer.id || customer._id, kind);
+    if (primaryId) {
+      const hit = addresses.find(a => a.id === primaryId);
+      if (hit) {
+        const f = hit.fields || {};
+        return {
+          recipient: f.recipient || '',
+          street: f.street || '',
+          zip: f.zip || '',
+          city: f.city || '',
+          country: f.country || '',
+          name: f.name || '',
+          source: 'primary',
+          id: hit.id,
+        };
+      }
+    }
+  }
+  // Fallback: Customer-Basis-Adresse
+  const cf = (customer && customer.fields) || customer || {};
+  return {
+    recipient: '',
+    street: cf.street || '',
+    zip: cf.zip || '',
+    city: cf.city || '',
+    country: cf.country || '',
+    name: '',
+    source: 'customer_base',
+    id: '',
+  };
+}
+
+// Liefert ein kurzes Label für die Adress-Anzeige (Stadt + ggf. Name).
+function addressShortLabel(addr) {
+  if (!addr) return '–';
+  const parts = [];
+  if (addr.name) parts.push(addr.name);
+  if (addr.city) parts.push(addr.city);
+  return parts.length ? parts.join(' · ') : (addr.street || addr.zip || '–');
+}
+
+function renderEntityAddresses(customerId, addresses, kind) {
+  if (!customerId) {
+    return `<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Speichere zuerst den Kunden — danach kannst du ${escapeHtml(addressKindLabelPlural(kind))} hinzufügen.</p>`;
+  }
+  const peers = addresses.filter(a => (a.fields.customer_id || '') === customerId && (a.fields.kind || '') === kind);
+  const sorted = [...peers].sort((a, b) => {
+    const ap = a.fields.is_primary ? 0 : 1;
+    const bp = b.fields.is_primary ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    return (a.fields.city || '').localeCompare(b.fields.city || '', 'de');
+  });
+  const list = sorted.length === 0
+    ? `<p class="text-xs text-ink-500 italic px-3 py-2">Noch keine ${escapeHtml(addressKindLabelPlural(kind))}.</p>`
+    : '<div class="space-y-2">' + sorted.map(a => `<div data-address-row="${a.id}">${addressRow(customerId, a, kind)}</div>`).join('') + '</div>';
+  return `
+    ${list}
+    <div id="addressInlineFormWrap_${kind}" class="mt-2"></div>
+    <button id="addAddressBtn_${kind}" type="button" onclick="showAddressInlineForm('${customerId}','','${kind}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+      <i data-lucide="plus" class="w-4 h-4"></i> ${escapeHtml(addressKindLabel(kind))} hinzufügen
+    </button>
+  `;
+}
+
+function addressRow(customerId, addrRec, kind) {
+  const f = addrRec.fields || {};
+  const cityLine = [f.zip, f.city].filter(Boolean).join(' ');
+  const summary = [f.recipient, f.street, cityLine, f.country].filter(Boolean).join(' · ');
+  return `
+    <div class="flex items-center justify-between p-3 bg-ink-50 rounded-lg border border-ink-100">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          ${f.is_primary ? '<i data-lucide="star" class="w-3.5 h-3.5 text-amber-500" style="fill:currentColor"></i>' : ''}
+          <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(f.name || addressKindLabel(kind))}</p>
+        </div>
+        ${summary ? `<p class="text-xs text-ink-500 mt-0.5 truncate">${escapeHtml(summary)}</p>` : ''}
+      </div>
+      <div class="flex gap-1 shrink-0 ml-2">
+        <button type="button" onclick="showAddressInlineForm('${customerId}','${addrRec.id}','${kind}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
+          <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+        </button>
+        <button type="button" onclick="deleteAddressInline('${customerId}','${addrRec.id}','${kind}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
+          <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+async function showAddressInlineForm(customerId, addressId, kind) {
+  if (document.querySelector(`#addressInlineFormWrap_${kind} [data-address-form]`)) return;
+  let f = {};
+  let othersExist = false;
+  try {
+    const all = await readData('Address');
+    if (addressId) f = all.find(r => r.id === addressId)?.fields || {};
+    const peers = all.filter(a => (a.fields.customer_id || '') === customerId && (a.fields.kind || '') === kind && a.id !== addressId);
+    othersExist = peers.length > 0;
+    if (!addressId && !peers.some(a => a.fields.is_primary)) f.is_primary = true;
+  } catch (e) {}
+  const fid = 'aif_' + kind + '_' + (addressId || 'new');
+
+  if (addressId) {
+    const row = document.querySelector(`[data-address-row="${addressId}"]`);
+    if (row) row.classList.add('hidden');
+  }
+  document.getElementById(`addAddressBtn_${kind}`)?.classList.add('hidden');
+
+  const wrap = document.getElementById(`addressInlineFormWrap_${kind}`);
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div data-address-form class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-4 space-y-3">
+      <p class="text-sm font-semibold text-brand-700">${addressId ? 'Adresse bearbeiten' : 'Neue ' + escapeHtml(addressKindLabel(kind))}</p>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Bezeichnung (optional)</label>
+        <input id="${fid}_name" value="${escapeHtml(f.name || '')}" placeholder="z.B. Zentrallager, Buchhaltung" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Empfänger / Abteilung (optional)</label>
+        <input id="${fid}_recipient" value="${escapeHtml(f.recipient || '')}" placeholder="z.B. z.Hd. Buchhaltung" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Straße + Nr.</label>
+        <input id="${fid}_street" value="${escapeHtml(f.street || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">PLZ</label>
+          <input id="${fid}_zip" value="${escapeHtml(f.zip || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-xs font-medium text-ink-700 mb-1">Ort</label>
+          <input id="${fid}_city" value="${escapeHtml(f.city || '')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Land</label>
+        <input id="${fid}_country" value="${escapeHtml(f.country || 'Deutschland')}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+      <label class="flex items-center gap-2 pt-1">
+        <input type="checkbox" id="${fid}_is_primary" ${f.is_primary ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
+        <span class="text-sm">Haupt-${escapeHtml(addressKindLabel(kind))} ${othersExist ? '<span class="text-xs text-ink-500">(ersetzt die bisherige)</span>' : ''}</span>
+      </label>
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" onclick="cancelAddressInline('${customerId}','${addressId || ''}','${kind}')" class="px-3 py-1.5 text-sm rounded-lg border border-ink-200 bg-white hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="saveAddressInline('${customerId}','${addressId || ''}','${kind}')" class="px-3 py-1.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById(fid + '_street')?.focus(), 50);
+}
+
+function cancelAddressInline(customerId, addressId, kind) {
+  const wrap = document.getElementById(`addressInlineFormWrap_${kind}`);
+  if (wrap) wrap.innerHTML = '';
+  document.getElementById(`addAddressBtn_${kind}`)?.classList.remove('hidden');
+  if (addressId) {
+    const row = document.querySelector(`[data-address-row="${addressId}"]`);
+    if (row) row.classList.remove('hidden');
+  }
+}
+
+async function saveAddressInline(customerId, addressId, kind) {
+  const fid = 'aif_' + kind + '_' + (addressId || 'new');
+  const $v = id => (document.getElementById(fid + '_' + id)?.value || '').trim();
+  const street = $v('street');
+  const city = $v('city');
+  if (!street && !city) return toast('Mindestens Straße oder Ort eingeben', 'error');
+  const fields = {
+    name:       $v('name'),
+    recipient:  $v('recipient'),
+    street:     street,
+    zip:        $v('zip'),
+    city:       city,
+    country:    $v('country') || 'Deutschland',
+    is_primary: document.getElementById(fid + '_is_primary')?.checked || false,
+    kind:       kind,
+  };
+  if (!addressId) fields.customer_id = customerId;
+
+  try {
+    if (fields.is_primary) {
+      const all = await readData('Address');
+      const others = all.filter(a =>
+        (a.fields.customer_id || '') === customerId &&
+        (a.fields.kind || '') === kind &&
+        a.fields.is_primary &&
+        a.id !== addressId
+      );
+      for (const o of others) await updateData('Address', o.id, { is_primary: false });
+    }
+    if (addressId) await updateData('Address', addressId, fields);
+    else           await writeData('Address', fields);
+    const wrap = document.getElementById(`addressInlineFormWrap_${kind}`);
+    if (wrap) wrap.innerHTML = '';
+    document.getElementById(`addAddressBtn_${kind}`)?.classList.remove('hidden');
+    await refreshEntityAddressesSection(customerId, kind);
+    toast('Gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteAddressInline(customerId, addressId, kind) {
+  if (!confirm('Diese Adresse wirklich löschen?')) return;
+  try {
+    await deleteData('Address', addressId);
+    await refreshEntityAddressesSection(customerId, kind);
+    toast('Gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function refreshEntityAddressesSection(customerId, kind) {
+  const wrap = document.getElementById(`entityAddressesWrap_${kind}`);
+  if (!wrap) return;
+  try {
+    const all = await readData('Address');
+    wrap.innerHTML = renderEntityAddresses(customerId, all, kind);
     if (window.lucide) lucide.createIcons();
   } catch (e) { toast(e.message, 'error'); }
 }
