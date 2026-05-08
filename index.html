@@ -486,7 +486,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.81';
+const APP_VERSION = 'v2.82';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6914,7 +6914,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
                     : '');
               const descCell =
                 `<div class="font-bold quote-bezeichnung" style="${bezeichnungInlineStyle}">${titleHtml || '<span class="text-ink-400 italic">— Bezeichnung —</span>'}</div>` +
-                (manNo ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic text-ink-600 leading-snug">${escapeHtml(manNo)}</div>` : '') +
+                (manNo ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic font-normal text-ink-600 leading-snug mt-2">${escapeHtml(manNo)}</div>` : '') +
                 bodyBlock;
               return `<tr class="border-b border-ink-100 align-top">
                 <td class="px-1 py-1.5">${escapeHtml(String(f.pos || ''))}</td>
