@@ -471,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.75';
+const APP_VERSION = 'v2.76';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4580,6 +4580,16 @@ function _matchContactByHint(hint, contacts, customerId) {
   return '';
 }
 
+async function toggleQuoteArchive(id, archive) {
+  const action = archive ? 'archivieren' : 'wiederherstellen';
+  if (!confirm(`Angebot ${action}?`)) return;
+  try {
+    await updateData('Quote', id, { status: archive ? 'archiviert' : 'Entwurf' });
+    toast(archive ? 'Archiviert' : 'Wiederhergestellt', 'success');
+    if (typeof renderQuotes === 'function') renderQuotes();
+  } catch (e) { toast('Fehler: ' + e.message, 'error'); }
+}
+
 async function nextQuoteNo(companyId) {
   const all = await readData('Quote');
   const inCo = all.filter(q => (q.fields.company_id || []).includes(companyId));
@@ -4984,7 +4994,7 @@ async function inqWizCreateQuote() {
 /* ============================================================
    VERKAUF: ANGEBOTE (Quote + QuoteItem)
    ============================================================ */
-const _quoteListState = { search: '', status: 'alle', viewMode: 'standard' };
+const _quoteListState = { search: '', status: 'alle', viewMode: 'standard', showArchived: false };
 function setQuoteViewMode(mode) { _quoteListState.viewMode = mode; renderQuotes(); }
 let _quoteSearchTimer = null;
 
@@ -5118,6 +5128,11 @@ async function renderQuotes() {
   const custMap = {}; allCustomers.forEach(c => { custMap[c.id] = c.fields; });
 
   let list = all.filter(q => (q.fields.company_id || []).includes(cur.id));
+  // Standardmäßig archivierte Angebote ausblenden (außer User aktiviert "auch archivierte"
+  // oder filtert explizit nach Status = archiviert)
+  if (!_quoteListState.showArchived && _quoteListState.status !== 'archiviert') {
+    list = list.filter(q => (q.fields.status || 'Entwurf') !== 'archiviert');
+  }
   if (_quoteListState.status !== 'alle') {
     list = list.filter(q => (q.fields.status || 'Entwurf') === _quoteListState.status);
   }
@@ -5166,6 +5181,10 @@ async function renderQuotes() {
             <option value="abgelaufen"  ${_quoteListState.status==='abgelaufen'?'selected':''}>abgelaufen</option>
             <option value="archiviert"  ${_quoteListState.status==='archiviert'?'selected':''}>archiviert</option>
           </select>
+          <label class="flex items-center gap-1.5 text-xs text-ink-700 cursor-pointer select-none">
+            <input type="checkbox" ${_quoteListState.showArchived?'checked':''} onchange="_quoteListState.showArchived=this.checked;renderQuotes()" class="w-4 h-4 rounded border-ink-300">
+            <span>auch archivierte</span>
+          </label>
           <div class="ml-auto">${viewModeToggle(_quoteListState.viewMode, 'setQuoteViewMode')}</div>
         </div>
         ${(() => {
@@ -5178,7 +5197,7 @@ async function renderQuotes() {
                   <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500"><tr>
                     <th class="px-3 py-2 text-left">Nr.</th><th class="px-3 py-2 text-left">Datum</th>
                     <th class="px-3 py-2 text-left">Kunde</th><th class="px-3 py-2 text-left">Status</th>
-                    <th class="px-3 py-2 text-right">Brutto</th>
+                    <th class="px-3 py-2 text-right">Brutto</th><th class="px-3 py-2 text-right">⚙</th>
                   </tr></thead>
                   <tbody class="divide-y divide-ink-100">${list.map(rec => quoteRowTabelle(rec, custMap)).join('')}</tbody>
                 </table>
@@ -5206,13 +5225,17 @@ function quoteRowKompakt(rec, custMap) {
   const cid = (f.customer_id || [])[0];
   const cust = custMap?.[cid];
   const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== '' ? formatPrice(f.total_gross) + ' €' : '';
+  const archived = (f.status || 'Entwurf') === 'archiviert';
   return `
-    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer" onclick="openQuoteModal('${rec.id}')">
+    <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer ${archived ? 'opacity-60' : ''}" onclick="openQuoteModal('${rec.id}')">
       <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.quote_no || '–')}</span>
       <span class="font-medium text-ink-900 truncate flex-1 min-w-0">${escapeHtml(cust?.name1 || '— ohne Kunde —')}</span>
       <span class="text-xs hidden sm:inline">${quoteStatusBadge(f.status || 'Entwurf')}</span>
       <span class="text-xs text-ink-500 hidden md:inline w-24">${escapeHtml(f.date || '')}</span>
       <span class="font-mono text-sm text-ink-900 tabular-nums w-24 text-right">${escapeHtml(total)}</span>
+      <button type="button" onclick="event.stopPropagation();toggleQuoteArchive('${rec.id}', ${!archived})" class="p-1 text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded shrink-0" title="${archived ? 'Wiederherstellen' : 'Archivieren'}">
+        <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-3.5 h-3.5"></i>
+      </button>
     </div>
   `;
 }
@@ -5222,13 +5245,19 @@ function quoteRowTabelle(rec, custMap) {
   const cid = (f.customer_id || [])[0];
   const cust = custMap?.[cid];
   const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== '' ? formatPrice(f.total_gross) + ' €' : '';
+  const archived = (f.status || 'Entwurf') === 'archiviert';
   return `
-    <tr class="hover:bg-ink-50 cursor-pointer" onclick="openQuoteModal('${rec.id}')">
+    <tr class="hover:bg-ink-50 cursor-pointer ${archived ? 'opacity-60' : ''}" onclick="openQuoteModal('${rec.id}')">
       <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.quote_no || '–')}</td>
       <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(f.date || '')}</td>
       <td class="px-3 py-2 font-medium text-ink-900">${escapeHtml(cust?.name1 || '— ohne Kunde —')}${cust?.customer_no ? ` <span class="text-ink-500 text-xs font-mono">${escapeHtml(cust.customer_no)}</span>` : ''}</td>
       <td class="px-3 py-2">${quoteStatusBadge(f.status || 'Entwurf')}</td>
       <td class="px-3 py-2 font-mono text-ink-900 tabular-nums text-right whitespace-nowrap">${escapeHtml(total)}</td>
+      <td class="px-3 py-2 text-right" onclick="event.stopPropagation()">
+        <button type="button" onclick="toggleQuoteArchive('${rec.id}', ${!archived})" class="p-1 text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded" title="${archived ? 'Wiederherstellen' : 'Archivieren'}">
+          <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-3.5 h-3.5"></i>
+        </button>
+      </td>
     </tr>
   `;
 }
@@ -5245,9 +5274,10 @@ function quoteRow(rec, custMap) {
   const lockedBadge = lockedByOther
     ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Wird gerade von ${escapeHtml(userLabel(lockInfo.userId))} bearbeitet"><i data-lucide="lock" class="w-3 h-3"></i> in Bearbeitung</span>`
     : '';
+  const archived = (f.status || 'Entwurf') === 'archiviert';
   const primary = cust?.name1 || '— Kunde nicht zugeordnet —';
   return `
-    <div class="flex items-start justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openQuoteModal('${rec.id}')">
+    <div class="flex items-start justify-between p-4 hover:bg-ink-50 transition cursor-pointer ${archived ? 'opacity-60' : ''}" onclick="openQuoteModal('${rec.id}')">
       <div class="min-w-0 flex-1">
         <div class="flex items-baseline gap-2 flex-wrap">
           <span class="text-xs font-mono text-ink-500">${escapeHtml(f.quote_no || '–')}</span>
@@ -5259,8 +5289,11 @@ function quoteRow(rec, custMap) {
           ${cust?.customer_no ? escapeHtml(cust.customer_no) + ' · ' : ''}${f.date ? escapeHtml(f.date) : ''}${f.title ? ' · ' + escapeHtml(f.title) : ''}
         </p>
       </div>
-      <div class="flex items-center gap-2 shrink-0 ml-2">
+      <div class="flex items-center gap-2 shrink-0 ml-2" onclick="event.stopPropagation()">
         ${total ? `<span class="font-mono text-sm text-ink-900 tabular-nums">${escapeHtml(total)}</span>` : ''}
+        <button type="button" onclick="toggleQuoteArchive('${rec.id}', ${!archived})" class="p-1.5 text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded" title="${archived ? 'Wiederherstellen' : 'Archivieren'}">
+          <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i>
+        </button>
         <i data-lucide="chevron-right" class="w-4 h-4 text-ink-300"></i>
       </div>
     </div>
@@ -6289,6 +6322,7 @@ async function openQuoteModal(id) {
 
       <div class="grid grid-cols-2 sm:flex sm:justify-end gap-2 sm:flex-wrap mt-4">
         <button type="button" onclick="closeModal()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 col-span-2 sm:col-span-1">Abbrechen</button>
+        ${id ? `<button type="button" onclick="toggleQuoteArchive('${id}', ${(f.status || 'Entwurf') !== 'archiviert'});closeModal();" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center justify-center gap-1.5" title="${(f.status || 'Entwurf') === 'archiviert' ? 'Wiederherstellen' : 'Archivieren'}"><i data-lucide="${(f.status || 'Entwurf') === 'archiviert' ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i> ${(f.status || 'Entwurf') === 'archiviert' ? 'Wiederherstellen' : 'Archivieren'}</button>` : ''}
         <button type="button" onclick="exportQuoteAsPdf()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center justify-center gap-1.5"><i data-lucide="file-down" class="w-4 h-4"></i> PDF</button>
         <button type="button" onclick="emailQuote()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center justify-center gap-1.5"><i data-lucide="mail" class="w-4 h-4"></i> E-Mail</button>
         <button type="button" onclick="saveQuote(event, '${id || ''}', true)" class="px-3 py-2.5 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
