@@ -362,9 +362,8 @@
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="angebote">
               <i data-lucide="file-text" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Angebote</span>
             </button>
-            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="auftraege">
               <i data-lucide="file-check-2" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Aufträge</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.3</span>
             </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
               <i data-lucide="send" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Lieferscheine</span>
@@ -518,7 +517,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.88';
+const APP_VERSION = 'v2.89';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -668,6 +667,7 @@ function setCurrentCompany(companyId) {
   if (_currentRoute === 'kontakte')    renderContactsList();
   if (_currentRoute === 'anfragen')    renderInquiries();
   if (_currentRoute === 'angebote')    renderQuotes();
+  if (_currentRoute === 'auftraege')   renderOrders();
 }
 
 function renderMandantenSwitcher() {
@@ -1281,6 +1281,7 @@ function dispatchRoute(route) {
     case 'kontakte':        renderContactsList(); break;
     case 'anfragen':        renderInquiries(); break;
     case 'angebote':        renderQuotes(); break;
+    case 'auftraege':       renderOrders(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
     case 'admin-templates': renderAdminTextemplates(); break;
@@ -5244,11 +5245,19 @@ async function renderQuotes() {
   }
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Angebote…</p>';
 
-  let all = [], allCustomers = [];
+  let all = [], allCustomers = [], allOrders = [];
   try {
-    [all, allCustomers] = await Promise.all([readData('Quote'), readData('Customer')]);
+    [all, allCustomers, allOrders] = await Promise.all([readData('Quote'), readData('Customer'), readData('Order').catch(() => [])]);
   } catch (e) { toast(e.message, 'error'); }
   const custMap = {}; allCustomers.forEach(c => { custMap[c.id] = c.fields; });
+  // Map: quoteId → Anzahl verknüpfter, nicht-archivierter Aufträge
+  const orderCountByQuote = {};
+  allOrders.forEach(o => {
+    const qid = (o.fields.quote_id || [])[0] || o.fields.quote_id;
+    if (!qid) return;
+    if ((o.fields.status || 'Entwurf') === 'archiviert') return;
+    orderCountByQuote[qid] = (orderCountByQuote[qid] || 0) + 1;
+  });
 
   let list = all.filter(q => (q.fields.company_id || []).includes(cur.id));
   // Standardmäßig archivierte Angebote ausblenden (außer User aktiviert "auch archivierte"
@@ -5332,14 +5341,14 @@ async function renderQuotes() {
                     <th class="px-3 py-2 text-left">Kunde</th><th class="px-3 py-2 text-left">Status</th>
                     <th class="px-3 py-2 text-right">Brutto</th><th class="px-3 py-2 text-right">⚙</th>
                   </tr></thead>
-                  <tbody class="divide-y divide-ink-100">${list.map(rec => quoteRowTabelle(rec, custMap)).join('')}</tbody>
+                  <tbody class="divide-y divide-ink-100">${list.map(rec => quoteRowTabelle(rec, custMap, orderCountByQuote[rec.id] || 0)).join('')}</tbody>
                 </table>
               </div>`;
           }
           if (vm === 'kompakt') {
-            return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRowKompakt(rec, custMap)).join('') + '</div>';
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRowKompakt(rec, custMap, orderCountByQuote[rec.id] || 0)).join('') + '</div>';
           }
-          return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRow(rec, custMap)).join('') + '</div>';
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRow(rec, custMap, orderCountByQuote[rec.id] || 0)).join('') + '</div>';
         })()}
       </div>
     </div>
@@ -5354,19 +5363,26 @@ function onQuoteSearchInput(value) {
   _quoteSearchTimer = setTimeout(() => _renderWithSearchFocus(renderQuotes), 200);
 }
 
-function quoteRowKompakt(rec, custMap) {
+function quoteRowKompakt(rec, custMap, orderCount = 0) {
   const f = rec.fields || {};
   const cid = (f.customer_id || [])[0];
   const cust = custMap?.[cid];
   const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== '' ? formatPrice(f.total_gross) + ' €' : '';
   const archived = (f.status || 'Entwurf') === 'archiviert';
+  const orderBadge = orderCount > 0
+    ? `<span class="text-[10px] uppercase tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium" title="${orderCount} Auftrag${orderCount===1?'':'e'} verlinkt">${orderCount} AB</span>`
+    : '';
   return `
     <div class="flex items-center gap-3 px-4 py-2 hover:bg-ink-50 cursor-pointer ${archived ? 'opacity-60' : ''}" onclick="openQuoteModal('${rec.id}')">
       <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.quote_no || '–')}</span>
       <span class="font-medium text-ink-900 truncate flex-1 min-w-0">${escapeHtml(cust?.name1 || '— ohne Kunde —')}</span>
+      ${orderBadge}
       <span class="text-xs hidden sm:inline">${quoteStatusBadge(f.status || 'Entwurf')}</span>
       <span class="text-xs text-ink-500 hidden md:inline w-24">${escapeHtml(f.date || '')}</span>
       <span class="font-mono text-sm text-ink-900 tabular-nums w-24 text-right">${escapeHtml(total)}</span>
+      <button type="button" onclick="event.stopPropagation();createOrderFromQuote('${rec.id}')" class="p-1 text-ink-400 hover:text-blue-700 hover:bg-blue-50 rounded shrink-0" title="Auftrag aus diesem Angebot erstellen">
+        <i data-lucide="file-check-2" class="w-3.5 h-3.5"></i>
+      </button>
       <button type="button" onclick="event.stopPropagation();toggleQuoteArchive('${rec.id}', ${!archived})" class="p-1 text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded shrink-0" title="${archived ? 'Wiederherstellen' : 'Archivieren'}">
         <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-3.5 h-3.5"></i>
       </button>
@@ -5374,20 +5390,26 @@ function quoteRowKompakt(rec, custMap) {
   `;
 }
 
-function quoteRowTabelle(rec, custMap) {
+function quoteRowTabelle(rec, custMap, orderCount = 0) {
   const f = rec.fields || {};
   const cid = (f.customer_id || [])[0];
   const cust = custMap?.[cid];
   const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== '' ? formatPrice(f.total_gross) + ' €' : '';
   const archived = (f.status || 'Entwurf') === 'archiviert';
+  const orderBadge = orderCount > 0
+    ? ` <span class="text-[10px] uppercase tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium ml-1" title="${orderCount} Auftrag${orderCount===1?'':'e'} verlinkt">${orderCount} AB</span>`
+    : '';
   return `
     <tr class="hover:bg-ink-50 cursor-pointer ${archived ? 'opacity-60' : ''}" onclick="openQuoteModal('${rec.id}')">
-      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.quote_no || '–')}</td>
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.quote_no || '–')}${orderBadge}</td>
       <td class="px-3 py-2 text-ink-700 whitespace-nowrap">${escapeHtml(f.date || '')}</td>
       <td class="px-3 py-2 font-medium text-ink-900">${escapeHtml(cust?.name1 || '— ohne Kunde —')}${cust?.customer_no ? ` <span class="text-ink-500 text-xs font-mono">${escapeHtml(cust.customer_no)}</span>` : ''}</td>
       <td class="px-3 py-2">${quoteStatusBadge(f.status || 'Entwurf')}</td>
       <td class="px-3 py-2 font-mono text-ink-900 tabular-nums text-right whitespace-nowrap">${escapeHtml(total)}</td>
-      <td class="px-3 py-2 text-right" onclick="event.stopPropagation()">
+      <td class="px-3 py-2 text-right whitespace-nowrap" onclick="event.stopPropagation()">
+        <button type="button" onclick="createOrderFromQuote('${rec.id}')" class="p-1 text-ink-400 hover:text-blue-700 hover:bg-blue-50 rounded" title="Auftrag aus Angebot erstellen">
+          <i data-lucide="file-check-2" class="w-3.5 h-3.5"></i>
+        </button>
         <button type="button" onclick="toggleQuoteArchive('${rec.id}', ${!archived})" class="p-1 text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded" title="${archived ? 'Wiederherstellen' : 'Archivieren'}">
           <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-3.5 h-3.5"></i>
         </button>
@@ -5396,7 +5418,7 @@ function quoteRowTabelle(rec, custMap) {
   `;
 }
 
-function quoteRow(rec, custMap) {
+function quoteRow(rec, custMap, orderCount = 0) {
   const f = rec.fields || {};
   const cid = (f.customer_id || [])[0];
   const cust = custMap?.[cid];
@@ -5408,6 +5430,9 @@ function quoteRow(rec, custMap) {
   const lockedBadge = lockedByOther
     ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Wird gerade von ${escapeHtml(userLabel(lockInfo.userId))} bearbeitet"><i data-lucide="lock" class="w-3 h-3"></i> in Bearbeitung</span>`
     : '';
+  const orderBadge = orderCount > 0
+    ? `<span class="text-[10px] uppercase tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium inline-flex items-center gap-1" title="${orderCount} Auftrag${orderCount===1?'':'e'} verlinkt"><i data-lucide="file-check-2" class="w-3 h-3"></i> ${orderCount} AB</span>`
+    : '';
   const archived = (f.status || 'Entwurf') === 'archiviert';
   const primary = cust?.name1 || '— Kunde nicht zugeordnet —';
   return `
@@ -5416,6 +5441,7 @@ function quoteRow(rec, custMap) {
         <div class="flex items-baseline gap-2 flex-wrap">
           <span class="text-xs font-mono text-ink-500">${escapeHtml(f.quote_no || '–')}</span>
           ${quoteStatusBadge(f.status || 'Entwurf')}
+          ${orderBadge}
           ${lockedBadge}
         </div>
         <p class="font-medium ${cust ? 'text-ink-900' : 'text-ink-400 italic'} truncate mt-0.5">${escapeHtml(primary)}</p>
@@ -5425,6 +5451,9 @@ function quoteRow(rec, custMap) {
       </div>
       <div class="flex items-center gap-2 shrink-0 ml-2" onclick="event.stopPropagation()">
         ${total ? `<span class="font-mono text-sm text-ink-900 tabular-nums">${escapeHtml(total)}</span>` : ''}
+        <button type="button" onclick="createOrderFromQuote('${rec.id}')" class="p-1.5 text-ink-400 hover:text-blue-700 hover:bg-blue-50 rounded" title="Auftrag aus Angebot erstellen">
+          <i data-lucide="file-check-2" class="w-4 h-4"></i>
+        </button>
         <button type="button" onclick="toggleQuoteArchive('${rec.id}', ${!archived})" class="p-1.5 text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded" title="${archived ? 'Wiederherstellen' : 'Archivieren'}">
           <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i>
         </button>
@@ -6785,9 +6814,14 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   const cu = ctx.customer || {};
   const co = ctx.contact  || {};
   const q  = ctx.quote    || {};
+  // Doc-Typ steuert Titel / Labels (Angebot vs. Auftragsbestätigung)
+  const isOrder = ctx.docType === 'order';
+  const docTitle    = isOrder ? 'Auftragsbestätigung' : 'Angebot';
+  const docNoLabel  = isOrder ? 'AB-Nr.:' : 'Angebots-Nr.:';
+  const docValidLabel = isOrder ? 'Bestätigt am:' : 'Gültigkeit:';
   const sums = calcQuoteSums(items);
-  const intro   = substituteVariables(introRaw   || '', 'Angebot', ctx);
-  const closing = substituteVariables(closingRaw || '', 'Angebot', ctx);
+  const intro   = substituteVariables(introRaw   || '', isOrder ? 'Auftrag' : 'Angebot', ctx);
+  const closing = substituteVariables(closingRaw || '', isOrder ? 'Auftrag' : 'Angebot', ctx);
   articleMap = articleMap || {};
   const footer = buildQuoteFooterData(c);
   // Es gibt nur noch das Standard-Layout — vereinfacht (ohne Layout-Variante / Custom-Layouts).
@@ -6891,15 +6925,15 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
         <div>
           <!-- 'Angebot' Titel — in der RECHTEN Spalte, oben, rechtsbündig.
                Aligned mit dem Meta-Block darunter. -->
-          <div data-adjustable="angebot_title" class="quote-doc-title text-ink-900 font-bold tracking-tight leading-none text-right" style="font-size:32px;margin-bottom:14px;${titleInlineStyle}${ofs('angebot_title')}">Angebot</div>
+          <div data-adjustable="angebot_title" class="quote-doc-title text-ink-900 font-bold tracking-tight leading-none text-right" style="font-size:${isOrder ? '24px' : '32px'};margin-bottom:14px;${titleInlineStyle}${ofs('angebot_title')}">${escapeHtml(docTitle)}</div>
 
           <div class="${isK ? 'text-[11px]' : 'text-[10px]'}">
             <!-- Meta-Block rechtsbündig, kompakt: Label + 16px Gap + Wert -->
             <div style="margin-left:auto;width:fit-content;max-width:100%;">
-              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Angebots-Nr.:</span><span>${escapeHtml(q.quote_no || '–')}</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">${docNoLabel}</span><span>${escapeHtml(q.quote_no || '–')}</span></div>
               <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kunden-Nr.:</span><span>${escapeHtml(cu.customer_no || '–')}</span></div>
               <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Datum:</span><span>${escapeHtml(formatDeDate(q.date))}</span></div>
-              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Gültigkeit:</span><span>${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : '30 Tage'}</span></div>
+              <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">${docValidLabel}</span><span>${q.valid_until ? escapeHtml(formatDeDate(q.valid_until)) : (isOrder ? '–' : '30 Tage')}</span></div>
               <div class="${sz.cellPad}" style="height:8px;"></div>
               <div class="${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Kontakt:</span></div>
               <div class="flex justify-between gap-4 ${sz.cellPad}"><span class="text-ink-700 ${sz.fwLabel}">Telefon:</span><span>${escapeHtml(footer.tel)}</span></div>
@@ -9894,6 +9928,1198 @@ async function setupPwaAssets() {
   } catch (e) { /* still */ }
 }
 
+/* ============================================================
+   AUFTRÄGE (Order) — Auftragsbestätigung
+   Verwandt zu Quote/QuoteItem mit eigenen Tabellen Order/OrderItem.
+   Kann via quote_id auf ein Angebot zurückverweisen (1 Angebot → N Aufträge).
+   ============================================================ */
+
+const _orderListState = { search: '', sort: 'date_desc', showArchived: false, viewMode: 'standard' };
+function setOrderViewMode(mode) { _orderListState.viewMode = mode; renderOrders(); }
+let _orderSearchTimer = null;
+
+async function ensureOrderSchema() {
+  await ensureTable('Order', [
+    { name: 'order_no', type: 'singleLineText' }
+  ]).catch(()=>{});
+  await ensureFields('Order', [
+    { name: 'company_id',           type: 'singleLineText' },
+    { name: 'customer_id',          type: 'singleLineText' },
+    { name: 'contact_id',           type: 'singleLineText' },
+    { name: 'quote_id',             type: 'singleLineText' },
+    { name: 'date',                 type: 'date', options: { dateFormat: { name: 'european' } } },
+    { name: 'confirmation_date',    type: 'date', options: { dateFormat: { name: 'european' } } },
+    { name: 'status',               type: 'singleLineText' },
+    { name: 'description',          type: 'multilineText' },
+    { name: 'notes',                type: 'multilineText' },
+    { name: 'order_title',          type: 'singleLineText' },
+    { name: 'payment_terms',        type: 'singleLineText' },
+    { name: 'delivery_terms',       type: 'singleLineText' },
+    { name: 'subtotal_net',         type: 'number',   options: { precision: 2 } },
+    { name: 'vat_total',            type: 'number',   options: { precision: 2 } },
+    { name: 'total_gross',          type: 'number',   options: { precision: 2 } },
+    { name: 'delivery_address_id',  type: 'singleLineText' },
+    { name: 'invoice_address_id',   type: 'singleLineText' },
+    { name: 'force_closing_new_page', type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
+    { name: 'lock_user_id',         type: 'singleLineText' },
+    { name: 'lock_until',           type: 'singleLineText' },
+  ]).catch(()=>{});
+  await ensureTable('OrderItem', [
+    { name: 'label', type: 'singleLineText' }
+  ]).catch(()=>{});
+  await ensureFields('OrderItem', [
+    { name: 'order_id',        type: 'singleLineText' },
+    { name: 'pos',             type: 'number',   options: { precision: 0 } },
+    { name: 'qty',             type: 'number',   options: { precision: 2 } },
+    { name: 'unit',            type: 'singleLineText' },
+    { name: 'unit_price_net',  type: 'number',   options: { precision: 2 } },
+    { name: 'discount_pct',    type: 'number',   options: { precision: 2 } },
+    { name: 'vat_rate',        type: 'number',   options: { precision: 2 } },
+    { name: 'description',     type: 'multilineText' },
+    { name: 'article_id',      type: 'singleLineText' },
+    { name: 'supplier_id',     type: 'singleLineText' },
+    { name: 'purchase_price',  type: 'number',   options: { precision: 2 } },
+    { name: 'line_total_net',  type: 'number',   options: { precision: 2 } },
+  ]).catch(()=>{});
+}
+
+async function nextOrderNo(companyId) {
+  const all = await readData('Order');
+  const inCo = all.filter(o => (o.fields.company_id || []).includes(companyId) || o.fields.company_id === companyId);
+  let max = 1000;
+  inCo.forEach(o => {
+    const m = (o.fields.order_no || '').match(/^AB-(\d+)$/);
+    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
+  });
+  return 'AB-' + (max + 1);
+}
+
+function orderStatusBadge(status) {
+  const map = {
+    'Entwurf':       'bg-ink-100 text-ink-700',
+    'Bestätigt':     'bg-blue-100 text-blue-700',
+    'In Bearbeitung':'bg-amber-100 text-amber-700',
+    'Geliefert':     'bg-emerald-100 text-emerald-700',
+    'Abgerechnet':   'bg-violet-100 text-violet-700',
+    'Storniert':     'bg-red-100 text-red-700',
+    'archiviert':    'bg-ink-200 text-ink-500',
+  };
+  const cls = map[status] || 'bg-ink-100 text-ink-700';
+  return `<span class="text-[10px] uppercase tracking-wider ${cls} px-1.5 py-0.5 rounded font-medium">${escapeHtml(status || 'Entwurf')}</span>`;
+}
+
+async function renderOrders() {
+  setPageTitle('Aufträge');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt. Bitte links eine Firma wählen.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Aufträge…</p>';
+  await ensureOrderSchema();
+
+  let all = [], allCustomers = [], allQuotes = [];
+  try {
+    [all, allCustomers, allQuotes] = await Promise.all([readData('Order'), readData('Customer'), readData('Quote')]);
+  } catch (e) { toast(e.message, 'error'); return; }
+
+  const custMap = {}; allCustomers.forEach(c => { custMap[c.id] = c.fields; });
+  const quoteMap = {}; allQuotes.forEach(q => { quoteMap[q.id] = q.fields; });
+
+  let list = all.filter(o => (o.fields.company_id || []).includes(cur.id) || o.fields.company_id === cur.id);
+  if (!_orderListState.showArchived) list = list.filter(o => (o.fields.status || 'Entwurf') !== 'archiviert');
+
+  const q = _orderListState.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter(o => {
+      const f = o.fields;
+      const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
+      return [f.order_no, f.order_title, f.description, cust.name1, cust.customer_no]
+        .filter(Boolean)
+        .some(v => String(v).toLowerCase().includes(q));
+    });
+  }
+
+  const sortKey = _orderListState.sort;
+  list.sort((a, b) => {
+    if (sortKey === 'order_no') {
+      const av = parseInt((a.fields.order_no || '').replace(/\D/g, ''), 10) || 0;
+      const bv = parseInt((b.fields.order_no || '').replace(/\D/g, ''), 10) || 0;
+      return bv - av;
+    }
+    if (sortKey === 'date_desc') return (b.fields.date || '').localeCompare(a.fields.date || '');
+    if (sortKey === 'date_asc')  return (a.fields.date || '').localeCompare(b.fields.date || '');
+    return 0;
+  });
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-6xl mx-auto bg-white rounded-2xl shadow-card overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-ink-100">
+        <h2 class="text-xl font-bold text-ink-900">Aufträge</h2>
+        <button type="button" onclick="openOrderModal()" class="bg-brand-500 hover:bg-brand-600 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-1.5">
+          <i data-lucide="plus" class="w-4 h-4"></i> Neuer Auftrag
+        </button>
+      </div>
+      <div class="px-4 py-3 border-b border-ink-100 flex items-center gap-3 flex-wrap">
+        <div class="relative flex-1 min-w-[200px]">
+          <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>
+          <input id="orderSearch" type="search" value="${escapeHtml(_orderListState.search)}" placeholder="Suchen…" oninput="onOrderSearchInput(this.value)"
+                 class="w-full pl-9 pr-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <select onchange="_orderListState.sort=this.value;renderOrders()" class="text-sm border border-ink-200 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <option value="date_desc"  ${sortKey==='date_desc'?'selected':''}>Datum ↓</option>
+          <option value="date_asc"   ${sortKey==='date_asc'?'selected':''}>Datum ↑</option>
+          <option value="order_no"   ${sortKey==='order_no'?'selected':''}>AB-Nr.</option>
+        </select>
+        <label class="flex items-center gap-2 text-xs text-ink-700 cursor-pointer select-none">
+          <input type="checkbox" ${_orderListState.showArchived?'checked':''} onchange="_orderListState.showArchived=this.checked;renderOrders()" class="w-4 h-4 rounded border-ink-300">
+          Archivierte zeigen
+        </label>
+        <div class="ml-auto">${viewModeToggle(_orderListState.viewMode, 'setOrderViewMode')}</div>
+      </div>
+      <div>
+        ${(() => {
+          if (list.length === 0) {
+            return `<div class="p-10 text-center text-ink-500 text-sm">${q || _orderListState.showArchived ? 'Keine Treffer.' : 'Noch keine Aufträge. Lege den ersten an mit „+ Neuer Auftrag" oder erstelle einen aus einem Angebot.'}</div>`;
+          }
+          const vm = _orderListState.viewMode;
+          if (vm === 'tabelle') {
+            return `
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead class="bg-ink-50 border-b border-ink-200 text-ink-600 text-xs uppercase tracking-wider">
+                    <tr>
+                      <th class="px-3 py-2 text-left">AB-Nr.</th>
+                      <th class="px-3 py-2 text-left">Datum</th>
+                      <th class="px-3 py-2 text-left">Kunde</th>
+                      <th class="px-3 py-2 text-left">Angebot</th>
+                      <th class="px-3 py-2 text-left">Status</th>
+                      <th class="px-3 py-2 text-right">Gesamt</th>
+                      <th class="px-3 py-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-ink-100">${list.map(rec => orderRowTabelle(rec, custMap, quoteMap)).join('')}</tbody>
+                </table>
+              </div>`;
+          }
+          if (vm === 'kompakt') {
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => orderRowKompakt(rec, custMap, quoteMap)).join('') + '</div>';
+          }
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => orderRow(rec, custMap, quoteMap)).join('') + '</div>';
+        })()}
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function onOrderSearchInput(value) {
+  _orderListState.search = value;
+  clearTimeout(_orderSearchTimer);
+  _orderSearchTimer = setTimeout(() => _renderWithSearchFocus(renderOrders), 200);
+}
+
+function orderRowKompakt(rec, custMap, quoteMap) {
+  const f = rec.fields;
+  const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
+  const quoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
+  return `
+    <button type="button" onclick="openOrderModal('${rec.id}')" class="w-full text-left px-4 py-2.5 hover:bg-ink-50 flex items-center gap-3">
+      <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.order_no || '–')}</span>
+      <span class="text-xs text-ink-500 w-20 shrink-0">${escapeHtml(formatDeDate(f.date))}</span>
+      <span class="font-medium text-ink-900 truncate flex-1">${escapeHtml(cust.name1 || '–')}</span>
+      ${quote.quote_no ? `<span class="text-[10px] text-ink-400 font-mono">aus ${escapeHtml(quote.quote_no)}</span>` : ''}
+      <span class="font-mono text-xs tabular-nums text-ink-700 shrink-0">${formatPrice(f.total_gross || 0)} €</span>
+      ${orderStatusBadge(f.status || 'Entwurf')}
+    </button>
+  `;
+}
+
+function orderRowTabelle(rec, custMap, quoteMap) {
+  const f = rec.fields;
+  const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
+  const quoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
+  return `
+    <tr onclick="openOrderModal('${rec.id}')" class="cursor-pointer hover:bg-ink-50">
+      <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.order_no || '–')}</td>
+      <td class="px-3 py-2 text-xs text-ink-500 whitespace-nowrap">${escapeHtml(formatDeDate(f.date))}</td>
+      <td class="px-3 py-2 font-medium text-ink-900 truncate max-w-[200px]">${escapeHtml(cust.name1 || '–')}</td>
+      <td class="px-3 py-2 text-xs text-ink-500 font-mono">${quote.quote_no ? escapeHtml(quote.quote_no) : '<span class="text-ink-300">—</span>'}</td>
+      <td class="px-3 py-2">${orderStatusBadge(f.status || 'Entwurf')}</td>
+      <td class="px-3 py-2 text-right font-mono text-sm tabular-nums text-ink-900">${formatPrice(f.total_gross || 0)} €</td>
+      <td class="px-3 py-2 text-right">
+        <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 inline"></i>
+      </td>
+    </tr>
+  `;
+}
+
+function orderRow(rec, custMap, quoteMap) {
+  const f = rec.fields;
+  const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
+  const quoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
+  return `
+    <button type="button" onclick="openOrderModal('${rec.id}')" class="w-full text-left px-4 py-3 hover:bg-ink-50">
+      <div class="flex items-baseline justify-between gap-3 mb-0.5">
+        <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+          <span class="text-xs font-mono text-ink-500">${escapeHtml(f.order_no || '–')}</span>
+          <span class="font-semibold text-ink-900 truncate">${escapeHtml(cust.name1 || '— ohne Kunde —')}</span>
+          ${orderStatusBadge(f.status || 'Entwurf')}
+        </div>
+        <span class="font-mono text-sm tabular-nums text-ink-900 shrink-0">${formatPrice(f.total_gross || 0)} €</span>
+      </div>
+      <div class="text-xs text-ink-500 flex items-baseline gap-2 flex-wrap">
+        ${cust.customer_no ? escapeHtml(cust.customer_no) + ' · ' : ''}${f.date ? escapeHtml(formatDeDate(f.date)) : ''}${f.order_title ? ' · ' + escapeHtml(f.order_title) : ''}
+        ${quote.quote_no ? `<span class="text-[10px] uppercase tracking-wider bg-brand-50 text-brand-700 px-1.5 rounded">aus ${escapeHtml(quote.quote_no)}</span>` : ''}
+      </div>
+    </button>
+  `;
+}
+
+/* ---------- Order: Edit-Modal (lean — focus on essentials) ---------- */
+
+async function openOrderModal(id, opts = {}) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  await ensureOrderSchema();
+
+  let f = {}, items = [], allCustomers = [], allContacts = [], allQuotes = [], allAddresses = [], allPaymentTerms = [], allDeliveryTerms = [];
+  try {
+    [allCustomers, allContacts, allQuotes, allAddresses, allPaymentTerms, allDeliveryTerms] = await Promise.all([
+      readData('Customer'), readData('Contact'), readData('Quote'),
+      readData('Address').catch(() => []), readData('PaymentTerm'), readData('DeliveryTerm')
+    ]);
+  } catch (e) { toast(e.message, 'error'); return; }
+
+  if (id) {
+    const all = await readData('Order');
+    const rec = all.find(r => r.id === id);
+    f = rec?.fields || {};
+    const lockRes = await acquireLock('Order', id, rec);
+    if (!lockRes.ok) { toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500); return; }
+    // Items laden
+    try {
+      const allItems = await readData('OrderItem');
+      items = allItems.filter(it => (it.fields.order_id || []).includes(id) || it.fields.order_id === id)
+        .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+    } catch (e) {}
+  } else {
+    f.order_no = await nextOrderNo(cur.id);
+    const today = new Date();
+    f.date = today.toISOString().slice(0, 10);
+    f.confirmation_date = today.toISOString().slice(0, 10);
+    f.status = 'Entwurf';
+    // Wenn aus Angebot erstellt: Vorbefüllung über opts.fromQuote
+    if (opts.fromQuote) {
+      const src = opts.fromQuote;
+      f.quote_id = src.id;
+      f.customer_id = src.customer_id;
+      f.contact_id = src.contact_id;
+      f.delivery_address_id = src.delivery_address_id;
+      f.invoice_address_id  = src.invoice_address_id;
+      f.payment_terms = src.payment_terms;
+      f.delivery_terms = src.delivery_terms;
+      f.order_title = src.quote_title;
+      f.description = src.description;
+      f.notes       = src.notes;
+      f.subtotal_net = src.subtotal_net;
+      f.vat_total    = src.vat_total;
+      f.total_gross  = src.total_gross;
+      items = (opts.fromQuote.items || []).map(it => ({ id: '_new_' + Math.random().toString(36).slice(2,9), fields: { ...it.fields } }));
+    }
+  }
+
+  const customersInCompany = allCustomers
+    .filter(c => (c.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  const currentCustomerId = (f.customer_id || [])[0] || f.customer_id || '';
+  let   currentContactId  = (f.contact_id  || [])[0] || f.contact_id  || '';
+  if (!currentContactId && currentCustomerId) {
+    currentContactId = findPrimaryContactId(allContacts, currentCustomerId, 'customer');
+  }
+  let currentDeliveryAddressId = (f.delivery_address_id || '').trim();
+  let currentInvoiceAddressId  = (f.invoice_address_id  || '').trim();
+  if (!id && currentCustomerId) {
+    if (!currentDeliveryAddressId) currentDeliveryAddressId = findPrimaryAddressId(allAddresses, currentCustomerId, 'delivery');
+    if (!currentInvoiceAddressId)  currentInvoiceAddressId  = findPrimaryAddressId(allAddresses, currentCustomerId, 'billing');
+  }
+
+  const customerItems = customersInCompany.map(c => ({
+    id: c.id,
+    label: c.fields.name1 || '–',
+    secondary: [c.fields.customer_no, c.fields.city].filter(Boolean).join(' · ')
+  }));
+  const contactItemsFor = (cid) => allContacts
+    .filter(c => (c.fields.customer_id || []).includes(cid))
+    .map(c => ({ id: c.id, label: contactDisplayName(c.fields), secondary: [c.fields.role, c.fields.email].filter(Boolean).join(' · ') }));
+  // Cache für Customer-Wechsel (analog zu Quote)
+  window._orderCustomerCache = { byId: {}, contacts: allContacts, addresses: allAddresses };
+  customersInCompany.forEach(c => { window._orderCustomerCache.byId[c.id] = c.fields; });
+  window._orderCompanyCache = (function() {
+    // Versuch: aus loadCompanies geladene Mandanten-Daten
+    return (APP_KEYS.companies || []).find(c => c.id === cur.id)?.fields || { name: cur.name };
+  })();
+
+  const paymentTerms = allPaymentTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
+  const deliveryTerms = allDeliveryTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
+  const initialPayment  = f.payment_terms  || (id ? '' : (paymentTerms.find(t => t.fields.is_default)?.fields.name || ''));
+  const initialDelivery = f.delivery_terms || (id ? '' : (deliveryTerms.find(t => t.fields.is_default)?.fields.name || ''));
+
+  const sums = calcQuoteSums(items);
+
+  // Verlinktes Angebot (zur Anzeige)
+  const linkedQuoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const linkedQuote   = linkedQuoteId ? allQuotes.find(q => q.id === linkedQuoteId) : null;
+
+  window._currentOrderIdInModal = id || null;
+
+  openModal(`
+    <div class="lg:flex lg:items-stretch">
+    <form data-order-form="1" onsubmit="saveOrder(event, '${id || ''}', false)" class="p-4 sm:p-6 lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto">
+      <div class="flex items-baseline justify-between mb-4">
+        <h3 class="text-lg font-bold text-ink-900">${id ? 'Auftrag bearbeiten' : 'Neuer Auftrag'}</h3>
+        <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
+      </div>
+
+      ${linkedQuote ? `
+        <div class="mb-3 p-2.5 bg-brand-50/50 border border-brand-200 rounded-lg flex items-center gap-2 text-sm">
+          <i data-lucide="link" class="w-4 h-4 text-brand-600"></i>
+          <span class="text-ink-700">aus Angebot</span>
+          <button type="button" onclick="closeModal();setTimeout(()=>openQuoteModal('${linkedQuote.id}'),100)" class="font-mono text-brand-700 hover:underline">${escapeHtml(linkedQuote.fields.quote_no || '–')}</button>
+          <span class="text-ink-500 truncate">${escapeHtml(linkedQuote.fields.quote_title || '')}</span>
+        </div>
+      ` : ''}
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">AB-Nr.</label>
+          <input name="order_no" value="${escapeHtml(f.order_no || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
+          <select name="status" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            ${['Entwurf','Bestätigt','In Bearbeitung','Geliefert','Abgerechnet','Storniert','archiviert'].map(s => `<option value="${s}" ${(f.status||'Entwurf')===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Datum</label>
+          <input name="date" type="date" value="${escapeHtml(f.date || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Bestätigt am</label>
+          <input name="confirmation_date" type="date" value="${escapeHtml(f.confirmation_date || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="lg:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Kunde</label>
+          ${renderCombobox({ id: 'oc_customer', name: 'customer_id', items: customerItems, current: currentCustomerId, placeholder: 'Kunde suchen…', onChange: 'onOrderCustomerChange' })}
+        </div>
+        <div class="lg:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
+          ${renderCombobox({ id: 'oc_contact', name: 'contact_id', items: contactItemsFor(currentCustomerId), current: currentContactId, placeholder: 'Ansprechpartner suchen…' })}
+        </div>
+        <div class="lg:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Adressen</label>
+          <input type="hidden" name="delivery_address_id" id="oc_delivery_address_id" value="${escapeHtml(currentDeliveryAddressId)}">
+          <input type="hidden" name="invoice_address_id"  id="oc_invoice_address_id"  value="${escapeHtml(currentInvoiceAddressId)}">
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="oc_btn_delivery" onclick="openOrderAddressPicker('delivery')" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-left text-sm">
+              <i data-lucide="truck" class="w-4 h-4 text-brand-600 shrink-0"></i>
+              <span class="flex-1 min-w-0">
+                <span class="block text-[10px] uppercase tracking-wider text-ink-500">Lieferadresse</span>
+                <span id="oc_label_delivery" class="block truncate text-ink-900">${escapeHtml(addressShortLabel(resolveAddress({ customer: customersInCompany.find(c => c.id === currentCustomerId), addresses: allAddresses, addressId: currentDeliveryAddressId, kind: 'delivery' })))}</span>
+              </span>
+              <i data-lucide="pencil" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>
+            </button>
+            <button type="button" id="oc_btn_billing" onclick="openOrderAddressPicker('billing')" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-left text-sm">
+              <i data-lucide="receipt" class="w-4 h-4 text-brand-600 shrink-0"></i>
+              <span class="flex-1 min-w-0">
+                <span class="block text-[10px] uppercase tracking-wider text-ink-500">Rechnungsadresse</span>
+                <span id="oc_label_billing" class="block truncate text-ink-900">${escapeHtml(addressShortLabel(resolveAddress({ customer: customersInCompany.find(c => c.id === currentCustomerId), addresses: allAddresses, addressId: currentInvoiceAddressId, kind: 'billing' })))}</span>
+              </span>
+              <i data-lucide="pencil" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>
+            </button>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
+          <select name="payment_terms" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— wählen —</option>
+            ${paymentTerms.map(t => `<option value="${escapeHtml(t.fields.name || '')}" ${initialPayment === (t.fields.name || '') ? 'selected' : ''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '')}</option>`).join('')}
+            ${initialPayment && !paymentTerms.find(t => t.fields.name === initialPayment) ? `<option value="${escapeHtml(initialPayment)}" selected>${escapeHtml(initialPayment)} (alt)</option>` : ''}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Lieferbedingungen</label>
+          <select name="delivery_terms" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— wählen —</option>
+            ${deliveryTerms.map(t => `<option value="${escapeHtml(t.fields.name || '')}" ${initialDelivery === (t.fields.name || '') ? 'selected' : ''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '')}</option>`).join('')}
+            ${initialDelivery && !deliveryTerms.find(t => t.fields.name === initialDelivery) ? `<option value="${escapeHtml(initialDelivery)}" selected>${escapeHtml(initialDelivery)} (alt)</option>` : ''}
+          </select>
+        </div>
+        <div class="lg:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Titel / Tagline</label>
+          <input name="order_title" placeholder="z.B. Auftragsbestätigung zu Servicetausch" value="${escapeHtml(f.order_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="lg:col-span-2">
+          <label class="block text-sm font-medium text-ink-700 mb-1">Einleitung</label>
+          <textarea name="description" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+        </div>
+      </div>
+
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Positionen</h4>
+      <div id="orderItemsWrap">${renderOrderItems(id || '', items)}</div>
+
+      <div id="orderSums" class="mt-4 bg-ink-50 rounded-xl p-4 text-sm space-y-1">
+        ${quoteSumsHtml(sums)}
+      </div>
+
+      <div class="mt-5">
+        <label class="block text-sm font-medium text-ink-700 mb-1">Schlusstext</label>
+        <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+      </div>
+
+      <button type="button" onclick="exportOrderAsPdf()" class="lg:hidden w-full mt-4 px-3 py-3 text-sm rounded-lg bg-ink-900 text-white hover:bg-ink-800 flex items-center justify-center gap-2 font-semibold">
+        <i data-lucide="file-down" class="w-4 h-4"></i> Vorschau / PDF erzeugen
+      </button>
+
+      <div class="grid grid-cols-2 sm:flex sm:justify-end gap-2 sm:flex-wrap mt-4">
+        <button type="button" onclick="closeModal()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 col-span-2 sm:col-span-1">Abbrechen</button>
+        ${id ? `<button type="button" onclick="toggleOrderArchive('${id}', ${(f.status || 'Entwurf') !== 'archiviert'});closeModal();" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center justify-center gap-1.5"><i data-lucide="${(f.status || 'Entwurf') === 'archiviert' ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i> ${(f.status || 'Entwurf') === 'archiviert' ? 'Wiederherstellen' : 'Archivieren'}</button>` : ''}
+        <button type="button" onclick="exportOrderAsPdf()" class="hidden lg:inline-flex px-3 py-2.5 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 items-center justify-center gap-1.5"><i data-lucide="file-down" class="w-4 h-4"></i> PDF</button>
+        <button type="button" onclick="saveOrder(event, '${id || ''}', true)" class="px-3 py-2.5 text-sm rounded-lg border border-brand-500 text-brand-600 hover:bg-brand-50">Speichern</button>
+        <button type="submit" class="px-3 py-2.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 col-span-2 sm:col-span-1">Speichern &amp; schließen</button>
+      </div>
+    </form>
+    <div id="orderPreviewPane" data-mobile-hidden="true" class="lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto bg-ink-100 lg:border-l border-ink-200 border-t border-ink-200 p-3 sm:p-4">
+      <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
+        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
+        <button type="button" onclick="exportOrderAsPdf()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1"><i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF</button>
+      </div>
+      <div id="orderPreviewScroll" style="overflow:auto;max-width:100%;-webkit-overflow-scrolling:touch;">
+        <div id="orderPreview" class="mx-auto" style="width:100%;"></div>
+      </div>
+    </div>
+    </div>
+  `, { maxWidth: 'max-w-7xl' });
+  const box = document.getElementById('modalBox');
+  if (box) {
+    box.classList.remove('max-w-lg', 'max-w-3xl', 'max-w-5xl');
+    box.classList.add('max-w-7xl');
+  }
+  if (id) {
+    _currentLock = { table: 'Order', recordId: id };
+    startLockHeartbeat('Order', id);
+  }
+  setTimeout(updateOrderPreview, 100);
+  // Form-Listener für live preview
+  const form = document.querySelector('form[data-order-form]');
+  if (form) {
+    let dbTimer = null;
+    const trigger = () => { clearTimeout(dbTimer); dbTimer = setTimeout(updateOrderPreview, 250); };
+    form.addEventListener('input', trigger);
+    form.addEventListener('change', trigger);
+  }
+}
+
+function onOrderCustomerChange(value) {
+  const cid = value || document.getElementById('oc_customer_value')?.value || '';
+  const cache = window._orderCustomerCache || {};
+  const contacts = cache.contacts || [];
+  const list = !cid ? [] : contacts.filter(c => (c.fields.customer_id || []).includes(cid));
+  const items = list.map(c => ({
+    id: c.id,
+    label: contactDisplayName(c.fields),
+    secondary: [c.fields.role, c.fields.email].filter(Boolean).join(' · ')
+  }));
+  _comboboxData['oc_contact'] = items;
+  const contactValueEl = document.getElementById('oc_contact_value');
+  const contactSearchEl = document.getElementById('oc_contact_search');
+  if (contactValueEl && !items.find(i => i.id === contactValueEl.value)) {
+    contactValueEl.value = '';
+    if (contactSearchEl) contactSearchEl.value = '';
+  }
+  if (cid && contactValueEl && !contactValueEl.value) {
+    const primaryId = findPrimaryContactId(contacts, cid, 'customer');
+    if (primaryId) {
+      const primaryItem = items.find(i => i.id === primaryId);
+      if (primaryItem) {
+        contactValueEl.value = primaryId;
+        if (contactSearchEl) contactSearchEl.value = primaryItem.label;
+      }
+    }
+  }
+  if (cid) {
+    const cFields = cache.byId?.[cid] || {};
+    const ptSel = document.querySelector('#modalBox select[name="payment_terms"]');
+    if (ptSel && !ptSel.value) {
+      const want = cFields.payment_terms || '14 Tage netto';
+      const opt = Array.from(ptSel.options).find(o => o.value === want);
+      if (opt) ptSel.value = want;
+    }
+    const dtSel = document.querySelector('#modalBox select[name="delivery_terms"]');
+    if (dtSel && !dtSel.value) {
+      const want = cFields.delivery_terms || 'EXW Fellbach';
+      const opt = Array.from(dtSel.options).find(o => o.value === want);
+      if (opt) dtSel.value = want;
+    }
+    const addresses = cache.addresses || [];
+    const dlvEl = document.getElementById('oc_delivery_address_id');
+    const invEl = document.getElementById('oc_invoice_address_id');
+    if (dlvEl) dlvEl.value = findPrimaryAddressId(addresses, cid, 'delivery');
+    if (invEl) invEl.value = findPrimaryAddressId(addresses, cid, 'billing');
+    refreshOrderAddressButton('delivery');
+    refreshOrderAddressButton('billing');
+  } else {
+    const dlvEl = document.getElementById('oc_delivery_address_id');
+    const invEl = document.getElementById('oc_invoice_address_id');
+    if (dlvEl) dlvEl.value = '';
+    if (invEl) invEl.value = '';
+    refreshOrderAddressButton('delivery');
+    refreshOrderAddressButton('billing');
+  }
+}
+
+function refreshOrderAddressButton(kind) {
+  const labelEl = document.getElementById('oc_label_' + kind);
+  const valEl   = document.getElementById('oc_' + (kind === 'billing' ? 'invoice' : 'delivery') + '_address_id');
+  if (!labelEl || !valEl) return;
+  const cidEl = document.getElementById('oc_customer_value');
+  const cid = cidEl?.value || '';
+  const cache = window._orderCustomerCache || {};
+  const customer = cid ? { id: cid, fields: (cache.byId || {})[cid] || {} } : null;
+  const addresses = cache.addresses || [];
+  const resolved = resolveAddress({ customer, addresses, addressId: valEl.value, kind });
+  labelEl.textContent = addressShortLabel(resolved) || '–';
+}
+
+function openOrderAddressPicker(kind) {
+  const cidEl = document.getElementById('oc_customer_value');
+  const cid = cidEl?.value || '';
+  if (!cid) { toast('Bitte erst Kunde auswählen', 'warn'); return; }
+  const cache = window._orderCustomerCache || {};
+  const valEl = document.getElementById('oc_' + (kind === 'billing' ? 'invoice' : 'delivery') + '_address_id');
+  const currentId = valEl?.value || '';
+  const customer = { id: cid, fields: (cache.byId || {})[cid] || {} };
+  const addresses = (cache.addresses || []).filter(a => (a.fields.customer_id || '') === cid && (a.fields.kind || '') === kind);
+  const cf = customer.fields;
+  const baseFallbackHtml = `
+    <label class="flex items-start gap-2 p-3 border-2 border-ink-200 rounded-lg cursor-pointer hover:bg-ink-50 ${!currentId ? 'border-brand-400 bg-brand-50/40' : ''}">
+      <input type="radio" name="addr_pick_o" value="" ${!currentId ? 'checked' : ''} class="mt-0.5 w-4 h-4 text-brand-500">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-1.5 mb-0.5">
+          <span class="text-xs font-semibold text-ink-700">Hauptadresse vom Kunden</span>
+          <span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1 rounded">Standard</span>
+        </div>
+        <div class="text-xs text-ink-600">
+          ${escapeHtml(cf.street || '–')}<br>
+          ${escapeHtml([cf.zip, cf.city].filter(Boolean).join(' ') || '–')}<br>
+          ${escapeHtml(cf.country || '')}
+        </div>
+      </div>
+    </label>
+  `;
+  const optionsHtml = addresses.length === 0
+    ? '<p class="text-xs text-ink-500 italic px-2 py-3">Noch keine separaten ' + escapeHtml(addressKindLabelPlural(kind)) + ' beim Kunden gepflegt.</p>'
+    : addresses.map(a => {
+        const af = a.fields || {};
+        const checked = currentId === a.id;
+        return `
+          <label class="flex items-start gap-2 p-3 border-2 ${checked ? 'border-brand-400 bg-brand-50/40' : 'border-ink-200'} rounded-lg cursor-pointer hover:bg-ink-50">
+            <input type="radio" name="addr_pick_o" value="${a.id}" ${checked ? 'checked' : ''} class="mt-0.5 w-4 h-4 text-brand-500">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                ${af.is_primary ? '<i data-lucide="star" class="w-3 h-3 text-amber-500" style="fill:currentColor"></i>' : ''}
+                <span class="text-xs font-semibold text-ink-900">${escapeHtml(af.name || addressKindLabel(kind))}</span>
+              </div>
+              <div class="text-xs text-ink-600">
+                ${af.recipient ? escapeHtml(af.recipient) + '<br>' : ''}
+                ${escapeHtml(af.street || '')}<br>
+                ${escapeHtml([af.zip, af.city].filter(Boolean).join(' '))}<br>
+                ${escapeHtml(af.country || '')}
+              </div>
+            </div>
+          </label>
+        `;
+      }).join('');
+  openModal2(`
+    <div class="p-5">
+      <h3 class="text-base font-bold text-ink-900 mb-1 flex items-center gap-2">
+        <i data-lucide="${addressKindIcon(kind)}" class="w-4 h-4 text-brand-600"></i> ${escapeHtml(addressKindLabel(kind))} wählen
+      </h3>
+      <p class="text-xs text-ink-500 mb-3">${escapeHtml(cf.name1 || '–')}${cf.customer_no ? ' · ' + escapeHtml(cf.customer_no) : ''}</p>
+      <div class="space-y-2 mb-4 max-h-[60vh] overflow-y-auto">
+        ${baseFallbackHtml}
+        ${optionsHtml}
+      </div>
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="closeModal2()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="confirmOrderAddressPick('${kind}')" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Übernehmen</button>
+      </div>
+    </div>
+  `);
+  if (window.lucide) lucide.createIcons();
+}
+
+function confirmOrderAddressPick(kind) {
+  const picked = document.querySelector('input[name="addr_pick_o"]:checked');
+  const value = picked ? picked.value : '';
+  const valEl = document.getElementById('oc_' + (kind === 'billing' ? 'invoice' : 'delivery') + '_address_id');
+  if (valEl) valEl.value = value;
+  refreshOrderAddressButton(kind);
+  closeModal2();
+  if (typeof updateOrderPreview === 'function') updateOrderPreview();
+}
+
+async function buildOrderVariableContext() {
+  const form = document.querySelector('#modalBox form[data-order-form]');
+  if (!form) return {};
+  const fd = new FormData(form);
+  const cidSel = (fd.get('customer_id') || '').trim();
+  const conSel = (fd.get('contact_id')  || '').trim();
+  const cache  = window._orderCustomerCache || {};
+  const customer = cache.byId?.[cidSel];
+  const contact  = cache.contacts?.find(c => c.id === conSel)?.fields;
+  const company  = window._orderCompanyCache || {};
+  const customerObj = cidSel ? { id: cidSel, fields: customer || {} } : null;
+  const addresses = cache.addresses || [];
+  const deliveryAddrId = (fd.get('delivery_address_id') || '').trim();
+  const invoiceAddrId  = (fd.get('invoice_address_id')  || '').trim();
+  const deliveryAddress = resolveAddress({ customer: customerObj, addresses, addressId: deliveryAddrId, kind: 'delivery' });
+  const invoiceAddress  = resolveAddress({ customer: customerObj, addresses, addressId: invoiceAddrId,  kind: 'billing'  });
+  return {
+    quote: {
+      // Wir nutzen den gleichen ctx.quote-Schlüssel wie der Quote-Renderer; es enthält die Auftragsdaten.
+      quote_no:       (fd.get('order_no') || '').trim(),
+      quote_title:    (fd.get('order_title') || '').trim(),
+      date:           (fd.get('date') || '').trim(),
+      valid_until:    (fd.get('confirmation_date') || '').trim(),
+      payment_terms:  (fd.get('payment_terms') || '').trim(),
+      delivery_terms: (fd.get('delivery_terms') || '').trim(),
+      layout_variant: 'standard',
+      force_closing_new_page: false,
+      layout_offsets: '',
+      delivery_address_id: deliveryAddrId,
+      invoice_address_id:  invoiceAddrId
+    },
+    docType: 'order',
+    customer, contact, company, deliveryAddress, invoiceAddress,
+    user: APP_KEYS.user || {},
+    customFields: {}
+  };
+}
+
+async function updateOrderPreview() {
+  const target = document.getElementById('orderPreview');
+  if (!target) return;
+  const pane = document.getElementById('orderPreviewPane');
+  if (pane && pane.dataset.mobileHidden === 'true' && pane.dataset.mobileShow !== '1') {
+    if (window.matchMedia && window.matchMedia('(max-width: 1023px)').matches) return;
+  }
+  const ctx = await buildOrderVariableContext();
+  const form = document.querySelector('#modalBox form[data-order-form]');
+  const fd = form ? new FormData(form) : null;
+  const intro   = fd ? (fd.get('description') || '') : '';
+  const closing = fd ? (fd.get('notes')       || '') : '';
+  let items = [];
+  const oid = window._currentOrderIdInModal;
+  if (oid) {
+    try {
+      const all = await readData('OrderItem');
+      items = all.filter(it => (it.fields.order_id || []).includes(oid) || it.fields.order_id === oid)
+        .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+    } catch (e) {}
+  }
+  let articleMap = {};
+  try {
+    const articles = await readData('Article');
+    articles.forEach(a => {
+      articleMap[a.id] = {
+        article_no: a.fields.article_no || '',
+        manufacturer_no: a.fields.manufacturer_no || '',
+        name1: a.fields.name1 || '',
+        name2: a.fields.name2 || ''
+      };
+    });
+  } catch (e) {}
+  target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing, articleMap);
+  if (window.lucide) lucide.createIcons();
+}
+
+function renderOrderItems(orderId, items) {
+  const sorted = [...(items || [])].sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+  const list = sorted.length === 0
+    ? '<p class="text-xs text-ink-500 italic px-3 py-2">Noch keine Positionen.</p>'
+    : '<div id="oiList" class="space-y-2">' + sorted.map(it => `<div data-oi-row="${it.id}">${orderItemRow(orderId, it)}</div>`).join('') + '</div>';
+  return `
+    ${list}
+    <div id="oiFormWrap" class="mt-2"></div>
+    <button id="addOiBtn" type="button" onclick="showOrderItemInlineForm('${orderId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+      <i data-lucide="plus" class="w-4 h-4"></i> Position hinzufügen
+    </button>
+  `;
+}
+
+function orderItemRow(orderId, it) {
+  const f = it.fields || {};
+  const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
+  const split = splitDescriptionTitleAndBody(f.description || '');
+  const desc = split.title || '–';
+  const grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
+  const discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
+  const meta = [
+    (f.qty || 0) + (f.unit ? ' ' + f.unit : ''),
+    '× ' + formatPrice(f.unit_price_net || 0) + ' €',
+    discAbs > 0 ? 'Rabatt: −' + formatPrice(discAbs) + ' €' : '',
+    'MwSt ' + (f.vat_rate || 0) + '%'
+  ].filter(Boolean).join(' · ');
+  return `
+    <div class="p-3 bg-ink-50 rounded-lg border border-ink-100">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-baseline gap-2">
+            <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
+            <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
+          </div>
+          <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <span class="font-mono text-sm tabular-nums text-ink-900">${formatPrice(lineNet)} €</span>
+          <button type="button" onclick="showOrderItemInlineForm('${orderId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
+            <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+          </button>
+          <button type="button" onclick="deleteOrderItemInline('${orderId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function showOrderItemInlineForm(orderId, itemId) {
+  if (document.querySelector('#oiFormWrap [data-oi-form]')) return;
+  if (!orderId) {
+    const newId = await _silentSaveOrderHeader();
+    if (!newId) return;
+    orderId = newId;
+    window._currentOrderIdInModal = newId;
+    const wrap = document.getElementById('orderItemsWrap');
+    if (wrap) {
+      wrap.innerHTML = renderOrderItems(newId, []);
+      if (window.lucide) lucide.createIcons();
+    }
+    toast('Auftrag ' + (document.querySelector('#modalBox input[name="order_no"]')?.value || '') + ' angelegt', 'success', 1500);
+  }
+  const cur = getCurrentCompany();
+  let f = {};
+  try {
+    if (itemId) {
+      const all = await readData('OrderItem');
+      f = all.find(r => r.id === itemId)?.fields || {};
+    } else {
+      const all = await readData('OrderItem');
+      const peers = all.filter(r => (r.fields.order_id || []).includes(orderId) || r.fields.order_id === orderId);
+      const maxPos = peers.reduce((m, r) => Math.max(m, +(r.fields.pos || 0)), 0);
+      f.pos = maxPos + 1;
+      f.qty = 1;
+      f.vat_rate = 19;
+      f.discount_pct = 0;
+    }
+  } catch (e) {}
+
+  let articles = [];
+  try {
+    const all = await readData('Article');
+    articles = all
+      .filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv')
+      .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  } catch (e) {}
+  window._oiArticleCacheById = {};
+  articles.forEach(a => { window._oiArticleCacheById[a.id] = {
+    name1: a.fields.name1 || '', name2: a.fields.name2 || '', desc: a.fields.description || '',
+    price: a.fields.sales_price || 0, unit: a.fields.unit || 'Stück', vat: a.fields.vat_rate || 19
+  }; });
+  const articleItems = articles.map(a => ({
+    id: a.id, label: a.fields.name1 || '–', secondary: [a.fields.article_no, a.fields.manufacturer_no].filter(Boolean).join(' · ')
+  }));
+  const currentArticleId = (f.article_id || [])[0] || f.article_id || '';
+  const fid = 'oif_' + (itemId || 'new');
+
+  if (itemId) {
+    const row = document.querySelector(`[data-oi-row="${itemId}"]`);
+    if (row) row.classList.add('hidden');
+  }
+  document.getElementById('addOiBtn')?.classList.add('hidden');
+
+  document.getElementById('oiFormWrap').innerHTML = `
+    <div data-oi-form data-fid="${fid}" class="bg-brand-50/60 border-2 border-brand-300 rounded-lg p-3 sm:p-4 space-y-3">
+      <p class="text-sm font-semibold text-brand-700">${itemId ? 'Position bearbeiten' : 'Neue Position'}</p>
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
+        <div class="lg:col-span-1">
+          <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="lg:col-span-2">
+          <label class="block text-xs font-medium text-ink-700 mb-1">Artikel (suchen oder leer = freie Position)</label>
+          ${renderCombobox({ id: fid + '_article', name: '', items: articleItems, current: currentArticleId, placeholder: 'Artikel suchen…', onChange: 'onOiArticleChange' })}
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-ink-700 mb-1">Bezeichnung &amp; Beschreibung</label>
+        <p class="text-[10px] text-ink-500 mb-1 italic">Erste Zeile = <strong>Bezeichnung (fett)</strong> · darunter erscheint Hersteller-Artikelnummer (kursiv) · ab Zeile 2 = Beschreibung</p>
+        <input type="hidden" id="${fid}_description" name="${fid}_description_hidden" value="${escapeHtml(f.description || '')}">
+        <div id="${fid}_description_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:120px;"></div>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
+          <input id="${fid}_unit" value="${escapeHtml(f.unit || 'Stück')}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">EP €</label>
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${f.vat_rate ?? 19}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+        </div>
+        <div class="text-right self-end">
+          <p class="text-xs text-ink-500">Zeilensumme netto</p>
+          <p id="${fid}_preview" class="font-mono font-semibold text-ink-900">${formatPrice(calcLineNet(f.qty, f.unit_price_net, f.discount_pct))} €</p>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button type="button" onclick="cancelOrderItemInline('${orderId}','${itemId || ''}')" class="px-3 py-1.5 text-sm rounded-lg border border-ink-200 bg-white hover:bg-ink-50">Abbrechen</button>
+        <button type="button" onclick="saveOrderItemInline('${orderId}','${itemId || ''}')" class="px-3 py-1.5 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+  setTimeout(async () => {
+    await ensureQuillLoaded();
+    const editorEl = document.getElementById(fid + '_description_editor');
+    const hidden   = document.getElementById(fid + '_description');
+    if (editorEl && window.Quill) {
+      registerQuillCustomSizes();
+      const q = new window.Quill(editorEl, {
+        theme: 'snow',
+        placeholder: 'Position-Beschreibung — mit Größe 5-12pt formatierbar',
+        modules: { toolbar: quillStandardToolbar() }
+      });
+      const initial = hidden?.value || '';
+      if (initial) {
+        if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initial)) {
+          q.root.innerHTML = initial;
+        } else {
+          q.setText(initial);
+        }
+      }
+      const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
+      q.on('text-change', sync);
+      sync();
+      window._oiQuillByFid = window._oiQuillByFid || {};
+      window._oiQuillByFid[fid] = q;
+      q.focus();
+    }
+  }, 80);
+}
+
+function recalcOiPreview(fid) {
+  const qty   = parseDecimal(document.getElementById(fid + '_qty')?.value);
+  const price = parseDecimal(document.getElementById(fid + '_unit_price_net')?.value);
+  const disc  = parseDecimal(document.getElementById(fid + '_discount_pct')?.value);
+  const net = calcLineNet(qty, price, disc);
+  const el = document.getElementById(fid + '_preview');
+  if (el) el.textContent = formatPrice(net) + ' €';
+}
+
+function onOiArticleChange(value, comboboxId) {
+  const articleId = value || '';
+  const fid = (comboboxId || '').replace(/_article$/, '');
+  if (!articleId) return;
+  const a = (window._oiArticleCacheById || {})[articleId];
+  if (!a) return;
+  const descEl = document.getElementById(fid + '_description');
+  const quill  = (window._oiQuillByFid || {})[fid];
+  const isEmpty = (() => {
+    if (quill) {
+      const txt = (quill.getText() || '').replace(/\s/g, '');
+      return !txt;
+    }
+    return !(descEl?.value || '').trim();
+  })();
+  if (isEmpty) {
+    const titleLine = (a.name1 || '').trim();
+    const descRest  = (a.desc || '').trim();
+    if (quill) {
+      const titleHtml = titleLine ? `<p>${escapeHtml(titleLine)}</p>` : '';
+      const bodyHtml  = descRest
+        ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('')
+        : '';
+      quill.root.innerHTML = titleHtml + bodyHtml;
+      if (descEl) descEl.value = quill.root.innerHTML;
+    } else if (descEl) {
+      descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
+    }
+  }
+  const priceEl = document.getElementById(fid + '_unit_price_net');
+  if (priceEl) priceEl.value = a.price;
+  const unitEl = document.getElementById(fid + '_unit');
+  if (unitEl) unitEl.value = a.unit;
+  const vatEl = document.getElementById(fid + '_vat_rate');
+  if (vatEl) vatEl.value = a.vat;
+  recalcOiPreview(fid);
+}
+
+function cancelOrderItemInline(orderId, itemId) {
+  document.getElementById('oiFormWrap').innerHTML = '';
+  document.getElementById('addOiBtn')?.classList.remove('hidden');
+  if (itemId) {
+    const row = document.querySelector(`[data-oi-row="${itemId}"]`);
+    if (row) row.classList.remove('hidden');
+  }
+}
+
+async function saveOrderItemInline(orderId, itemId) {
+  const fid = 'oif_' + (itemId || 'new');
+  const $v = id => (document.getElementById(fid + '_' + id)?.value || '').trim();
+  const articleId = document.getElementById(fid + '_article_value')?.value || '';
+  let desc = $v('description');
+  const split = splitDescriptionTitleAndBody(desc);
+  if (!split.title) return toast('Beschreibung fehlt', 'error');
+  if (!split.title && !(split.bodyText || split.bodyHtml)) desc = '';
+  const pos = parseInt($v('pos'), 10) || 1;
+  const qty = parseDecimal($v('qty')) || 0;
+  const price = parseDecimal($v('unit_price_net')) || 0;
+  const disc = parseDecimal($v('discount_pct')) || 0;
+  const vat = parseDecimal($v('vat_rate')) || 0;
+  const fields = {
+    pos, qty,
+    unit:           $v('unit'),
+    unit_price_net: price,
+    discount_pct:   disc,
+    vat_rate:       vat,
+    description:    desc,
+    line_total_net: calcLineNet(qty, price, disc),
+    label:          'Pos.' + pos + ' · ' + (split.title || '').substring(0, 50)
+  };
+  fields.article_id = articleId || '';
+  if (!itemId) fields.order_id = orderId;
+  try {
+    if (itemId) await updateData('OrderItem', itemId, fields);
+    else        await writeData('OrderItem', fields);
+    document.getElementById('oiFormWrap').innerHTML = '';
+    document.getElementById('addOiBtn')?.classList.remove('hidden');
+    await refreshOrderItemsSection(orderId);
+    toast('Position gespeichert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deleteOrderItemInline(orderId, itemId) {
+  if (!confirm('Diese Position wirklich löschen?')) return;
+  try {
+    await deleteData('OrderItem', itemId);
+    await refreshOrderItemsSection(orderId);
+    toast('Gelöscht', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function refreshOrderItemsSection(orderId) {
+  const wrap = document.getElementById('orderItemsWrap');
+  if (!wrap) return;
+  try {
+    const all = await readData('OrderItem');
+    const items = all.filter(it => (it.fields.order_id || []).includes(orderId) || it.fields.order_id === orderId)
+      .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+    wrap.innerHTML = renderOrderItems(orderId, items);
+    if (window.lucide) lucide.createIcons();
+    // Sums updaten
+    const sums = calcQuoteSums(items);
+    const sumsEl = document.getElementById('orderSums');
+    if (sumsEl) sumsEl.innerHTML = quoteSumsHtml(sums);
+    updateOrderPreview();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function _silentSaveOrderHeader() {
+  const cur = getCurrentCompany();
+  if (!cur) return null;
+  const form = document.querySelector('#modalBox form[data-order-form]');
+  if (!form) return null;
+  const fd = new FormData(form);
+  const fields = {};
+  ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  const cidSel = (fd.get('customer_id') || '').trim();
+  const conSel = (fd.get('contact_id')  || '').trim();
+  fields.customer_id = cidSel;
+  fields.contact_id  = conSel;
+  fields.status = fields.status || 'Entwurf';
+  fields.company_id = cur.id;
+  // Ggf. quote_id aus URL/State erhalten
+  const linkedQuoteId = window._linkedQuoteIdForNewOrder || '';
+  if (linkedQuoteId) fields.quote_id = linkedQuoteId;
+  try {
+    const created = await writeData('Order', fields);
+    return created.id;
+  } catch (err) { toast(err.message, 'error'); return null; }
+}
+
+async function saveOrder(e, id, keepOpen) {
+  if (e && e.preventDefault) e.preventDefault();
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  if (!id && window._currentOrderIdInModal) id = window._currentOrderIdInModal;
+  const form = e?.target?.tagName === 'FORM' ? e.target : (e?.target?.closest?.('form') || document.querySelector('#modalBox form[data-order-form]'));
+  if (!form) return;
+  const fd = new FormData(form);
+  const fields = {};
+  ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id'].forEach(k => {
+    fields[k] = (fd.get(k) || '').trim();
+  });
+  const cidSel = (fd.get('customer_id') || '').trim();
+  const conSel = (fd.get('contact_id')  || '').trim();
+  fields.customer_id = cidSel;
+  fields.contact_id  = conSel;
+  fields.status = fields.status || 'Entwurf';
+  if (!id) fields.company_id = cur.id;
+  if (id)  { fields.lock_user_id = ''; fields.lock_until = ''; }
+  // Sums aus Items
+  if (id) {
+    try {
+      const all = await readData('OrderItem');
+      const items = all.filter(it => (it.fields.order_id || []).includes(id) || it.fields.order_id === id);
+      const sums = calcQuoteSums(items);
+      fields.subtotal_net = sums.subtotal_net;
+      fields.vat_total    = sums.vat_total;
+      fields.total_gross  = sums.total_gross;
+    } catch (e) {}
+  }
+  try {
+    let savedId = id;
+    if (id) {
+      await updateData('Order', id, fields);
+    } else {
+      const created = await writeData('Order', fields);
+      savedId = created.id;
+    }
+    if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
+    window._currentOrderIdInModal = savedId;
+    if (keepOpen) {
+      toast('Gespeichert', 'success');
+      await openOrderModal(savedId);
+    } else {
+      closeModal();
+      renderOrders();
+      toast('Gespeichert', 'success');
+    }
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleOrderArchive(id, archive) {
+  try {
+    await updateData('Order', id, { status: archive ? 'archiviert' : 'Entwurf' });
+    renderOrders();
+    toast(archive ? 'Archiviert' : 'Reaktiviert', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function exportOrderAsPdf() {
+  const previewEl = document.getElementById('orderPreview');
+  if (!previewEl) { toast('Vorschau nicht gefunden', 'error'); return; }
+  const ctx = await buildOrderVariableContext();
+  const customer = ctx.customer || {};
+  const orderNo = ctx.quote?.quote_no || 'Entwurf';
+  const filename = _safeFilename('Auftragsbestaetigung_' + orderNo + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
+  const pane = document.getElementById('orderPreviewPane');
+  const wasMobileHidden = pane && pane.dataset.mobileHidden === 'true' &&
+    window.matchMedia && window.matchMedia('(max-width: 1023px)').matches;
+  if (wasMobileHidden) pane.dataset.mobileShow = '1';
+  try { await updateOrderPreview(); } catch(e) {}
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,0.9);z-index:99999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;font-family:Inter,system-ui,sans-serif;font-size:14px;color:#0F172A;';
+  overlay.innerHTML = `<div style="width:48px;height:48px;border:4px solid #E2E8F0;border-top-color:#1FA8D6;border-radius:50%;animation:pdfspin 0.8s linear infinite;"></div><div style="font-weight:600;">PDF wird erstellt …</div><style>@keyframes pdfspin{to{transform:rotate(360deg);}}</style>`;
+  document.body.appendChild(overlay);
+  try {
+    await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+    await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
+    if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch(e) {} }
+    const { PDFDocument } = window.PDFLib;
+    const pdfDoc = await PDFDocument.create();
+    const A4_W = 595.28, A4_H = 841.89;
+    // Single-page render via html2canvas
+    const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: false, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
+    const imgData = canvas.toDataURL('image/png');
+    const pngImg = await pdfDoc.embedPng(imgData);
+    const widthScale = A4_W / pngImg.width;
+    const drawH = pngImg.height * widthScale;
+    const pageH = Math.max(A4_H, drawH);
+    const page = pdfDoc.addPage([A4_W, pageH]);
+    page.drawImage(pngImg, { x: 0, y: pageH - drawH, width: A4_W, height: drawH });
+    pdfDoc.setTitle('Auftragsbestätigung ' + orderNo);
+    pdfDoc.setAuthor((window._orderCompanyCache || {}).name || 'FLP Lift Parts GmbH');
+    pdfDoc.setCreationDate(new Date());
+    const pdfBytes = await pdfDoc.save();
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    toast('PDF erstellt: ' + filename, 'success', 3000);
+  } catch (err) {
+    console.error('PDF-Erstellung fehlgeschlagen:', err);
+    toast('PDF-Erstellung fehlgeschlagen: ' + (err.message || err), 'error', 5000);
+  } finally {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    if (wasMobileHidden && pane) delete pane.dataset.mobileShow;
+  }
+}
+
+/* "Auftrag aus Angebot erstellen" — kopiert Quote-Daten + Items in eine neue Order */
+async function createOrderFromQuote(quoteId) {
+  try {
+    const [allQ, allQI] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
+    const quote = allQ.find(q => q.id === quoteId);
+    if (!quote) { toast('Angebot nicht gefunden', 'error'); return; }
+    const qf = quote.fields;
+    const items = allQI.filter(it => (it.fields.quote_id || []).includes(quoteId) || it.fields.quote_id === quoteId);
+    const fromQuote = {
+      id: quoteId,
+      customer_id:         (qf.customer_id || [])[0] || qf.customer_id || '',
+      contact_id:          (qf.contact_id  || [])[0] || qf.contact_id  || '',
+      delivery_address_id: qf.delivery_address_id || '',
+      invoice_address_id:  qf.invoice_address_id  || '',
+      payment_terms:       qf.payment_terms || '',
+      delivery_terms:      qf.delivery_terms || '',
+      quote_title:         qf.quote_title || '',
+      description:         qf.description || '',
+      notes:               qf.notes || '',
+      subtotal_net:        qf.subtotal_net || 0,
+      vat_total:           qf.vat_total || 0,
+      total_gross:         qf.total_gross || 0,
+      items
+    };
+    closeModal(); // ggf. offenes Angebot-Modal schließen
+    setTimeout(() => openOrderModal(null, { fromQuote }), 100);
+  } catch (err) { toast(err.message, 'error'); }
+}
 /* ============================================================
    INIT
    ============================================================ */
