@@ -518,7 +518,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.87';
+const APP_VERSION = 'v2.88';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6660,6 +6660,7 @@ async function updateQuotePreview() {
       articleMap[a.id] = {
         article_no: a.fields.article_no || '',
         manufacturer_no: a.fields.manufacturer_no || '',
+        name1: a.fields.name1 || '',
         name2: a.fields.name2 || ''
       };
     });
@@ -6934,6 +6935,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               const rawDesc = f.description || '';
               const aId = (f.article_id || [])[0];
               const aRef = aId ? (articleMap[aId] || {}) : {};
+              const aName1 = (aRef.name1 || '').trim();
               const aName2 = (aRef.name2 || '').trim();
               const manNo  = (aRef.manufacturer_no || '').trim();
               // Layout:
@@ -6943,9 +6945,23 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               //   Leerzeile
               //   Beschreibung (rest)
               const split = splitDescriptionTitleAndBody(rawDesc);
-              const titleHtml = split.isHtml && split.titleHtml
+              // Backward-Compat: ältere Positionen wurden mit "name1 name2" zusammen als Title gespeichert.
+              // Wenn ein Article verlinkt ist und der Title genau diese Kombi enthält, kürze auf name1
+              // damit name2 sauber als kursive Zeile darunter erscheint (nicht fett im Titel).
+              let titleText = split.title;
+              let titleHtml = split.isHtml && split.titleHtml
                 ? split.titleHtml
                 : escapeHtml(split.title);
+              if (aName1 && aName2 && titleText) {
+                const norm = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                const combinedA = norm(aName1 + ' ' + aName2);
+                const combinedB = norm(aName1 + aName2);
+                const titleN = norm(titleText);
+                if (titleN === combinedA || titleN === combinedB) {
+                  titleText = aName1;
+                  titleHtml = escapeHtml(aName1);
+                }
+              }
               const bodyBlock = split.isHtml && split.bodyHtml
                 ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} text-ink-700 leading-snug mt-2 quote-bezeichnung-body">${split.bodyHtml}</div>`
                 : (split.bodyText
