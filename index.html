@@ -84,6 +84,25 @@
   @supports (height: 100dvh) {
     html, body { height: 100dvh; }
   }
+  /* Layout-Anpassen-Modus: Hover- und Selection-Feedback */
+  body.layout-adjust-mode #quotePreview [data-adjustable] {
+    cursor: move;
+    outline: 1px dashed transparent;
+    outline-offset: 2px;
+    transition: outline-color 0.1s, transform 0.05s;
+  }
+  body.layout-adjust-mode #quotePreview [data-adjustable]:hover {
+    outline-color: #fbbf24;
+  }
+  body.layout-adjust-mode #quotePreview [data-adjustable].layout-block-selected {
+    outline: 2px solid #f59e0b !important;
+    outline-offset: 3px;
+  }
+  body.layout-adjust-mode #layoutAdjustBtn {
+    background: #f59e0b !important;
+    color: #fff !important;
+    border-color: #d97706 !important;
+  }
   /* Quill-Editor: Custom Schriftgrößen-Picker (5-12pt) — Labels in der Dropdown anzeigen */
   .ql-snow .ql-picker.ql-size .ql-picker-label[data-value="5pt"]::before,
   .ql-snow .ql-picker.ql-size .ql-picker-item[data-value="5pt"]::before { content: "5pt"; font-size: 10px; }
@@ -452,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.71';
+const APP_VERSION = 'v2.72';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5513,6 +5532,127 @@ function setQuoteFieldValue(fieldName, value) {
   if (el) el.value = value || '';
 }
 
+/* === Layout-Anpassen-Modus ===
+   - Toggle "Layout"-Button → Modus aktiv
+   - Klick auf data-adjustable Block → selektiert (alle Klone in allen Sheets bekommen Highlight)
+   - Pfeiltasten verschieben die Selection (Shift = 1px-Schritt, ohne = 5px)
+   - Esc → Selection aufheben
+   - "Speichern" persistiert in Quote.layout_offsets
+   - "Reset" verwirft alle Verschiebungen
+   - Während des Modus wird kein Canvas-Capture erzwungen (HTML-Sheets bleiben sichtbar) */
+window._layoutAdjustActive = false;
+window._layoutOffsets = {};
+let _selectedAdjustKey = null;
+
+function toggleLayoutAdjust() {
+  if (window._layoutAdjustActive) {
+    // Modus deaktivieren
+    window._layoutAdjustActive = false;
+    document.body.classList.remove('layout-adjust-mode');
+    document.removeEventListener('keydown', _onAdjustKey, true);
+    const target = document.getElementById('quotePreview');
+    if (target) target.removeEventListener('click', _onAdjustClick, true);
+    _selectedAdjustKey = null;
+    _deselectAllBlocks();
+    document.getElementById('layoutSaveBtn')?.style.setProperty('display', 'none');
+    document.getElementById('layoutResetBtn')?.style.setProperty('display', 'none');
+    // Trigger Canvas-Refresh für sauberes finales Bild
+    if (typeof scheduleQuoteCanvasRefresh === 'function') scheduleQuoteCanvasRefresh();
+  } else {
+    // Modus aktivieren — Offsets aus Hidden-Input laden
+    const hidden = document.querySelector('#modalBox input[name="layout_offsets"]');
+    try { window._layoutOffsets = JSON.parse(hidden?.value || '{}') || {}; } catch (e) { window._layoutOffsets = {}; }
+    window._layoutAdjustActive = true;
+    document.body.classList.add('layout-adjust-mode');
+    document.addEventListener('keydown', _onAdjustKey, true);
+    const target = document.getElementById('quotePreview');
+    if (target) target.addEventListener('click', _onAdjustClick, true);
+    document.getElementById('layoutSaveBtn').style.display = '';
+    document.getElementById('layoutResetBtn').style.display = '';
+    // Falls Canvas-Pages aktuell angezeigt werden, neu rendern damit data-adjustable klickbar ist
+    if (typeof updateQuotePreview === 'function') updateQuotePreview();
+    toast('Layout-Anpassen aktiv. Block anklicken → Pfeiltasten verschieben (Shift = 1px)', 'info', 4000);
+  }
+}
+
+function _onAdjustClick(e) {
+  if (!window._layoutAdjustActive) return;
+  const block = e.target.closest('[data-adjustable]');
+  if (!block) return;
+  e.preventDefault();
+  e.stopPropagation();
+  _selectedAdjustKey = block.dataset.adjustable;
+  _deselectAllBlocks();
+  document.querySelectorAll(`#quotePreview [data-adjustable="${_selectedAdjustKey}"]`).forEach(el => {
+    el.classList.add('layout-block-selected');
+  });
+}
+
+function _deselectAllBlocks() {
+  document.querySelectorAll('#quotePreview .layout-block-selected').forEach(el => {
+    el.classList.remove('layout-block-selected');
+  });
+}
+
+function _onAdjustKey(e) {
+  if (!window._layoutAdjustActive) return;
+  if (e.key === 'Escape') {
+    _selectedAdjustKey = null;
+    _deselectAllBlocks();
+    return;
+  }
+  if (!_selectedAdjustKey) return;
+  if (!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) return;
+  const step = e.shiftKey ? 1 : 5;
+  const k = _selectedAdjustKey;
+  if (!window._layoutOffsets[k]) window._layoutOffsets[k] = { x: 0, y: 0 };
+  switch (e.key) {
+    case 'ArrowUp':    window._layoutOffsets[k].y -= step; break;
+    case 'ArrowDown':  window._layoutOffsets[k].y += step; break;
+    case 'ArrowLeft':  window._layoutOffsets[k].x -= step; break;
+    case 'ArrowRight': window._layoutOffsets[k].x += step; break;
+  }
+  e.preventDefault();
+  _applyLiveOffsets();
+}
+
+function _applyLiveOffsets() {
+  Object.entries(window._layoutOffsets).forEach(([key, ofs]) => {
+    document.querySelectorAll(`#quotePreview [data-adjustable="${key}"]`).forEach(el => {
+      el.style.transform = `translate(${ofs.x || 0}px, ${ofs.y || 0}px)`;
+    });
+  });
+}
+
+async function saveLayoutOffsets() {
+  const json = JSON.stringify(window._layoutOffsets || {});
+  // Hidden-Input syncen (wird beim Speichern des Angebots persistiert)
+  const hidden = document.querySelector('#modalBox input[name="layout_offsets"]');
+  if (hidden) hidden.value = json;
+  // Direkt in Airtable speichern wenn Quote schon existiert
+  const id = window._currentQuoteIdInModal;
+  if (id) {
+    try {
+      await updateData('Quote', id, { layout_offsets: json });
+      toast('Layout gespeichert', 'success');
+    } catch (e) { toast('Speichern fehlgeschlagen: ' + e.message, 'error'); }
+  } else {
+    toast('Layout wird mit dem Angebot gespeichert', 'info');
+  }
+}
+
+function resetLayoutOffsets() {
+  if (!confirm('Alle Layout-Anpassungen verwerfen?')) return;
+  window._layoutOffsets = {};
+  // Inline transforms aus DOM entfernen
+  document.querySelectorAll('#quotePreview [data-adjustable]').forEach(el => {
+    el.style.transform = '';
+  });
+  const hidden = document.querySelector('#modalBox input[name="layout_offsets"]');
+  if (hidden) hidden.value = '';
+  toast('Layout zurückgesetzt — speichern nicht vergessen', 'warn', 3000);
+}
+
 /* Toggle für die optionalen Bereiche (Kopfzeile/Einleitung/Schluss/Anhänge).
    Standardmäßig ausgeblendet — werden i.d.R. aus dem Vorlagenpaket übernommen. */
 function toggleQuoteAdvanced() {
@@ -5899,6 +6039,7 @@ async function openQuoteModal(id) {
     { name: 'layout_variant',          type: 'singleLineText' },
     { name: 'bundle_id',               type: 'singleLineText' },
     { name: 'force_closing_new_page',  type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
+    { name: 'layout_offsets',          type: 'multilineText' },
   ]).catch(()=>{});
   // Brand-Color für die blaue Linie unten — pro Mandant in Company hinterlegt
   ensureFields('Company', [
@@ -6069,6 +6210,7 @@ async function openQuoteModal(id) {
           </div>
         </div>
         <input type="hidden" name="layout_variant" value="${escapeHtml(f.layout_variant || 'standard')}">
+        <input type="hidden" name="layout_offsets" value="${escapeHtml(f.layout_offsets || '')}">
         <div class="sm:col-span-2" data-quote-advanced style="display:none;">
           <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
             <label class="text-sm font-medium text-ink-700">Kopfzeile / Tagline</label>
@@ -6157,6 +6299,15 @@ async function openQuoteModal(id) {
       <div class="flex items-center justify-between mb-3 gap-2 flex-wrap">
         <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-2"><i data-lucide="eye" class="w-4 h-4"></i> Live-Vorschau · DIN A4</p>
         <div class="flex gap-1.5 items-center flex-wrap">
+          <button type="button" onclick="toggleLayoutAdjust()" id="layoutAdjustBtn" class="text-xs px-2 py-1 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 flex items-center gap-1" title="Blöcke per Klick selektieren, Pfeiltasten zum Verschieben (Shift = 1px-Schritt)">
+            <i data-lucide="move" class="w-3.5 h-3.5"></i> Layout
+          </button>
+          <button type="button" onclick="saveLayoutOffsets()" id="layoutSaveBtn" style="display:none;" class="text-xs px-2 py-1 rounded-lg border border-green-400 bg-green-50 text-green-800 hover:bg-green-100 flex items-center gap-1">
+            <i data-lucide="save" class="w-3.5 h-3.5"></i> Speichern
+          </button>
+          <button type="button" onclick="resetLayoutOffsets()" id="layoutResetBtn" style="display:none;" class="text-xs px-2 py-1 rounded-lg border border-ink-200 bg-white hover:bg-ink-50 flex items-center gap-1" title="Alle Verschiebungen verwerfen">
+            <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> Reset
+          </button>
           <!-- Zoom Controls -->
           <div class="flex items-center gap-0.5 bg-white border border-ink-200 rounded-lg overflow-hidden">
             <button type="button" onclick="zoomQuotePreview(-0.1)" class="px-2 py-1 hover:bg-ink-50 text-ink-600" title="Zoom raus">
@@ -6350,6 +6501,13 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
   // Es gibt nur noch das Standard-Layout — vereinfacht (ohne Layout-Variante / Custom-Layouts).
   const variant = 'standard';
   const isK = false;
+  // Layout-Offsets: persistent in q.layout_offsets oder live aus _layoutOffsets während Adjust-Modus
+  const persistedOffsets = (() => { try { return JSON.parse(q.layout_offsets || '{}'); } catch (e) { return {}; } })();
+  const offsetsSource = (window._layoutAdjustActive && window._layoutOffsets) ? window._layoutOffsets : persistedOffsets;
+  const ofs = (key) => {
+    const o = offsetsSource[key] || { x: 0, y: 0 };
+    return (o.x || o.y) ? `transform:translate(${o.x}px,${o.y}px);` : '';
+  };
   // Inline-Styles bleiben für Renderer-Konsistenz definiert — leer im Standard-Layout.
   const bodyExtraClass = '';
   const bodyInlineStyle = 'font-family:Inter,system-ui,sans-serif;';
@@ -6393,16 +6551,16 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
     : '';
   // Sub-Logo + 2. Logo (linksbündig) — werden im Pager nur auf Seite 1 gerendert.
   const leftLogosBlock = (subLogoHtml || secondaryLogoHtml)
-    ? `<div class="mt-1 mb-2 flex items-center gap-3" style="justify-content:flex-start;">${subLogoHtml}${secondaryLogoHtml}</div>`
+    ? `<div data-adjustable="sub_logos" class="mt-1 mb-2 flex items-center gap-3" style="justify-content:flex-start;${ofs('sub_logos')}">${subLogoHtml}${secondaryLogoHtml}</div>`
     : '';
   // Tagline einzeilig + kleinere Schrift, garantiert sichtbar.
   // FLP-Logo position:absolute auf der rechten Seite (z-index überdeckt Überlauf falls nötig).
   // Tagline mit padding-right damit sie nicht hinter dem Logo verschwindet.
-  // Tagline im NORMALEN Flow + großzügige Höhe — html2canvas-stabil
+  // Tagline + Logo: jeweils data-adjustable für Layout-Anpassen-Modus
   const header = `
     <div style="position:relative;margin-bottom:4px;padding:18px 184px 6px 0;min-height:52px;box-sizing:border-box;">
-      <div class="text-ink-700" style="font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:18px;">${escapeHtml(tagline)}</div>
-      <div style="position:absolute;top:6px;right:0;z-index:2;">
+      <div data-adjustable="tagline" class="text-ink-700" style="font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;height:18px;${ofs('tagline')}">${escapeHtml(tagline)}</div>
+      <div data-adjustable="flp_logo" style="position:absolute;top:6px;right:0;z-index:2;${ofs('flp_logo')}">
         ${buildQuoteLogoHtml(c, 40)}
       </div>
     </div>
@@ -6430,7 +6588,7 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
         <div>
           <!-- 'Angebot' Titel — in der RECHTEN Spalte, oben, rechtsbündig.
                Aligned mit dem Meta-Block darunter. -->
-          <div class="quote-doc-title text-ink-900 font-bold tracking-tight leading-none text-right" style="font-size:32px;margin-bottom:14px;${titleInlineStyle}">Angebot</div>
+          <div data-adjustable="angebot_title" class="quote-doc-title text-ink-900 font-bold tracking-tight leading-none text-right" style="font-size:32px;margin-bottom:14px;${titleInlineStyle}${ofs('angebot_title')}">Angebot</div>
 
           <div class="${isK ? 'text-[11px]' : 'text-[10px]'}">
             <!-- Meta-Block rechtsbündig, kompakt: Label + 16px Gap + Wert -->
@@ -6743,6 +6901,8 @@ let _quoteCanvasRunning = false;
 
 function scheduleQuoteCanvasRefresh() {
   clearTimeout(_quoteCanvasTimer);
+  // Während Layout-Anpassen-Modus kein Canvas-Capture — HTML-Sheets bleiben klickbar
+  if (window._layoutAdjustActive) return;
   _quoteCanvasTimer = setTimeout(refreshQuoteCanvasPreview, 600);
 }
 
@@ -7920,7 +8080,7 @@ async function saveQuote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id'].forEach(k => {
+  ['quote_no','description','date','valid_until','status','payment_terms','delivery_terms','notes','quote_title','layout_variant','bundle_id','layout_offsets'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   fields.force_closing_new_page = fd.get('force_closing_new_page') === 'on';
