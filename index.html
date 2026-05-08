@@ -87,7 +87,8 @@
   /* Mobile: Live-Vorschau optisch ausblenden, aber im DOM für PDF-Export weiter rendern.
      Position fixed top:-200vh sorgt dafür, dass html2canvas die Sheets noch messen kann. */
   @media (max-width: 1023px) {
-    #quotePreviewPane[data-mobile-hidden="true"]:not([data-mobile-show="1"]) {
+    #quotePreviewPane[data-mobile-hidden="true"]:not([data-mobile-show="1"]),
+    #orderPreviewPane[data-mobile-hidden="true"]:not([data-mobile-show="1"]) {
       position: fixed !important;
       top: -200vh !important;
       left: 0 !important;
@@ -524,7 +525,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.93';
+const APP_VERSION = 'v2.94';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -7156,8 +7157,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
 
 /* Pager: zerlegt das gerenderte Quote-Doc in echte A4-Sheets, jedes mit Header oben + Footer unten.
    Pixel-genau bei 794×1123 (A4 @ 96dpi). Skaliert visuell mit CSS zoom auf die Container-Breite. */
-function paginatePreview() {
-  const target = document.getElementById('quotePreview');
+function paginatePreview(targetId) {
+  const target = document.getElementById(targetId || 'quotePreview');
   if (!target) return;
   const docEl = target.querySelector('[data-quote-doc]');
   if (!docEl) return;
@@ -7353,12 +7354,12 @@ function scheduleQuoteCanvasRefresh() {
   _quoteCanvasTimer = setTimeout(refreshQuoteCanvasPreview, 600);
 }
 
-async function refreshQuoteCanvasPreview() {
+async function refreshQuoteCanvasPreview(targetId) {
   // NEU: Generiert Canvases NUR — ersetzt nicht mehr das DOM.
   // HTML-Vorschau bleibt sichtbar. Canvases werden in window._quoteCanvases gecached
   // und vom PDF-Export gelesen.
   if (_quoteCanvasRunning) return;
-  const target = document.getElementById('quotePreview');
+  const target = document.getElementById(targetId || 'quotePreview');
   if (!target) return;
   const sheets = Array.from(target.querySelectorAll('.quote-sheet'));
   if (!sheets.length) return;
@@ -10796,6 +10797,9 @@ async function updateOrderPreview() {
     });
   } catch (e) {}
   target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing, articleMap);
+  // Paginierung erzwingen — gleiche Pipeline wie beim Angebot, damit der PDF-Export
+  // mehrseitige A4-Sheets findet.
+  paginatePreview('orderPreview');
   if (window.lucide) lucide.createIcons();
 }
 
@@ -11199,7 +11203,11 @@ async function exportOrderAsPdf() {
   const pane = document.getElementById('orderPreviewPane');
   const wasMobileHidden = pane && pane.dataset.mobileHidden === 'true' &&
     window.matchMedia && window.matchMedia('(max-width: 1023px)').matches;
-  if (wasMobileHidden) pane.dataset.mobileShow = '1';
+  if (wasMobileHidden) {
+    pane.dataset.mobileShow = '1';
+    window._quoteCanvases = null;
+  }
+  // Frische Vorschau erzwingen
   try { await updateOrderPreview(); } catch(e) {}
 
   const overlay = document.createElement('div');
@@ -11210,18 +11218,41 @@ async function exportOrderAsPdf() {
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js');
     if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch(e) {} }
+
+    // Canvases via gleicher Pipeline wie beim Angebot erzeugen
+    window._quoteCanvases = null;
+    const sheetsExist = previewEl.querySelectorAll('.quote-sheet').length > 0;
+    if (!sheetsExist) {
+      // Pagination in Fall sie noch nicht gelaufen ist
+      paginatePreview('orderPreview');
+      await new Promise(r => setTimeout(r, 120));
+    }
+    await refreshQuoteCanvasPreview('orderPreview');
+
     const { PDFDocument } = window.PDFLib;
     const pdfDoc = await PDFDocument.create();
     const A4_W = 595.28, A4_H = 841.89;
-    // Single-page render via html2canvas
-    const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: false, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
-    const imgData = canvas.toDataURL('image/png');
-    const pngImg = await pdfDoc.embedPng(imgData);
-    const widthScale = A4_W / pngImg.width;
-    const drawH = pngImg.height * widthScale;
-    const pageH = Math.max(A4_H, drawH);
-    const page = pdfDoc.addPage([A4_W, pageH]);
-    page.drawImage(pngImg, { x: 0, y: pageH - drawH, width: A4_W, height: drawH });
+
+    const canvases = window._quoteCanvases || [];
+    if (canvases.length) {
+      for (const c of canvases) {
+        const imgData = c.toDataURL('image/png');
+        const pngImg = await pdfDoc.embedPng(imgData);
+        const page = pdfDoc.addPage([A4_W, A4_H]);
+        page.drawImage(pngImg, { x: 0, y: 0, width: A4_W, height: A4_H });
+      }
+    } else {
+      // Letzter Fallback: ganzer Container als ein Bild
+      const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: false, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
+      const imgData = canvas.toDataURL('image/png');
+      const pngImg = await pdfDoc.embedPng(imgData);
+      const widthScale = A4_W / pngImg.width;
+      const drawH = pngImg.height * widthScale;
+      const pageH = Math.max(A4_H, drawH);
+      const page = pdfDoc.addPage([A4_W, pageH]);
+      page.drawImage(pngImg, { x: 0, y: pageH - drawH, width: A4_W, height: drawH });
+    }
+
     pdfDoc.setTitle('Auftragsbestätigung ' + orderNo);
     pdfDoc.setAuthor((window._orderCompanyCache || {}).name || 'FLP Lift Parts GmbH');
     pdfDoc.setCreationDate(new Date());
@@ -11238,7 +11269,10 @@ async function exportOrderAsPdf() {
     toast('PDF-Erstellung fehlgeschlagen: ' + (err.message || err), 'error', 5000);
   } finally {
     if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    if (wasMobileHidden && pane) delete pane.dataset.mobileShow;
+    if (wasMobileHidden && pane) {
+      delete pane.dataset.mobileShow;
+      window._quoteCanvases = null;
+    }
   }
 }
 
