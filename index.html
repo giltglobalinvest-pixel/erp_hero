@@ -486,7 +486,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.80';
+const APP_VERSION = 'v2.81';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6624,7 +6624,12 @@ async function updateQuotePreview() {
   let articleMap = {};
   try {
     const articles = await readData('Article');
-    articles.forEach(a => { articleMap[a.id] = a.fields.article_no || ''; });
+    articles.forEach(a => {
+      articleMap[a.id] = {
+        article_no: a.fields.article_no || '',
+        manufacturer_no: a.fields.manufacturer_no || ''
+      };
+    });
   } catch (e) {}
   target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing, articleMap);
   // Erst nach Render in Multi-Page-Sheets paginieren
@@ -6702,6 +6707,43 @@ function renderQuoteFooterHtml(footer) {
     </div>
     <div class="mt-2 h-1.5" style="background:${escapeHtml(footer.brandColor || '#1FA8D6')};"></div>
   `;
+}
+
+// Zerlegt eine Position-Beschreibung in Bezeichnung (erste Zeile, plain text) und Body.
+// Quill liefert HTML wie "<p>Title</p><p><br></p><p>Body line 1</p>…".
+// Plain text: erste nicht-leere Zeile = Bezeichnung, Rest = Body.
+function splitDescriptionTitleAndBody(rawDesc) {
+  const out = { title: '', titleHtml: '', bodyHtml: '', bodyText: '', isHtml: false };
+  if (!rawDesc) return out;
+  const isHtml = /<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(rawDesc);
+  out.isHtml = isHtml;
+  if (isHtml) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = rawDesc;
+    // Erstes Top-Level-Kind mit nicht-leerem Textinhalt = Bezeichnung
+    let titleEl = null;
+    for (const child of Array.from(tmp.children)) {
+      const t = (child.textContent || '').trim();
+      if (t) { titleEl = child; out.title = t; out.titleHtml = child.innerHTML; break; }
+    }
+    if (titleEl) titleEl.remove();
+    // Führende leere Absätze entfernen ("<p><br></p>" etc.)
+    while (tmp.firstElementChild && !(tmp.firstElementChild.textContent || '').trim()) {
+      tmp.firstElementChild.remove();
+    }
+    out.bodyHtml = tmp.innerHTML.trim();
+    out.bodyText = (tmp.textContent || '').trim();
+    // Wenn keine Tags im Title-HTML, gleicher Text wie titleHtml
+    if (!out.title) out.title = (rawDesc.replace(/<[^>]+>/g, '') || '').trim();
+  } else {
+    const lines = rawDesc.split('\n').map(l => l.trim()).filter(Boolean);
+    out.title = lines[0] || '';
+    out.titleHtml = '';
+    const rest = lines.slice(1).join('\n');
+    out.bodyHtml = ''; // plain text
+    out.bodyText = rest;
+  }
+  return out;
 }
 
 function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
@@ -6857,25 +6899,23 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               const grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
               const discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
               const rawDesc = f.description || '';
-              const isHtmlDesc = /<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(rawDesc);
               const aId = (f.article_id || [])[0];
-              const aNo = aId ? (articleMap[aId] || '') : '';
-              // Layout: Bezeichnung (fett) → Artikelnr (kursiv) → Leerzeile → Beschreibung
-              let descCell;
-              if (isHtmlDesc) {
-                // HTML-Beschreibung: Title als erste Textzeile extrahieren ist heuristisch — wir zeigen einfach die Bezeichnung als ganzen HTML-Block,
-                // davor die Artikelnr in kursiv (falls vorhanden).
-                descCell = `<div class="font-bold quote-bezeichnung" style="${bezeichnungInlineStyle}">${rawDesc}</div>` +
-                           (aNo ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic text-ink-600 leading-snug">${escapeHtml(aNo)}</div>` : '');
-              } else {
-                const descLines = rawDesc.split('\n').map(l => l.trim()).filter(Boolean);
-                const descMain = descLines[0] || '';
-                const descRest = descLines.slice(1).join('\n');
-                descCell =
-                  `<div class="font-bold quote-bezeichnung" style="${bezeichnungInlineStyle}">${escapeHtml(descMain)}</div>` +
-                  (aNo ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic text-ink-600 leading-snug">${escapeHtml(aNo)}</div>` : '') +
-                  (descRest ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} text-ink-700 leading-snug mt-2 whitespace-pre-line">${escapeHtml(descRest)}</div>` : '');
-              }
+              const aRef = aId ? (articleMap[aId] || {}) : {};
+              const manNo = (aRef.manufacturer_no || '').trim();
+              // Layout: Bezeichnung (fett) → Hersteller-Artikelnr (kursiv) → Leerzeile → Beschreibung
+              const split = splitDescriptionTitleAndBody(rawDesc);
+              const titleHtml = split.isHtml && split.titleHtml
+                ? split.titleHtml
+                : escapeHtml(split.title);
+              const bodyBlock = split.isHtml && split.bodyHtml
+                ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} text-ink-700 leading-snug mt-2 quote-bezeichnung-body">${split.bodyHtml}</div>`
+                : (split.bodyText
+                    ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} text-ink-700 leading-snug mt-2 whitespace-pre-line">${escapeHtml(split.bodyText)}</div>`
+                    : '');
+              const descCell =
+                `<div class="font-bold quote-bezeichnung" style="${bezeichnungInlineStyle}">${titleHtml || '<span class="text-ink-400 italic">— Bezeichnung —</span>'}</div>` +
+                (manNo ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic text-ink-600 leading-snug">${escapeHtml(manNo)}</div>` : '') +
+                bodyBlock;
               return `<tr class="border-b border-ink-100 align-top">
                 <td class="px-1 py-1.5">${escapeHtml(String(f.pos || ''))}</td>
                 <td class="px-1 py-1.5">${escapeHtml(String(f.qty || ''))}</td>
@@ -8070,7 +8110,9 @@ function quoteItemRow(quoteId, it) {
   const f = it.fields || {};
   const internalMode = !!window._quoteInternalMode;
   const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
-  const desc = (f.description || '').split('\n')[0] || '–';
+  // HTML aus Quill-Editor sauber als Text rendern (erste nicht-leere Zeile)
+  const split = splitDescriptionTitleAndBody(f.description || '');
+  const desc = split.title || '–';
   const ek = +(f.purchase_price || 0);
   const lineEk = (+(f.qty || 0)) * ek;
   const margin = lineNet - lineEk;
@@ -8319,6 +8361,9 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
       const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
       q.on('text-change', sync);
       sync();
+      // Quill-Instanz für späteren Article-Prefill verfügbar machen
+      window._qiQuillByFid = window._qiQuillByFid || {};
+      window._qiQuillByFid[fid] = q;
       q.focus();
     }
   }, 80);
@@ -8345,11 +8390,31 @@ function onQiArticleChange(value, comboboxId) {
   const a = (window._qiArticleCacheById || {})[articleId];
   if (!a) return;
   const descEl = document.getElementById(fid + '_description');
-  if (descEl && !descEl.value) {
-    // Layout: Erste Zeile = Bezeichnung (name1 + name2), darunter Beschreibung
+  const quill  = (window._qiQuillByFid || {})[fid];
+  // Quill als Wahrheit nehmen — leer-Test = nur "<p><br></p>" oder garnix
+  const isEmpty = (() => {
+    if (quill) {
+      const txt = (quill.getText() || '').replace(/\s/g, '');
+      return !txt;
+    }
+    return !(descEl?.value || '').trim();
+  })();
+  if (isEmpty) {
+    // Layout: Erste Zeile = Bezeichnung (name1 + name2, fett), darunter ggf. Beschreibung
     const titleLine = [a.name1, a.name2].filter(Boolean).join(' ');
-    const lines = [titleLine, a.desc].filter(Boolean);
-    descEl.value = lines.join('\n');
+    const descRest  = (a.desc || '').trim();
+    if (quill) {
+      // HTML-Format für Quill: <p><strong>Title</strong></p> + <p>Beschreibung-Zeilen</p>
+      const titleHtml = titleLine ? `<p>${escapeHtml(titleLine)}</p>` : '';
+      const bodyHtml  = descRest
+        ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('')
+        : '';
+      quill.root.innerHTML = titleHtml + bodyHtml;
+      // Hidden-Input syncen (über text-change-Event passiert nicht bei innerHTML-Set)
+      if (descEl) descEl.value = quill.root.innerHTML;
+    } else if (descEl) {
+      descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
+    }
   }
   const priceEl = document.getElementById(fid + '_unit_price_net');
   if (priceEl) priceEl.value = a.price;
@@ -8395,8 +8460,12 @@ async function saveQuoteItemInline(quoteId, itemId) {
   const $v = id => (document.getElementById(fid + '_' + id)?.value || '').trim();
   // Combobox: value-Element heißt jetzt fid + '_article_value'
   const articleId = document.getElementById(fid + '_article_value')?.value || '';
-  const desc = $v('description');
-  if (!desc) return toast('Beschreibung fehlt', 'error');
+  let desc = $v('description');
+  // Quill liefert "<p><br></p>" als leeren Wert — als leer behandeln
+  const split = splitDescriptionTitleAndBody(desc);
+  if (!split.title) return toast('Beschreibung fehlt', 'error');
+  // Wenn der HTML-Inhalt nur eine leere "<p><br></p>"-Zeile ist: als leer speichern, sonst wie eingegeben
+  if (!split.title && !(split.bodyText || split.bodyHtml)) desc = '';
   const pos = parseInt($v('pos'), 10) || 1;
   const qty = parseDecimal($v('qty')) || 0;
   const price = parseDecimal($v('unit_price_net')) || 0;
@@ -8410,7 +8479,7 @@ async function saveQuoteItemInline(quoteId, itemId) {
     vat_rate:       vat,
     description:    desc,
     line_total_net: calcLineNet(qty, price, disc),
-    label:          'Pos.' + pos + ' · ' + desc.split('\n')[0].substring(0, 50)
+    label:          'Pos.' + pos + ' · ' + (split.title || '').substring(0, 50)
   };
   fields.article_id = articleId ? [articleId] : [];
   // Lieferant + EK-Preis (Snapshot)
