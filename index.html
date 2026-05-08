@@ -171,6 +171,28 @@
     form[data-article-form] [class*="col-span-"] {
       grid-column: auto !important;
     }
+    /* Quill-Editor auf Mobile auf eine sinnvolle Höhe begrenzen, sonst expandiert er
+       durch height:100% in Quill's CSS auf die volle Modalhöhe und überlagert nachfolgende Felder. */
+    form[data-article-form] #article_description_editor {
+      max-height: 220px !important;
+    }
+    form[data-article-form] #article_description_editor .ql-editor {
+      max-height: 220px !important;
+      overflow-y: auto !important;
+    }
+    /* Gleiches für Quote-Position-Editoren */
+    form[data-quote-form] [id$="_description_editor"] {
+      max-height: 220px !important;
+    }
+    form[data-quote-form] [id$="_description_editor"] .ql-editor {
+      max-height: 220px !important;
+      overflow-y: auto !important;
+    }
+  }
+  /* Auf Desktop ebenfalls eine sinnvolle Maximalhöhe (sonst kann Quill bei langen Texten unschön wachsen) */
+  #article_description_editor .ql-editor {
+    max-height: 320px;
+    overflow-y: auto;
   }
 </style>
 </head>
@@ -494,7 +516,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.84';
+const APP_VERSION = 'v2.85';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
