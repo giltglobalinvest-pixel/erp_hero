@@ -471,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.77';
+const APP_VERSION = 'v2.78';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4183,7 +4183,11 @@ async function openInquiryModal(id) {
     .filter(c => (c.fields.company_id || []).includes(cur.id))
     .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
   const currentCustomerId = (f.customer_id || [])[0] || '';
-  const currentContactId  = (f.contact_id  || [])[0] || '';
+  let   currentContactId  = (f.contact_id  || [])[0] || '';
+  // Bei Neuanlage Hauptansprechpartner vorbelegen
+  if (!currentContactId && currentCustomerId) {
+    currentContactId = findPrimaryContactId(allContacts, currentCustomerId, 'customer');
+  }
 
   const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
@@ -4294,8 +4298,9 @@ function onInquiryCustomerChange() {
   if (!cid) { select.innerHTML = '<option value="">— nicht zugeordnet —</option>'; return; }
   readData('Contact').then(all => {
     const list = all.filter(c => (c.fields.customer_id || []).includes(cid));
+    const primaryId = findPrimaryContactId(all, cid, 'customer');
     select.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
-      list.map(c => `<option value="${c.id}">${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
+      list.map(c => `<option value="${c.id}" ${primaryId === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
   });
 }
 
@@ -4786,6 +4791,10 @@ function inqWizStep3Analysis() {
   const contactsForCustomer = w.data.customer_id
     ? (w.contacts || []).filter(c => (c.fields.customer_id || []).includes(w.data.customer_id))
     : [];
+  // Hauptansprechpartner vorbelegen, wenn Kunde gesetzt aber noch kein Kontakt gewählt
+  if (w.data.customer_id && !w.data.contact_id) {
+    w.data.contact_id = findPrimaryContactId(w.contacts || [], w.data.customer_id, 'customer');
+  }
   const customerHintBadge = w.aiHints.customer && !w.data.customer_id
     ? `<p class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-1">KI-Vorschlag: „${escapeHtml(w.aiHints.customer)}" — kein passender Kunde gefunden, bitte manuell wählen oder anlegen.</p>`
     : '';
@@ -4937,13 +4946,14 @@ function onInqWizCustomerChange() {
   const w = _inquiryWizard;
   const cid = document.getElementById('iw_customer_id')?.value || '';
   w.data.customer_id = cid;
-  w.data.contact_id = '';
+  // Hauptansprechpartner vorbelegen
+  w.data.contact_id = cid ? findPrimaryContactId(w.contacts || [], cid, 'customer') : '';
   const select = document.getElementById('iw_contact_id');
   if (!select) return;
   if (!cid) { select.innerHTML = '<option value="">— nicht zugeordnet —</option>'; return; }
   const list = (w.contacts || []).filter(c => (c.fields.customer_id || []).includes(cid));
   select.innerHTML = '<option value="">— nicht zugeordnet —</option>' +
-    list.map(c => `<option value="${c.id}">${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
+    list.map(c => `<option value="${c.id}" ${w.data.contact_id === c.id ? 'selected' : ''}>${escapeHtml(contactDisplayName(c.fields))}${c.fields.role ? ' · ' + escapeHtml(c.fields.role) : ''}</option>`).join('');
 }
 
 async function analyzeInquiryWizard() {
@@ -6213,7 +6223,11 @@ async function openQuoteModal(id) {
     .filter(c => (c.fields.company_id || []).includes(cur.id))
     .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
   const currentCustomerId = (f.customer_id || [])[0] || '';
-  const currentContactId  = (f.contact_id  || [])[0] || '';
+  let   currentContactId  = (f.contact_id  || [])[0] || '';
+  // Bei Neuanlage (oder wenn noch kein Kontakt gesetzt): Hauptansprechpartner des Kunden vorbelegen
+  if (!currentContactId && currentCustomerId) {
+    currentContactId = findPrimaryContactId(allContacts, currentCustomerId, 'customer');
+  }
   const sums = calcQuoteSums(items);
 
   // Combobox-Items
@@ -7105,6 +7119,17 @@ function onQuoteCustomerChange(value) {
   if (contactValueEl && !items.find(i => i.id === contactValueEl.value)) {
     contactValueEl.value = '';
     if (contactSearchEl) contactSearchEl.value = '';
+  }
+  // Hauptansprechpartner automatisch vorbelegen (überschreibt nur leere Auswahl)
+  if (cid && contactValueEl && !contactValueEl.value) {
+    const primaryId = findPrimaryContactId(contacts, cid, 'customer');
+    if (primaryId) {
+      const primaryItem = items.find(i => i.id === primaryId);
+      if (primaryItem) {
+        contactValueEl.value = primaryId;
+        if (contactSearchEl) contactSearchEl.value = primaryItem.label;
+      }
+    }
   }
   // 2) Defaults aus Customer (nur wenn Felder leer; Select wird per Wert gesetzt)
   if (cid) {
@@ -8616,6 +8641,20 @@ function renderEntityContacts(entity, entityId, contacts) {
 function contactDisplayName(f) {
   const full = [f.first_name, f.last_name].filter(Boolean).join(' ');
   return full || f.name || '–';
+}
+
+// Sucht den Hauptansprechpartner eines Kunden / Lieferanten.
+// `entity` ist 'customer' oder 'supplier'. Gibt Contact-Record-ID zurück oder ''.
+function findPrimaryContactId(contacts, entityId, entity = 'customer') {
+  if (!entityId || !Array.isArray(contacts)) return '';
+  const linkField = entity + '_id';
+  const peers = contacts.filter(c => (c.fields[linkField] || []).includes(entityId));
+  if (peers.length === 0) return '';
+  const primary = peers.find(c => c.fields.is_primary);
+  if (primary) return primary.id;
+  // Fallback: einziger Kontakt → automatisch wählen
+  if (peers.length === 1) return peers[0].id;
+  return '';
 }
 
 function contactSalutation(f) {
