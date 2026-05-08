@@ -471,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.74';
+const APP_VERSION = 'v2.75';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5557,8 +5557,7 @@ function toggleLayoutAdjust() {
     _deselectAllBlocks();
     document.getElementById('layoutSaveBtn')?.style.setProperty('display', 'none');
     document.getElementById('layoutResetBtn')?.style.setProperty('display', 'none');
-    // Trigger Canvas-Refresh für sauberes finales Bild
-    if (typeof scheduleQuoteCanvasRefresh === 'function') scheduleQuoteCanvasRefresh();
+    // HTML-Vorschau bleibt sichtbar — kein Canvas-Replace mehr nötig
   } else {
     // Modus aktivieren — Offsets aus Hidden-Input laden
     const hidden = document.querySelector('#modalBox input[name="layout_offsets"]');
@@ -6414,8 +6413,8 @@ async function updateQuotePreview() {
   target.innerHTML = renderQuotePreviewHtml(ctx, items, intro, closing, articleMap);
   // Erst nach Render in Multi-Page-Sheets paginieren
   paginatePreview();
-  // Dann zeitversetzt echte PDF-Vorschau (jedes Sheet via html2canvas zu Bild)
-  scheduleQuoteCanvasRefresh();
+  // KEIN Canvas-Capture-Replace mehr — HTML-Vorschau bleibt klickbar/zoom-fähig.
+  // Canvases werden bei Bedarf in exportQuoteAsPdf on-the-fly generiert.
   if (window.lucide) lucide.createIcons();
 }
 
@@ -6909,6 +6908,9 @@ function scheduleQuoteCanvasRefresh() {
 }
 
 async function refreshQuoteCanvasPreview() {
+  // NEU: Generiert Canvases NUR — ersetzt nicht mehr das DOM.
+  // HTML-Vorschau bleibt sichtbar. Canvases werden in window._quoteCanvases gecached
+  // und vom PDF-Export gelesen.
   if (_quoteCanvasRunning) return;
   const target = document.getElementById('quotePreview');
   if (!target) return;
@@ -6916,14 +6918,14 @@ async function refreshQuoteCanvasPreview() {
   if (!sheets.length) return;
   _quoteCanvasRunning = true;
 
-  // Loading-Badge (kleines Pill rechts oben)
+  // Loading-Badge
   let badge = target.querySelector('[data-canvas-loading]');
   if (!badge) {
     if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
     badge = document.createElement('div');
     badge.setAttribute('data-canvas-loading', '');
     badge.style.cssText = 'position:absolute;top:8px;right:8px;background:rgba(15,23,42,0.85);color:#fff;font-size:10px;padding:4px 10px;border-radius:99px;z-index:50;font-family:Inter,sans-serif;display:flex;align-items:center;gap:6px;';
-    badge.innerHTML = '<span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:pdfspin 0.7s linear infinite;display:inline-block;"></span>PDF-Vorschau wird erstellt';
+    badge.innerHTML = '<span style="width:10px;height:10px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:pdfspin 0.7s linear infinite;display:inline-block;"></span>PDF wird vorbereitet';
     target.appendChild(badge);
   }
 
@@ -6933,7 +6935,7 @@ async function refreshQuoteCanvasPreview() {
 
     const canvases = [];
     for (const sheet of sheets) {
-      if (!sheet.parentNode) break; // Sheet wurde durch erneutes Re-Render gewechselt
+      if (!sheet.parentNode) break;
       const origZoom = sheet.style.zoom;
       sheet.style.zoom = '1';
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -6953,22 +6955,10 @@ async function refreshQuoteCanvasPreview() {
         if (sheet.parentNode) sheet.style.zoom = origZoom;
       }
     }
-
-    // Sheets durch Canvas-Wrapper ersetzen — nur, wenn die Sheets noch im DOM hängen
-    sheets.forEach((sheet, i) => {
-      if (!sheet.parentNode || !canvases[i]) return;
-      const c = canvases[i];
-      const wrap = document.createElement('div');
-      wrap.className = 'quote-canvas-page';
-      wrap.style.cssText = 'width:100%;aspect-ratio:210/297;background:#FFFFFF;box-shadow:0 6px 24px rgba(0,0,0,0.12);margin:0 auto 18px auto;overflow:hidden;';
-      c.style.cssText = 'width:100%;height:100%;display:block;';
-      wrap.appendChild(c);
-      sheet.replaceWith(wrap);
-    });
-
     window._quoteCanvases = canvases;
+    // KEIN DOM-Replace mehr — HTML-Sheets bleiben sichtbar
   } catch (e) {
-    console.error('PDF-Vorschau fehlgeschlagen:', e);
+    console.error('Canvas-Generierung fehlgeschlagen:', e);
   } finally {
     _quoteCanvasRunning = false;
     const b = target.querySelector('[data-canvas-loading]');
