@@ -524,7 +524,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.92';
+const APP_VERSION = 'v2.93';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2147,6 +2147,7 @@ async function ensureQuoteBundleTable() {
     { name: 'company_id',             type: 'singleLineText' },
     { name: 'status',                 type: 'singleLineText' },
     { name: 'is_default',             type: 'checkbox', options: { color: 'greenBright', icon: 'check' } },
+    { name: 'doc_type',               type: 'singleLineText' },
     { name: 'title_template_id',      type: 'singleLineText' },
     { name: 'intro_template_id',      type: 'singleLineText' },
     { name: 'closing_template_id',    type: 'singleLineText' },
@@ -2156,6 +2157,13 @@ async function ensureQuoteBundleTable() {
     { name: 'force_closing_new_page', type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
   ]);
 }
+
+// Helper: doc_type aus Bundle. Leer/fehlend = 'Angebot' (backward compat)
+function bundleDocType(b) {
+  return (b && b.fields && b.fields.doc_type) ? b.fields.doc_type : 'Angebot';
+}
+
+const _bundleAdminState = { docType: 'alle' };
 
 async function renderAdminQuoteBundles() {
   setPageTitle('Vorlagenpakete');
@@ -2168,18 +2176,26 @@ async function renderAdminQuoteBundles() {
   await ensureQuoteBundleTable();
   let all = [];
   try { all = await readData('QuoteBundle'); } catch (e) {}
-  const bundles = all.filter(b => (b.fields.company_id === cur.id) && (b.fields.status || 'aktiv') !== 'archiviert')
-    .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  let bundles = all.filter(b => (b.fields.company_id === cur.id) && (b.fields.status || 'aktiv') !== 'archiviert');
+  if (_bundleAdminState.docType !== 'alle') {
+    bundles = bundles.filter(b => bundleDocType(b) === _bundleAdminState.docType);
+  }
+  bundles.sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
 
   const rows = bundles.length === 0
     ? '<p class="text-ink-500 italic text-sm p-4 text-center">Noch keine Pakete angelegt.</p>'
     : bundles.map(b => {
         const f = b.fields;
+        const dt = bundleDocType(b);
+        const dtBadge = dt === 'Auftrag'
+          ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">Auftrag</span>'
+          : '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">Angebot</span>';
         return `
           <div class="flex items-center justify-between gap-3 px-4 py-3 hover:bg-ink-50 border-b border-ink-100">
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="font-semibold text-ink-900">${escapeHtml(f.name || '–')}</span>
+                ${dtBadge}
                 ${f.is_default ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Standard</span>' : ''}
                 <span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded">${escapeHtml(f.layout_variant || 'standard')}</span>
               </div>
@@ -2190,7 +2206,7 @@ async function renderAdminQuoteBundles() {
             </div>
             <div class="flex gap-1 shrink-0">
               <button onclick="openQuoteBundleEdit('${b.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
-              <button onclick="toggleQuoteBundleDefault('${b.id}', ${!f.is_default})" class="p-1.5 text-ink-500 hover:text-amber-600 hover:bg-ink-100 rounded" title="${f.is_default ? 'Standard entfernen' : 'Als Standard'}"><i data-lucide="star" class="w-3.5 h-3.5"${f.is_default?' style="fill:currentColor;color:#f59e0b"':''}></i></button>
+              <button onclick="toggleQuoteBundleDefault('${b.id}', ${!f.is_default})" class="p-1.5 text-ink-500 hover:text-amber-600 hover:bg-ink-100 rounded" title="${f.is_default ? 'Standard entfernen' : 'Als Standard (für diesen Doc-Typ)'}"><i data-lucide="star" class="w-3.5 h-3.5"${f.is_default?' style="fill:currentColor;color:#f59e0b"':''}></i></button>
               <button onclick="deleteQuoteBundle('${b.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
             </div>
           </div>
@@ -2199,9 +2215,17 @@ async function renderAdminQuoteBundles() {
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-5xl mx-auto">
-      <div class="flex items-center justify-between mb-4">
-        <p class="text-sm text-ink-600">Vorlagenpakete bündeln Titel, Einleitung, Schluss + Anhänge + Layout für Angebote — wähle bei einem neuen Angebot ein Paket aus, statt alles einzeln.</p>
-        <button onclick="openQuoteBundleEdit()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2 shrink-0 ml-3"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>
+      <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <p class="text-sm text-ink-600 flex-1 min-w-[260px]">Vorlagenpakete bündeln Titel, Einleitung, Schluss + Anhänge + Layout — wähle bei einem neuen Angebot oder Auftrag ein Paket aus, statt alles einzeln.</p>
+        <div class="flex items-center gap-2">
+          <label class="text-xs text-ink-500">Typ:</label>
+          <select onchange="_bundleAdminState.docType=this.value;renderAdminQuoteBundles()" class="text-sm border border-ink-200 rounded-lg px-2 py-2">
+            <option value="alle"    ${_bundleAdminState.docType==='alle'?'selected':''}>alle</option>
+            <option value="Angebot" ${_bundleAdminState.docType==='Angebot'?'selected':''}>Angebot</option>
+            <option value="Auftrag" ${_bundleAdminState.docType==='Auftrag'?'selected':''}>Auftrag</option>
+          </select>
+          <button onclick="openQuoteBundleEdit()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2 shrink-0"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>
+        </div>
       </div>
       <div class="bg-white rounded-2xl shadow-card overflow-hidden">${rows}</div>
     </div>
@@ -2219,12 +2243,17 @@ async function openQuoteBundleEdit(id) {
   }
   // Vorhandene Templates + Anhänge + Variablen laden
   const [allTpl, allAtt, allCf] = await Promise.all([readData('Textemplate'), readData('Attachment'), readData('CustomField')]);
-  const templates = allTpl.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.doc_type === 'Angebot') && (t.fields.status || 'aktiv') === 'aktiv');
+  // Doc-Typ des Bundles: pending (vom Selector-Wechsel) > gespeichert > Admin-Filter > Default
+  const docType = window._pendingBundleDocType
+    || f.doc_type
+    || (_bundleAdminState.docType !== 'alle' ? _bundleAdminState.docType : 'Angebot');
+  delete window._pendingBundleDocType;
+  const templates = allTpl.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.doc_type === docType) && (t.fields.status || 'aktiv') === 'aktiv');
   const titleTpls   = templates.filter(t => (t.fields.section || '') === 'Titel');
   const introTpls   = templates.filter(t => (t.fields.section || '') === 'Einleitung');
   const closingTpls = templates.filter(t => (t.fields.section || '') === 'Schlusstext');
   const attachments = allAtt.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.name||'').localeCompare(b.fields.name||'','de'));
-  const customFields = allCf.filter(cf => (cf.fields.company_id || []).includes(cur.id) && (cf.fields.doc_type === 'Angebot') && (cf.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.label||a.fields.name||'').localeCompare(b.fields.label||b.fields.name||'','de'));
+  const customFields = allCf.filter(cf => (cf.fields.company_id || []).includes(cur.id) && (cf.fields.doc_type === docType) && (cf.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.label||a.fields.name||'').localeCompare(b.fields.label||b.fields.name||'','de'));
   const selectedAtt   = (() => { try { return JSON.parse(f.attachment_ids || '[]'); } catch(e) { return []; } })();
   const variableValues = (() => { try { return JSON.parse(f.variable_values  || '{}'); } catch(e) { return {}; } })();
 
@@ -2241,9 +2270,17 @@ async function openQuoteBundleEdit(id) {
           <label class="block text-sm font-medium text-ink-700 mb-1">Name <span class="text-red-500">*</span></label>
           <input name="name" required value="${escapeHtml(f.name || '')}" placeholder="z.B. „Reparaturangebot Standard"" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1">Dokumenttyp <span class="text-red-500">*</span></label>
+          <select name="doc_type" onchange="(function(s){if(confirm('Doc-Typ ändern? Vorlagenauswahl wird neu geladen — ungespeicherte Eingaben gehen verloren.')){window._pendingBundleDocType=s.value;openQuoteBundleEdit('${id || ''}');}else{s.value='${docType}';}})(this)" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="Angebot" ${docType==='Angebot'?'selected':''}>Angebot</option>
+            <option value="Auftrag" ${docType==='Auftrag'?'selected':''}>Auftrag (Auftragsbestätigung)</option>
+          </select>
+          <p class="text-[11px] text-ink-500 mt-1">Bestimmt, in welchen Modul-Pickern dieses Paket erscheint. Bei Änderung werden die passenden Textbausteine geladen.</p>
+        </div>
         <div class="flex items-center gap-2">
           <input id="bdl_default" name="is_default" type="checkbox" ${f.is_default ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
-          <label for="bdl_default" class="text-sm text-ink-700">Als Standard markieren (wird bei neuen Angeboten automatisch gewählt)</label>
+          <label for="bdl_default" class="text-sm text-ink-700">Als Standard markieren (wird bei neuen ${docType==='Auftrag'?'Aufträgen':'Angeboten'} automatisch gewählt)</label>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Titel-Vorlage</label>
@@ -2338,6 +2375,7 @@ async function saveQuoteBundle(e, id) {
     name: (fd.get('name') || '').trim(),
     company_id: cur.id,
     status: 'aktiv',
+    doc_type: (fd.get('doc_type') || 'Angebot').trim(),
     is_default: fd.get('is_default') === 'on',
     title_template_id:   (fd.get('title_template_id')   || '').trim(),
     intro_template_id:   (fd.get('intro_template_id')   || '').trim(),
@@ -2349,10 +2387,10 @@ async function saveQuoteBundle(e, id) {
   };
   if (!fields.name) return toast('Name fehlt', 'error');
   try {
-    // Wenn als Standard: andere Standards entflaggen
+    // Wenn als Standard: andere Standards INNERHALB des gleichen Doc-Typs entflaggen
     if (fields.is_default) {
       const all = await readData('QuoteBundle').catch(()=>[]);
-      const others = all.filter(b => b.fields.company_id === cur.id && b.fields.is_default && b.id !== id);
+      const others = all.filter(b => b.fields.company_id === cur.id && b.fields.is_default && bundleDocType(b) === fields.doc_type && b.id !== id);
       for (const o of others) {
         try { await updateData('QuoteBundle', o.id, { is_default: false }); } catch(e) {}
       }
@@ -2368,9 +2406,12 @@ async function saveQuoteBundle(e, id) {
 async function toggleQuoteBundleDefault(id, makeDefault) {
   const cur = getCurrentCompany();
   try {
+    const all = await readData('QuoteBundle').catch(()=>[]);
+    const target = all.find(b => b.id === id);
+    const targetDocType = bundleDocType(target);
     if (makeDefault) {
-      const all = await readData('QuoteBundle').catch(()=>[]);
-      const others = all.filter(b => b.fields.company_id === cur.id && b.fields.is_default && b.id !== id);
+      // Nur Defaults innerhalb des gleichen Doc-Typs entflaggen
+      const others = all.filter(b => b.fields.company_id === cur.id && b.fields.is_default && bundleDocType(b) === targetDocType && b.id !== id);
       for (const o of others) {
         try { await updateData('QuoteBundle', o.id, { is_default: false }); } catch(e) {}
       }
@@ -5213,7 +5254,37 @@ const TEMPLATE_VARIABLES = {
     { name: 'user.name',               label: 'Bearbeiter',        resolve: c => c.user?.name || '' },
     { name: 'datum.heute',             label: 'Heute',             resolve: ()=> formatDeDate(new Date().toISOString().slice(0,10)) }
   ],
-  Auftrag:      [], // wird befüllt sobald Aufträge implementiert sind
+  Auftrag: [
+    { name: 'auftrag.nr',              label: 'AB-Nr.',            resolve: c => c.quote?.quote_no || '' },
+    { name: 'auftrag.datum',           label: 'Datum',             resolve: c => formatDeDate(c.quote?.date) },
+    { name: 'auftrag.bestaetigt_am',   label: 'Bestätigt am',      resolve: c => formatDeDate(c.quote?.valid_until) },
+    { name: 'auftrag.zahlungsziel',    label: 'Zahlungsziel',      resolve: c => c.quote?.payment_terms || '' },
+    { name: 'auftrag.lieferung',       label: 'Lieferbedingungen', resolve: c => c.quote?.delivery_terms || '' },
+    { name: 'kunde.firma',             label: 'Kunde · Firma',     resolve: c => c.customer?.name1 || '' },
+    { name: 'kunde.firma2',            label: 'Kunde · Zusatz',    resolve: c => c.customer?.name2 || '' },
+    { name: 'kunde.kundennr',          label: 'Kundennr.',         resolve: c => c.customer?.customer_no || '' },
+    { name: 'kunde.adresse',           label: 'Kunde · Adresse',   resolve: c => [c.customer?.street, [c.customer?.zip, c.customer?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') },
+    { name: 'kunde.ustid',             label: 'Kunde · USt-IdNr',  resolve: c => c.customer?.vat_id || '' },
+    { name: 'kontakt.anrede',          label: 'Anrede (Sehr geehrter Herr/Frau)', resolve: c => {
+        const g = c.contact?.gender;
+        if (g === 'männlich') return 'Sehr geehrter Herr';
+        if (g === 'weiblich') return 'Sehr geehrte Frau';
+        return 'Sehr geehrte Damen und Herren';
+      }
+    },
+    { name: 'kontakt.anrede_kurz',     label: 'Anrede kurz',       resolve: c => contactSalutation(c.contact || {}) },
+    { name: 'kontakt.vorname',         label: 'Kontakt · Vorname', resolve: c => c.contact?.first_name || '' },
+    { name: 'kontakt.nachname',        label: 'Kontakt · Nachname',resolve: c => c.contact?.last_name  || '' },
+    { name: 'kontakt.name',            label: 'Kontakt · Voll',    resolve: c => contactDisplayName(c.contact || {}) },
+    { name: 'kontakt.email',           label: 'Kontakt · Email',   resolve: c => c.contact?.email || '' },
+    { name: 'firma.name',              label: 'Eigene Firma',      resolve: c => c.company?.name || '' },
+    { name: 'firma.adresse',           label: 'Eigene Adresse',    resolve: c => [c.company?.street, [c.company?.zip, c.company?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') },
+    { name: 'firma.telefon',           label: 'Eigene Telefon',    resolve: c => c.company?.phone || '' },
+    { name: 'firma.email',             label: 'Eigene Email',      resolve: c => c.company?.email || '' },
+    { name: 'firma.ustid',             label: 'Eigene USt-IdNr',   resolve: c => c.company?.vat_id || '' },
+    { name: 'user.name',               label: 'Bearbeiter',        resolve: c => c.user?.name || '' },
+    { name: 'datum.heute',             label: 'Heute',             resolve: ()=> formatDeDate(new Date().toISOString().slice(0,10)) }
+  ],
   Rechnung:     [],
   Lieferschein: [],
   Artikel:      [],
@@ -6317,11 +6388,11 @@ async function openQuoteModal(id) {
   const defaultTitleTpl   = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Titel'       && t.fields.is_default);
   const defaultIntroTpl   = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Einleitung'  && t.fields.is_default);
   const defaultClosingTpl = (window._quoteTemplates || []).find(t => (t.fields.section || '') === 'Schlusstext' && t.fields.is_default);
-  // Vorlagenpakete (Bundles) laden — pro Mandant
+  // Vorlagenpakete (Bundles) laden — pro Mandant; nur Angebot-Bundles (oder Legacy ohne doc_type)
   let allBundles = [];
   try { allBundles = await readData('QuoteBundle'); } catch (e) {}
   window._quoteBundles = allBundles
-    .filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert')
+    .filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert' && bundleDocType(b) === 'Angebot')
     .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
   const defaultBundle = window._quoteBundles.find(b => b.fields.is_default);
 
@@ -10196,13 +10267,24 @@ async function openOrderModal(id, opts = {}) {
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   await ensureOrderSchema();
 
-  let f = {}, items = [], allCustomers = [], allContacts = [], allQuotes = [], allAddresses = [], allPaymentTerms = [], allDeliveryTerms = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allQuotes = [], allAddresses = [], allPaymentTerms = [], allDeliveryTerms = [], allBundles = [], allTemplates = [];
   try {
-    [allCustomers, allContacts, allQuotes, allAddresses, allPaymentTerms, allDeliveryTerms] = await Promise.all([
+    [allCustomers, allContacts, allQuotes, allAddresses, allPaymentTerms, allDeliveryTerms, allBundles, allTemplates] = await Promise.all([
       readData('Customer'), readData('Contact'), readData('Quote'),
-      readData('Address').catch(() => []), readData('PaymentTerm'), readData('DeliveryTerm')
+      readData('Address').catch(() => []), readData('PaymentTerm'), readData('DeliveryTerm'),
+      readData('QuoteBundle').catch(() => []), readData('Textemplate').catch(() => [])
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
+  // Order-Bundles + Order-Templates Caches
+  window._orderBundles = allBundles
+    .filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert' && bundleDocType(b) === 'Auftrag')
+    .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  window._orderTemplates = allTemplates.filter(t =>
+    (t.fields.company_id || []).includes(cur.id) &&
+    (t.fields.doc_type === 'Auftrag') &&
+    (t.fields.status || 'aktiv') === 'aktiv'
+  );
+  const defaultOrderBundle = window._orderBundles.find(b => b.fields.is_default);
 
   if (id) {
     const all = await readData('Order');
@@ -10300,6 +10382,19 @@ async function openOrderModal(id, opts = {}) {
           <span class="text-ink-700">aus Angebot</span>
           <button type="button" onclick="closeModal();setTimeout(()=>openQuoteModal('${linkedQuote.id}'),100)" class="font-mono text-brand-700 hover:underline">${escapeHtml(linkedQuote.fields.quote_no || '–')}</button>
           <span class="text-ink-500 truncate">${escapeHtml(linkedQuote.fields.quote_title || '')}</span>
+        </div>
+      ` : ''}
+
+      ${(window._orderBundles || []).length > 0 ? `
+        <div class="mb-3 p-3 bg-brand-50/50 border border-brand-200 rounded-lg">
+          <label class="block text-sm font-medium text-brand-700 mb-1 flex items-center gap-1.5">
+            <i data-lucide="package" class="w-4 h-4"></i> Vorlagenpaket (Auftrag)
+          </label>
+          <select name="bundle_id" onchange="onOrderBundlePick(this.value)" class="w-full px-3 py-2 border border-brand-300 bg-white rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— kein Paket / manuell —</option>
+            ${(window._orderBundles || []).map(b => `<option value="${b.id}" ${(f.bundle_id || (id ? '' : (defaultOrderBundle?.id || '')))===b.id?'selected':''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
+          </select>
+          <p class="text-xs text-ink-500 mt-1">Bei Auswahl werden Titel + Texte aus dem Paket übernommen.</p>
         </div>
       ` : ''}
 
@@ -10583,6 +10678,50 @@ function confirmOrderAddressPick(kind) {
   refreshOrderAddressButton(kind);
   closeModal2();
   if (typeof updateOrderPreview === 'function') updateOrderPreview();
+}
+
+async function onOrderBundlePick(bundleId) {
+  if (!bundleId) return;
+  const hasContent = ['order_title','description','notes'].some(n => {
+    const el = document.querySelector(`#modalBox form[data-order-form] [name="${n}"]`);
+    return el && el.value && el.value.trim();
+  });
+  if (hasContent) {
+    if (!confirm('Aktuelle Eingaben durch das Paket ersetzen?')) {
+      const sel = document.querySelector('#modalBox select[name="bundle_id"]');
+      if (sel) sel.value = sel.dataset.prev || '';
+      return;
+    }
+  }
+  await applyOrderBundle(bundleId);
+  const sel = document.querySelector('#modalBox select[name="bundle_id"]');
+  if (sel) sel.dataset.prev = bundleId;
+}
+
+/* Wendet ein Vorlagenpaket auf das geöffnete Order-Modal an: Titel + Einleitung + Schluss */
+async function applyOrderBundle(bundleId, opts = {}) {
+  const bundle = (window._orderBundles || []).find(b => b.id === bundleId);
+  if (!bundle) return;
+  const f = bundle.fields || {};
+  const ctx = await buildOrderVariableContext();
+  const setVal = (selector, value) => {
+    const el = document.querySelector(selector);
+    if (!el) return;
+    el.value = value;
+    // Trigger input event damit Live-Vorschau triggert
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const apply = (tplId, fieldName) => {
+    const tpl = (window._orderTemplates || []).find(t => t.id === tplId);
+    if (!tpl) return;
+    const content = substituteVariables(tpl.fields.content || '', 'Auftrag', ctx);
+    setVal(`#modalBox form[data-order-form] [name="${fieldName}"]`, content);
+  };
+  if (f.title_template_id)   apply(f.title_template_id,   'order_title');
+  if (f.intro_template_id)   apply(f.intro_template_id,   'description');
+  if (f.closing_template_id) apply(f.closing_template_id, 'notes');
+  if (typeof updateOrderPreview === 'function') updateOrderPreview();
+  if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
 }
 
 async function buildOrderVariableContext() {
