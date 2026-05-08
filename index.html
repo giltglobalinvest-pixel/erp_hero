@@ -518,7 +518,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.86';
+const APP_VERSION = 'v2.87';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6659,7 +6659,8 @@ async function updateQuotePreview() {
     articles.forEach(a => {
       articleMap[a.id] = {
         article_no: a.fields.article_no || '',
-        manufacturer_no: a.fields.manufacturer_no || ''
+        manufacturer_no: a.fields.manufacturer_no || '',
+        name2: a.fields.name2 || ''
       };
     });
   } catch (e) {}
@@ -6933,8 +6934,14 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               const rawDesc = f.description || '';
               const aId = (f.article_id || [])[0];
               const aRef = aId ? (articleMap[aId] || {}) : {};
-              const manNo = (aRef.manufacturer_no || '').trim();
-              // Layout: Bezeichnung (fett) → Hersteller-Artikelnr (kursiv) → Leerzeile → Beschreibung
+              const aName2 = (aRef.name2 || '').trim();
+              const manNo  = (aRef.manufacturer_no || '').trim();
+              // Layout:
+              //   Name Zeile 1 / Bezeichnung (fett, aus 1. Absatz der Description)
+              //   Name Zeile 2 (kursiv, NICHT fett)            ← aus Article.name2
+              //   Hersteller-Artikelnummer (kursiv)            ← aus Article.manufacturer_no
+              //   Leerzeile
+              //   Beschreibung (rest)
               const split = splitDescriptionTitleAndBody(rawDesc);
               const titleHtml = split.isHtml && split.titleHtml
                 ? split.titleHtml
@@ -6944,9 +6951,16 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
                 : (split.bodyText
                     ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} text-ink-700 leading-snug mt-2 whitespace-pre-line">${escapeHtml(split.bodyText)}</div>`
                     : '');
+              // Italic-Block (Name Zeile 2 + Hersteller-Nr) zusammen, abgesetzt vom Title mit mt-2
+              const italicLines = [];
+              if (aName2) italicLines.push(escapeHtml(aName2));
+              if (manNo)  italicLines.push(escapeHtml(manNo));
+              const italicBlock = italicLines.length > 0
+                ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic font-normal text-ink-600 leading-snug mt-2">${italicLines.join('<br>')}</div>`
+                : '';
               const descCell =
                 `<div class="font-bold quote-bezeichnung" style="${bezeichnungInlineStyle}">${titleHtml || '<span class="text-ink-400 italic">— Bezeichnung —</span>'}</div>` +
-                (manNo ? `<div class="${isK ? 'text-[10px]' : 'text-[9px]'} italic font-normal text-ink-600 leading-snug mt-2">${escapeHtml(manNo)}</div>` : '') +
+                italicBlock +
                 bodyBlock;
               return `<tr class="border-b border-ink-100 align-top">
                 <td class="px-1 py-1.5">${escapeHtml(String(f.pos || ''))}</td>
@@ -8432,17 +8446,16 @@ function onQiArticleChange(value, comboboxId) {
     return !(descEl?.value || '').trim();
   })();
   if (isEmpty) {
-    // Layout: Erste Zeile = Bezeichnung (name1 + name2, fett), darunter ggf. Beschreibung
-    const titleLine = [a.name1, a.name2].filter(Boolean).join(' ');
+    // Layout: Erste Zeile = name1 (fett, automatisch). name2 + Hersteller-Artikelnr werden
+    // im Render aus Article-Daten ergänzt (kursiv). Description-Body folgt darunter.
+    const titleLine = (a.name1 || '').trim();
     const descRest  = (a.desc || '').trim();
     if (quill) {
-      // HTML-Format für Quill: <p><strong>Title</strong></p> + <p>Beschreibung-Zeilen</p>
       const titleHtml = titleLine ? `<p>${escapeHtml(titleLine)}</p>` : '';
       const bodyHtml  = descRest
         ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('')
         : '';
       quill.root.innerHTML = titleHtml + bodyHtml;
-      // Hidden-Input syncen (über text-change-Event passiert nicht bei innerHTML-Set)
       if (descEl) descEl.value = quill.root.innerHTML;
     } else if (descEl) {
       descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
