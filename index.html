@@ -525,7 +525,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.94';
+const APP_VERSION = 'v2.95';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10268,12 +10268,13 @@ async function openOrderModal(id, opts = {}) {
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   await ensureOrderSchema();
 
-  let f = {}, items = [], allCustomers = [], allContacts = [], allQuotes = [], allAddresses = [], allPaymentTerms = [], allDeliveryTerms = [], allBundles = [], allTemplates = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allQuotes = [], allAddresses = [], allPaymentTerms = [], allDeliveryTerms = [], allBundles = [], allTemplates = [], allCompanies = [];
   try {
-    [allCustomers, allContacts, allQuotes, allAddresses, allPaymentTerms, allDeliveryTerms, allBundles, allTemplates] = await Promise.all([
+    [allCustomers, allContacts, allQuotes, allAddresses, allPaymentTerms, allDeliveryTerms, allBundles, allTemplates, allCompanies] = await Promise.all([
       readData('Customer'), readData('Contact'), readData('Quote'),
       readData('Address').catch(() => []), readData('PaymentTerm'), readData('DeliveryTerm'),
-      readData('QuoteBundle').catch(() => []), readData('Textemplate').catch(() => [])
+      readData('QuoteBundle').catch(() => []), readData('Textemplate').catch(() => []),
+      readData('Company').catch(() => [])
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
   // Order-Bundles + Order-Templates Caches
@@ -10351,10 +10352,8 @@ async function openOrderModal(id, opts = {}) {
   // Cache für Customer-Wechsel (analog zu Quote)
   window._orderCustomerCache = { byId: {}, contacts: allContacts, addresses: allAddresses };
   customersInCompany.forEach(c => { window._orderCustomerCache.byId[c.id] = c.fields; });
-  window._orderCompanyCache = (function() {
-    // Versuch: aus loadCompanies geladene Mandanten-Daten
-    return (APP_KEYS.companies || []).find(c => c.id === cur.id)?.fields || { name: cur.name };
-  })();
+  // Vollständiger Mandanten-Datensatz (inkl. Logos / Footer-Felder) — wie beim Angebot
+  window._orderCompanyCache = allCompanies.find(c => c.id === cur.id)?.fields || { name: cur.name };
 
   const paymentTerms = allPaymentTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const deliveryTerms = allDeliveryTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
