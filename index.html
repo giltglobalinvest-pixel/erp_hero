@@ -471,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.72';
+const APP_VERSION = 'v2.73';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5366,7 +5366,8 @@ async function buildQuoteVariableContext() {
       payment_terms:  (fd.get('payment_terms') || '').trim(),
       delivery_terms: (fd.get('delivery_terms') || '').trim(),
       layout_variant: (fd.get('layout_variant') || 'standard').trim(),
-      force_closing_new_page: fd.get('force_closing_new_page') === 'on'
+      force_closing_new_page: fd.get('force_closing_new_page') === 'on',
+      layout_offsets: (fd.get('layout_offsets') || '').trim()
     },
     customer, contact, company,
     user: APP_KEYS.user || {},
