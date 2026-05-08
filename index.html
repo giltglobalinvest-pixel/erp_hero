@@ -163,28 +163,30 @@
     form[data-quote-form] [class*="col-span-"] {
       grid-column: auto !important;
     }
-    /* Article-Form Mobile: alle Grids außer dem Preise-Grid (4-Spalter) auf 1 Spalte zwingen.
-       Verhindert dass Tailwind's JIT auf dynamisch eingefügte Klassen träge reagiert. */
+    /* Article-Form Mobile: Grids komplett deaktivieren — Kinder stapeln als block.
+       Garantiert, dass keine Felder überlappen, egal was Quill oder Tailwind machen. */
     form[data-article-form] .grid:not([data-keep-mobile-cols]) {
-      grid-template-columns: 1fr !important;
+      display: block !important;
+    }
+    form[data-article-form] .grid:not([data-keep-mobile-cols]) > * {
+      width: 100% !important;
+      margin-bottom: 12px !important;
+      grid-column: auto !important;
     }
     form[data-article-form] [class*="col-span-"] {
       grid-column: auto !important;
     }
-    /* Quill-Editor auf Mobile auf eine sinnvolle Höhe begrenzen, sonst expandiert er
-       durch height:100% in Quill's CSS auf die volle Modalhöhe und überlagert nachfolgende Felder. */
-    form[data-article-form] #article_description_editor {
-      max-height: 220px !important;
-    }
-    form[data-article-form] #article_description_editor .ql-editor {
-      max-height: 220px !important;
-      overflow-y: auto !important;
-    }
-    /* Gleiches für Quote-Position-Editoren */
+    /* Quill-Editor (article + quote items): feste Höhe statt height:100% — verhindert Cascade-Expansion */
+    form[data-article-form] #article_description_editor,
     form[data-quote-form] [id$="_description_editor"] {
+      height: 220px !important;
+      min-height: 220px !important;
       max-height: 220px !important;
+      flex: 0 0 auto !important;
     }
+    form[data-article-form] #article_description_editor .ql-editor,
     form[data-quote-form] [id$="_description_editor"] .ql-editor {
+      height: 220px !important;
       max-height: 220px !important;
       overflow-y: auto !important;
     }
@@ -516,7 +518,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.85';
+const APP_VERSION = 'v2.86';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
