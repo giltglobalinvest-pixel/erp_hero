@@ -471,7 +471,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.76';
+const APP_VERSION = 'v2.77';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4581,13 +4581,71 @@ function _matchContactByHint(hint, contacts, customerId) {
 }
 
 async function toggleQuoteArchive(id, archive) {
-  const action = archive ? 'archivieren' : 'wiederherstellen';
-  if (!confirm(`Angebot ${action}?`)) return;
+  const newStatus = archive ? 'archiviert' : 'Entwurf';
+  // Bisherigen Status holen — für Undo
+  let prevStatus = 'Entwurf';
   try {
-    await updateData('Quote', id, { status: archive ? 'archiviert' : 'Entwurf' });
-    toast(archive ? 'Archiviert' : 'Wiederhergestellt', 'success');
+    const all = await readData('Quote');
+    prevStatus = all.find(r => r.id === id)?.fields?.status || 'Entwurf';
+  } catch (e) {}
+  try {
+    await updateData('Quote', id, { status: newStatus });
+    recordUndoableAction({
+      label: archive ? 'Angebot archiviert' : 'Wiederhergestellt',
+      undo: async () => { await updateData('Quote', id, { status: prevStatus }); if (typeof renderQuotes === 'function') renderQuotes(); },
+      redo: async () => { await updateData('Quote', id, { status: newStatus });  if (typeof renderQuotes === 'function') renderQuotes(); }
+    });
+    toast(archive ? 'Archiviert (Rückgängig oben)' : 'Wiederhergestellt', 'success', 1800);
     if (typeof renderQuotes === 'function') renderQuotes();
   } catch (e) { toast('Fehler: ' + e.message, 'error'); }
+}
+
+/* === Undo/Redo Stack ===
+   Aktionen registrieren ihre Inverse via recordUndoableAction({undo, redo, label}).
+   Buttons in Toolbars rufen performUndo/Redo auf. Stack max 30 Einträge. */
+window._undoActions = window._undoActions || [];
+window._redoActions = window._redoActions || [];
+
+function recordUndoableAction(action) {
+  window._undoActions.push(action);
+  if (window._undoActions.length > 30) window._undoActions.shift();
+  window._redoActions = []; // bei neuer Aktion: Redo-Stack leeren
+  updateUndoButtons();
+}
+
+async function performUndo() {
+  const action = window._undoActions.pop();
+  if (!action) return;
+  try {
+    await action.undo();
+    window._redoActions.push(action);
+    toast('↶ ' + action.label, 'info', 1500);
+  } catch (e) { toast('Rückgängig fehlgeschlagen: ' + e.message, 'error'); }
+  updateUndoButtons();
+}
+
+async function performRedo() {
+  const action = window._redoActions.pop();
+  if (!action) return;
+  try {
+    await action.redo();
+    window._undoActions.push(action);
+    toast('↷ ' + action.label, 'info', 1500);
+  } catch (e) { toast('Vorwärts fehlgeschlagen: ' + e.message, 'error'); }
+  updateUndoButtons();
+}
+
+function updateUndoButtons() {
+  document.querySelectorAll('[data-undo-btn]').forEach(b => {
+    b.disabled = (window._undoActions || []).length === 0;
+    b.classList.toggle('opacity-50', b.disabled);
+    b.classList.toggle('cursor-not-allowed', b.disabled);
+  });
+  document.querySelectorAll('[data-redo-btn]').forEach(b => {
+    b.disabled = (window._redoActions || []).length === 0;
+    b.classList.toggle('opacity-50', b.disabled);
+    b.classList.toggle('cursor-not-allowed', b.disabled);
+  });
 }
 
 async function nextQuoteNo(companyId) {
@@ -5155,14 +5213,24 @@ async function renderQuotes() {
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-5xl mx-auto">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between mb-4 gap-2 flex-wrap">
         <div>
           <h2 class="text-xl font-bold text-ink-900">Angebote</h2>
           <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
         </div>
-        <button onclick="openQuoteModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i> Neues Angebot
-        </button>
+        <div class="flex items-center gap-2 flex-wrap">
+          <div class="flex items-center gap-1 bg-white border border-ink-200 rounded-lg overflow-hidden">
+            <button data-undo-btn type="button" onclick="performUndo()" class="px-2 py-2 hover:bg-ink-50 text-ink-700 flex items-center gap-1 text-sm" title="Rückgängig (letzte Aktion)">
+              <i data-lucide="undo-2" class="w-4 h-4"></i>
+            </button>
+            <button data-redo-btn type="button" onclick="performRedo()" class="px-2 py-2 hover:bg-ink-50 text-ink-700 flex items-center gap-1 text-sm border-l border-ink-200" title="Vorwärts">
+              <i data-lucide="redo-2" class="w-4 h-4"></i>
+            </button>
+          </div>
+          <button onclick="openQuoteModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+            <i data-lucide="plus" class="w-4 h-4"></i> Neues Angebot
+          </button>
+        </div>
       </div>
       <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
@@ -5212,6 +5280,7 @@ async function renderQuotes() {
     </div>
   `;
   if (window.lucide) lucide.createIcons();
+  updateUndoButtons();
 }
 
 function onQuoteSearchInput(value) {
