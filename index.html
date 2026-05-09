@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.23';
+const APP_VERSION = 'v3.24';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2856,7 +2856,7 @@ async function deleteQuoteBundle(id) {
 // Settings-UI angezeigt; User legt einen "HTTP val" in Val.town an
 // und fügt diesen Code ein. Alle Secrets kommen aus env vars oder
 // vom Airtable User-Record (per-User Freshdesk-Key).
-const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth
+const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth (Sessions in Deno KV)
 // =====================================================================
 // HTTP-Val für Val.town. Routet:
 //   POST /auth                     →  Login: User-Key prüfen, Session-Token ausgeben
@@ -2869,13 +2869,10 @@ const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth
 //                                       env var FRESHDESK_API_KEY als Fallback)
 //   GET  /health                   →  Auth-Check (für "Verbindung testen")
 //
-// Auth-Flow:
-//   1) Browser POSTet user_key an /auth → bekommt session_token zurück
-//   2) Browser nutzt für alle weiteren Calls "Authorization: Bearer <session_token>"
-//   3) User-Key wird im Browser nirgends persistiert
-//   4) Session-Token läuft ab (8h kurz, 30d lang) und liegt nur in In-Memory-Map
-//   5) Legacy-Modus: Bearer-Token kann auch ein User-Key sein (für Übergang;
-//      sollte nach kompletter Migration aller Browser-Tabs entfernt werden)
+// WICHTIG — Sessions in Deno KV:
+//   Val.town schläfert HTTP-Vals nach kurzer Inaktivität ein. Eine
+//   In-Memory-Map würde dann den State verlieren → 401 nach Worker-Wakeup.
+//   Daher liegen Sessions in Deno KV (persistent, übersteht Restarts).
 //
 // ENV VARS in Val.town setzen:
 //   AIRTABLE_READ_KEY   — Read-Token mit Scope auf App-Base
@@ -2885,11 +2882,48 @@ const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth
 //   FRESHDESK_API_KEY   — (optional) Fallback wenn User keinen eigenen Key hat
 // =====================================================================
 
-const USER_CACHE    = new Map(); // userKey → { user, expires }
-const SESSIONS      = new Map(); // sessionToken → { userId, name, isAdmin, freshdeskApiKey, expires, longLived }
+const USER_CACHE    = new Map(); // in-memory user cache (60s TTL, ok wenn weg)
 const CACHE_TTL_MS  = 60_000;
 const SESSION_SHORT = 8 * 60 * 60 * 1000;        // 8 h
 const SESSION_LONG  = 30 * 24 * 60 * 60 * 1000;  // 30 d
+
+// Lazy KV initialisieren
+let _kv: Deno.Kv | null = null;
+async function kv(): Promise<Deno.Kv> {
+  if (!_kv) _kv = await Deno.openKv();
+  return _kv;
+}
+
+async function setSession(token: string, data: any, ttlMs: number) {
+  const k = await kv();
+  await k.set(["sessions", token], data, { expireIn: ttlMs });
+}
+async function getSession(token: string) {
+  const k = await kv();
+  const r = await k.get<any>(["sessions", token]);
+  if (!r.value) return null;
+  // Belt-and-suspenders Ablauf-Check (KV-TTL macht's auch, aber clock-skew schadet nicht)
+  if (r.value.expires && r.value.expires < Date.now()) {
+    await k.delete(["sessions", token]);
+    return null;
+  }
+  return r.value;
+}
+async function deleteSession(token: string) {
+  const k = await kv();
+  await k.delete(["sessions", token]);
+}
+async function revokeAllSessionsForUser(userId: string): Promise<number> {
+  const k = await kv();
+  let count = 0;
+  for await (const entry of k.list<any>({ prefix: ["sessions"] })) {
+    if (entry.value && entry.value.userId === userId) {
+      await k.delete(entry.key);
+      count++;
+    }
+  }
+  return count;
+}
 
 function generateSessionToken(): string {
   const arr = new Uint8Array(32);
@@ -2922,14 +2956,13 @@ async function lookupUser(userKey: string) {
   return user;
 }
 
-// Resolves a Bearer token to user info. Tries session map first, then
+// Resolves a Bearer token to user info. Tries KV session first, then
 // falls back to legacy direct-user-key lookup (for migration).
 async function resolveAuth(token: string) {
   if (!token) return null;
-  // 1) Session token (preferred)
-  const sess = SESSIONS.get(token);
+  // 1) Session token (preferred) — aus KV
+  const sess = await getSession(token);
   if (sess) {
-    if (sess.expires < Date.now()) { SESSIONS.delete(token); return null; }
     return {
       kind: "session",
       userId: sess.userId,
@@ -2998,7 +3031,7 @@ export default async function (req: Request): Promise<Response> {
     if (!user) return jsonResponse({ error: "Ungültiger Login-Key oder Account inaktiv" }, 401);
     const token = generateSessionToken();
     const ttl = longLived ? SESSION_LONG : SESSION_SHORT;
-    SESSIONS.set(token, {
+    await setSession(token, {
       userId: user.id,
       name: user.name,
       role: user.role,
@@ -3007,7 +3040,7 @@ export default async function (req: Request): Promise<Response> {
       freshdeskApiKey: user.freshdesk_api_key,
       expires: Date.now() + ttl,
       longLived
-    });
+    }, ttl);
     return jsonResponse({
       session_token: token,
       expires_in: Math.floor(ttl / 1000),
@@ -3031,7 +3064,7 @@ export default async function (req: Request): Promise<Response> {
 
   // ===== /logout: aktuelle Session killen =====
   if (path === "logout" && req.method === "POST") {
-    if (user.kind === "session") SESSIONS.delete(token);
+    if (user.kind === "session") await deleteSession(token);
     return jsonResponse({ ok: true });
   }
 
@@ -3056,10 +3089,7 @@ export default async function (req: Request): Promise<Response> {
     try { body = await req.json(); } catch (_) {}
     const targetId = (body.user_id || "").toString();
     if (!targetId) return jsonResponse({ error: "user_id fehlt" }, 400);
-    let count = 0;
-    for (const [k, v] of SESSIONS.entries()) {
-      if (v.userId === targetId) { SESSIONS.delete(k); count++; }
-    }
+    const count = await revokeAllSessionsForUser(targetId);
     return jsonResponse({ revoked: count });
   }
 
