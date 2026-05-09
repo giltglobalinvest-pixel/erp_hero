@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.21';
+const APP_VERSION = 'v3.22';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -717,9 +717,12 @@ async function loadProjectKeys() {
 }
 
 // Bootstrap-Login: nur wenn kein Proxy konfiguriert. Validiert User direkt
-// gegen Airtable (read-only). Hinterlegt KEIN Session-Token, fordert beim
-// nächsten Reload erneuten Login. Sinnvoll für initiales Setup, bevor der
-// Wizard gelaufen ist.
+// gegen Airtable (read-only). Speichert den User-Key als Legacy-Key — das
+// ist im Bootstrap-Modus unvermeidlich (Proxy ist ja noch nicht da, also
+// kein Session-Token möglich). Sobald der Wizard durch ist und apiProxyUrl
+// gesetzt wird, schaltet die App beim nächsten Auto-Login automatisch um:
+// tryAutoLogin findet den Legacy-Key, ruft loginWithUserKey, das geht dann
+// über /auth → Session-Token, Legacy-Key wird gelöscht.
 async function _bootstrapLogin(userKey) {
   const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
   const formula = "AND({api_key}='" + userKey.replace(/'/g, "\\'") + "',{status}='aktiv')";
@@ -732,7 +735,8 @@ async function _bootstrapLogin(userKey) {
   if (!userData.records || !userData.records.length) throw new Error('Ungültiger Key oder Account inaktiv');
   APP_KEYS.user = { ...userData.records[0].fields, _id: userData.records[0].id };
   await Promise.all([loadCompanies(), loadUsersCache()]);
-  // Bootstrap-Modus: keine Persistenz. User muss bei nächstem Reload neu einloggen.
+  // Persistenz im Bootstrap-Modus (Migration-Pfad auf Session-Token sobald Proxy steht)
+  localStorage.setItem(LEGACY_USER_KEY, userKey);
   return APP_KEYS.user;
 }
 
@@ -11025,6 +11029,15 @@ function showLoginScreen() {
   document.getElementById('appShell').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('hidden');
   document.getElementById('loginVersionLabel').textContent = APP_VERSION;
+  // Hinweis im Login-Hint, wenn Proxy noch nicht eingerichtet ist
+  const hintEl = document.getElementById('loginHint');
+  if (hintEl) {
+    if (!APP_KEYS.apiProxyUrl) {
+      hintEl.innerHTML = '<span class="text-amber-200">⚠ Setup-Modus — API-Proxy noch nicht konfiguriert. Login funktioniert, aber als Admin bitte direkt nach dem Einloggen zu „Einstellungen" gehen und den Wizard durchspielen.</span>';
+    } else {
+      hintEl.textContent = 'Den Key bekommst du vom Admin.';
+    }
+  }
   setTimeout(() => document.getElementById('loginKey')?.focus(), 50);
 }
 
