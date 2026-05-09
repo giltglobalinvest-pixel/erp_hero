@@ -373,9 +373,6 @@
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="auftraege">
               <i data-lucide="file-check-2" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Aufträge</span>
             </button>
-            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="bestellungen">
-              <i data-lucide="shopping-cart" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Bestellungen</span>
-            </button>
             <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
               <i data-lucide="send" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Lieferscheine</span>
               <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.3</span>
@@ -398,9 +395,8 @@
               <i data-lucide="mail-search" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Preisanfragen</span>
               <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.4</span>
             </button>
-            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
-              <i data-lucide="folder" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Bestellungen</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.4</span>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="bestellungen">
+              <i data-lucide="shopping-cart" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Bestellungen</span>
             </button>
           </div>
         </div>
@@ -528,7 +524,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.96';
+const APP_VERSION = 'v2.97';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -9187,6 +9183,15 @@ function contactDisplayName(f) {
   return full || f.name || '–';
 }
 
+// Liest einen ID-Wert: Array (multipleRecordLinks) oder String (singleLineText).
+// Liefert die erste ID als String, oder ''. Verhindert den Bug, dass `(string)[0]`
+// das erste Zeichen statt der ganzen ID liefert.
+function _readIdValue(val) {
+  if (Array.isArray(val)) return val[0] || '';
+  if (typeof val === 'string' && val) return val;
+  return '';
+}
+
 // Sucht den Hauptansprechpartner eines Kunden / Lieferanten.
 // `entity` ist 'customer' oder 'supplier'. Gibt Contact-Record-ID zurück oder ''.
 function findPrimaryContactId(contacts, entityId, entity = 'customer') {
@@ -10076,6 +10081,7 @@ async function ensureOrderSchema() {
     { name: 'delivery_address_id',  type: 'singleLineText' },
     { name: 'invoice_address_id',   type: 'singleLineText' },
     { name: 'force_closing_new_page', type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
+    { name: 'bundle_id',            type: 'singleLineText' },
     { name: 'lock_user_id',         type: 'singleLineText' },
     { name: 'lock_until',           type: 'singleLineText' },
   ]).catch(()=>{});
@@ -10149,7 +10155,7 @@ async function renderOrders() {
   if (q) {
     list = list.filter(o => {
       const f = o.fields;
-      const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
+      const cust = custMap[_readIdValue(f.customer_id)] || {};
       return [f.order_no, f.order_title, f.description, cust.name1, cust.customer_no]
         .filter(Boolean)
         .some(v => String(v).toLowerCase().includes(q));
@@ -10237,8 +10243,8 @@ function onOrderSearchInput(value) {
 
 function orderRowKompakt(rec, custMap, quoteMap) {
   const f = rec.fields;
-  const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
-  const quoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const cust = custMap[_readIdValue(f.customer_id)] || {};
+  const quoteId = _readIdValue(f.quote_id);
   const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
   return `
     <button type="button" onclick="openOrderModal('${rec.id}')" class="w-full text-left px-4 py-2.5 hover:bg-ink-50 flex items-center gap-3">
@@ -10254,8 +10260,8 @@ function orderRowKompakt(rec, custMap, quoteMap) {
 
 function orderRowTabelle(rec, custMap, quoteMap) {
   const f = rec.fields;
-  const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
-  const quoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const cust = custMap[_readIdValue(f.customer_id)] || {};
+  const quoteId = _readIdValue(f.quote_id);
   const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
   return `
     <tr onclick="openOrderModal('${rec.id}')" class="cursor-pointer hover:bg-ink-50">
@@ -10274,8 +10280,8 @@ function orderRowTabelle(rec, custMap, quoteMap) {
 
 function orderRow(rec, custMap, quoteMap) {
   const f = rec.fields;
-  const cust = custMap[(f.customer_id || [])[0] || f.customer_id] || {};
-  const quoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const cust = custMap[_readIdValue(f.customer_id)] || {};
+  const quoteId = _readIdValue(f.quote_id);
   const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
   return `
     <button type="button" onclick="openOrderModal('${rec.id}')" class="w-full text-left px-4 py-3 hover:bg-ink-50">
@@ -10378,8 +10384,8 @@ async function openOrderModal(id, opts = {}) {
   const customersInCompany = allCustomers
     .filter(c => (c.fields.company_id || []).includes(cur.id))
     .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
-  const currentCustomerId = (f.customer_id || [])[0] || f.customer_id || '';
-  let   currentContactId  = (f.contact_id  || [])[0] || f.contact_id  || '';
+  const currentCustomerId = _readIdValue(f.customer_id);
+  let   currentContactId  = _readIdValue(f.contact_id);
   if (!currentContactId && currentCustomerId) {
     currentContactId = findPrimaryContactId(allContacts, currentCustomerId, 'customer');
   }
@@ -10412,7 +10418,7 @@ async function openOrderModal(id, opts = {}) {
   const sums = calcQuoteSums(items);
 
   // Verlinktes Angebot (zur Anzeige)
-  const linkedQuoteId = (f.quote_id || [])[0] || f.quote_id || '';
+  const linkedQuoteId = _readIdValue(f.quote_id);
   const linkedQuote   = linkedQuoteId ? allQuotes.find(q => q.id === linkedQuoteId) : null;
 
   window._currentOrderIdInModal = id || null;
@@ -11199,7 +11205,7 @@ async function _silentSaveOrderHeader() {
   if (!form) return null;
   const fd = new FormData(form);
   const fields = {};
-  ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id'].forEach(k => {
+  ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id','bundle_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
@@ -11226,7 +11232,7 @@ async function saveOrder(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id'].forEach(k => {
+  ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id','bundle_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   const cidSel = (fd.get('customer_id') || '').trim();
@@ -11544,7 +11550,7 @@ async function renderSupplierOrders() {
   if (q) {
     list = list.filter(o => {
       const f = o.fields;
-      const sup = supMap[(f.supplier_id || [])[0] || f.supplier_id] || {};
+      const sup = supMap[_readIdValue(f.supplier_id)] || {};
       return [f.purchase_no, f.purchase_title, f.description, sup.name1, sup.supplier_no]
         .filter(Boolean).some(v => String(v).toLowerCase().includes(q));
     });
@@ -11615,8 +11621,8 @@ function onPurchaseSearchInput(value) {
 
 function purchaseRowKompakt(rec, supMap, ordMap) {
   const f = rec.fields;
-  const sup = supMap[(f.supplier_id || [])[0] || f.supplier_id] || {};
-  const orderId = (f.order_id || [])[0] || f.order_id || '';
+  const sup = supMap[_readIdValue(f.supplier_id)] || {};
+  const orderId = _readIdValue(f.order_id);
   const ord = orderId ? (ordMap[orderId] || {}) : {};
   return `
     <button type="button" onclick="openSupplierOrderModal('${rec.id}')" class="w-full text-left px-4 py-2.5 hover:bg-ink-50 flex items-center gap-3">
@@ -11632,8 +11638,8 @@ function purchaseRowKompakt(rec, supMap, ordMap) {
 
 function purchaseRowTabelle(rec, supMap, ordMap) {
   const f = rec.fields;
-  const sup = supMap[(f.supplier_id || [])[0] || f.supplier_id] || {};
-  const orderId = (f.order_id || [])[0] || f.order_id || '';
+  const sup = supMap[_readIdValue(f.supplier_id)] || {};
+  const orderId = _readIdValue(f.order_id);
   const ord = orderId ? (ordMap[orderId] || {}) : {};
   return `
     <tr onclick="openSupplierOrderModal('${rec.id}')" class="cursor-pointer hover:bg-ink-50">
@@ -11650,8 +11656,8 @@ function purchaseRowTabelle(rec, supMap, ordMap) {
 
 function purchaseRow(rec, supMap, ordMap) {
   const f = rec.fields;
-  const sup = supMap[(f.supplier_id || [])[0] || f.supplier_id] || {};
-  const orderId = (f.order_id || [])[0] || f.order_id || '';
+  const sup = supMap[_readIdValue(f.supplier_id)] || {};
+  const orderId = _readIdValue(f.order_id);
   const ord = orderId ? (ordMap[orderId] || {}) : {};
   return `
     <button type="button" onclick="openSupplierOrderModal('${rec.id}')" class="w-full text-left px-4 py-3 hover:bg-ink-50">
@@ -11714,8 +11720,8 @@ async function openSupplierOrderModal(id, opts = {}) {
   const suppliersInCompany = allSuppliers
     .filter(s => (s.fields.company_id || []).includes(cur.id))
     .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
-  const currentSupplierId = (f.supplier_id || [])[0] || f.supplier_id || '';
-  let currentContactId = (f.contact_id || [])[0] || f.contact_id || '';
+  const currentSupplierId = _readIdValue(f.supplier_id);
+  let currentContactId = _readIdValue(f.contact_id);
   if (!currentContactId && currentSupplierId) {
     currentContactId = findPrimaryContactId(allContacts, currentSupplierId, 'supplier');
   }
@@ -11738,7 +11744,7 @@ async function openSupplierOrderModal(id, opts = {}) {
   const initialDelivery = f.delivery_terms || '';
 
   const sums = calcQuoteSums(items);
-  const linkedOrderId = (f.order_id || [])[0] || f.order_id || '';
+  const linkedOrderId = _readIdValue(f.order_id);
   const linkedOrder = linkedOrderId ? allOrders.find(o => o.id === linkedOrderId) : null;
   window._currentPurchaseIdInModal = id || null;
 
