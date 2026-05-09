@@ -573,7 +573,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.15';
+const APP_VERSION = 'v3.16';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -617,7 +617,11 @@ const APP_KEYS = {
   user: null,
   companies: [],
   currentCompanyId: null,
-  usersById: {}
+  usersById: {},
+  // Freshdesk-Anbindung (Master-Base Keys)
+  freshdeskProxyUrl: null,
+  freshdeskProxyToken: null,
+  freshdeskSalesGroupId: null
 };
 
 /* ============================================================
@@ -649,6 +653,9 @@ async function loginWithUserKey(userKey) {
       if (f.key_name === 'anthropicKey') APP_KEYS.anthropicKey = f.key_value;
       if (f.key_name === 'airtableWriteKey') APP_KEYS.airtableWriteKey = f.key_value;
       if (f.key_name === 'airtableBaseId') APP_KEYS.appBaseId = f.key_value;
+      if (f.key_name === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl      = f.key_value;
+      if (f.key_name === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken    = f.key_value;
+      if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
     });
   }
 
@@ -1003,6 +1010,98 @@ async function uploadFileToRecord(recordId, attachmentField, file) {
 /* ============================================================
    ANTHROPIC AI (für spätere Phasen)
    ============================================================ */
+/* Freshdesk-Aufruf via Val.town-Proxy. path = z.B. 'search/tickets?query=...' oder 'groups'.
+   Wirft Fehler wenn Proxy nicht konfiguriert oder Antwort != 2xx. Liefert geparstes JSON. */
+/* Lädt Tickets der Sales-Gruppe (Status: 2=offen oder 3=ausstehend) und rendert sie
+   als Read-only-Vorschau in #freshdeskTicketsWrap. */
+async function loadFreshdeskTicketsPreview() {
+  const wrap = document.getElementById('freshdeskTicketsWrap');
+  if (!wrap) return;
+  if (!APP_KEYS.freshdeskProxyUrl || !APP_KEYS.freshdeskProxyToken) {
+    wrap.innerHTML = `
+      <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
+        <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> Freshdesk-Proxy nicht konfiguriert</p>
+        <p>Lege in der Master-Base „Keys"-Tabelle für dieses Projekt 3 Records an:</p>
+        <ul class="list-disc pl-5 mt-2 space-y-0.5">
+          <li><code class="text-[11px] bg-amber-100 px-1 rounded">freshdeskProxyUrl</code> = deine Val.town-URL</li>
+          <li><code class="text-[11px] bg-amber-100 px-1 rounded">freshdeskProxyToken</code> = dein ALLOWED_TOKEN</li>
+          <li><code class="text-[11px] bg-amber-100 px-1 rounded">freshdeskSalesGroupId</code> = numerische Group-ID</li>
+        </ul>
+        <p class="mt-2">Nach dem Anlegen einmal abmelden + neu einloggen, dann „Laden" klicken.</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  if (!APP_KEYS.freshdeskSalesGroupId) {
+    wrap.innerHTML = '<p class="text-xs text-amber-700 italic">Sales-Group-ID fehlt in Master-Base Keys (<code>freshdeskSalesGroupId</code>).</p>';
+    return;
+  }
+  wrap.innerHTML = '<p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade Tickets von Freshdesk…</p>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    const groupId = APP_KEYS.freshdeskSalesGroupId;
+    // Status 2 = Open, 3 = Pending. Search-API beschränkt auf 30 Ergebnisse pro Seite.
+    const query = `"(group_id:${groupId}) AND (status:2 OR status:3)"`;
+    const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
+    const tickets = data.results || [];
+    if (tickets.length === 0) {
+      wrap.innerHTML = '<p class="text-xs text-ink-500 italic">Keine offenen / ausstehenden Tickets der Sales-Gruppe.</p>';
+      return;
+    }
+    const statusLabel = (s) => s === 2 ? 'Offen' : s === 3 ? 'Ausstehend' : ('Status ' + s);
+    const statusColor = (s) => s === 2 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700';
+    // Sortieren nach updated_at desc
+    tickets.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+    wrap.innerHTML = `
+      <p class="text-xs text-ink-500 mb-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · sortiert nach letzte Änderung</p>
+      <div class="divide-y divide-ink-100 -mx-2">
+        ${tickets.map(t => {
+          const subject = t.subject || '(ohne Betreff)';
+          const ticketNo = 'FT-' + t.id;
+          const dt = t.updated_at ? new Date(t.updated_at).toLocaleString('de-DE') : '';
+          const requester = t.requester_id ? `Kontakt-ID ${t.requester_id}` : '';
+          return `
+            <div class="px-2 py-2.5 hover:bg-ink-50 rounded">
+              <div class="flex items-baseline justify-between gap-2 mb-0.5">
+                <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+                  <span class="text-xs font-mono text-ink-500">${escapeHtml(ticketNo)}</span>
+                  <span class="font-medium text-ink-900 truncate">${escapeHtml(subject)}</span>
+                </div>
+                <span class="text-[10px] uppercase tracking-wider ${statusColor(t.status)} px-1.5 py-0.5 rounded font-medium shrink-0">${escapeHtml(statusLabel(t.status))}</span>
+              </div>
+              <p class="text-xs text-ink-500">${escapeHtml(dt)}${t.priority ? ' · Prio ' + t.priority : ''}${requester ? ' · ' + escapeHtml(requester) : ''}</p>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  } catch (err) {
+    wrap.innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-900">
+        <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-circle" class="w-4 h-4"></i> Fehler beim Laden</p>
+        <p>${escapeHtml(err.message || String(err))}</p>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
+async function freshdeskFetch(path) {
+  if (!APP_KEYS.freshdeskProxyUrl) throw new Error('Freshdesk-Proxy nicht konfiguriert (freshdeskProxyUrl fehlt in Master-Base Keys)');
+  const url = APP_KEYS.freshdeskProxyUrl.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '');
+  const headers = { 'Accept': 'application/json' };
+  if (APP_KEYS.freshdeskProxyToken) headers['Authorization'] = 'Bearer ' + APP_KEYS.freshdeskProxyToken;
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    let msg = 'Freshdesk-Proxy ' + res.status;
+    try {
+      const t = await res.text();
+      if (t) msg += ': ' + t.slice(0, 200);
+    } catch(e) {}
+    throw new Error(msg);
+  }
+  return await res.json();
+}
+
 async function askAI(prompt, opts = {}) {
   if (!APP_KEYS.anthropicKey) throw new Error('KI nicht verfügbar (Anthropic-Key fehlt)');
   // Multimodale Inhalte zusammenstellen: optional Bilder, dann Text
@@ -4224,6 +4323,23 @@ async function renderInquiries() {
         <button onclick="openInquiryWizard()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i> Neue Anfrage
         </button>
+      </div>
+
+      <!-- Freshdesk-Sektion -->
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden mb-4">
+        <div class="px-4 py-3 border-b border-ink-100 flex items-center justify-between gap-3 flex-wrap">
+          <div class="flex items-center gap-2">
+            <i data-lucide="inbox" class="w-4 h-4 text-brand-600"></i>
+            <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Tickets</h3>
+            <span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-medium">Vorschau</span>
+          </div>
+          <button type="button" onclick="loadFreshdeskTicketsPreview()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center gap-1">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Laden
+          </button>
+        </div>
+        <div id="freshdeskTicketsWrap" class="p-4">
+          <p class="text-xs text-ink-500 italic">Klicke „Laden" um aktuelle Tickets der Sales-Gruppe (Status: offen / ausstehend) zu holen.</p>
+        </div>
       </div>
       <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
