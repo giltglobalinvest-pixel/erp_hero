@@ -573,7 +573,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.16';
+const APP_VERSION = 'v3.17';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4282,108 +4282,76 @@ async function renderInquiries() {
       <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt. Bitte links eine Firma wählen.</div></div>`;
     return;
   }
-  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Anfragen…</p>';
-
-  let all = [], allCustomers = [];
+  // Wieviele alte lokale Anfragen liegen noch in der Inquiry-Tabelle? (für Cleanup-Hinweis)
+  let legacyCount = 0;
   try {
-    [all, allCustomers] = await Promise.all([readData('Inquiry'), readData('Customer')]);
-  } catch (e) { toast(e.message, 'error'); }
-
-  const custMap = {};
-  allCustomers.forEach(c => { custMap[c.id] = c.fields; });
-
-  let list = all.filter(i => (i.fields.company_id || []).includes(cur.id));
-  if (_inquiryListState.status !== 'alle') {
-    list = list.filter(i => (i.fields.status || 'offen') === _inquiryListState.status);
-  }
-  const q = _inquiryListState.search.trim().toLowerCase();
-  if (q) {
-    list = list.filter(i => {
-      const f = i.fields;
-      const cid = (f.customer_id || [])[0];
-      const cust = custMap[cid] || {};
-      return [f.inquiry_no, f.title, f.ticket_no, f.raw_text, f.ai_summary, cust.name1, cust.customer_no]
-        .some(v => (v || '').toString().toLowerCase().includes(q));
-    });
-  }
-  // Neueste zuerst (nach Auto-Inquiry-No-Nummer absteigend)
-  list.sort((a, b) => {
-    const an = parseInt((a.fields.inquiry_no || '').replace(/\D/g, ''), 10) || 0;
-    const bn = parseInt((b.fields.inquiry_no || '').replace(/\D/g, ''), 10) || 0;
-    return bn - an;
-  });
+    const all = await readData('Inquiry');
+    legacyCount = all.filter(i => (i.fields.company_id || []).includes(cur.id)).length;
+  } catch (e) {}
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-5xl mx-auto">
       <div class="flex items-center justify-between mb-4">
         <div>
           <h2 class="text-xl font-bold text-ink-900">Anfragen</h2>
-          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (Sales · offen/ausstehend)</p>
         </div>
-        <button onclick="openInquiryWizard()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i> Neue Anfrage
+        <button type="button" onclick="loadFreshdeskTicketsPreview()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i> Tickets laden
         </button>
       </div>
 
-      <!-- Freshdesk-Sektion -->
-      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden mb-4">
+      ${legacyCount > 0 ? `
+        <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 flex items-start gap-3">
+          <i data-lucide="archive" class="w-5 h-5 text-amber-700 mt-0.5 shrink-0"></i>
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-semibold text-amber-900">${legacyCount} alte lokale Anfrage${legacyCount===1?'':'n'} in der Datenbank</p>
+            <p class="text-xs text-amber-800 mt-1">Du hast die Anfragen-Liste auf reine Freshdesk-Tickets umgestellt. Möchtest du die alten lokalen Records aus der <code class="bg-amber-100 px-1 rounded">Inquiry</code>-Tabelle endgültig löschen?</p>
+            <button type="button" onclick="deleteAllInquiries()" class="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-lg">
+              <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Alle ${legacyCount} alten Anfragen löschen
+            </button>
+          </div>
+        </div>
+      ` : ''}
+
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="px-4 py-3 border-b border-ink-100 flex items-center justify-between gap-3 flex-wrap">
           <div class="flex items-center gap-2">
             <i data-lucide="inbox" class="w-4 h-4 text-brand-600"></i>
-            <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Tickets</h3>
-            <span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-medium">Vorschau</span>
+            <h3 class="font-semibold text-ink-900 text-sm">Freshdesk · Sales · Offen &amp; Ausstehend</h3>
           </div>
-          <button type="button" onclick="loadFreshdeskTicketsPreview()" class="text-xs px-2 py-1 rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center gap-1">
-            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Laden
-          </button>
+          <span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-medium">read-only Vorschau</span>
         </div>
         <div id="freshdeskTicketsWrap" class="p-4">
-          <p class="text-xs text-ink-500 italic">Klicke „Laden" um aktuelle Tickets der Sales-Gruppe (Status: offen / ausstehend) zu holen.</p>
+          <p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade…</p>
         </div>
-      </div>
-      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
-        <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
-          <div class="relative flex-1 min-w-[180px]">
-            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"></i>
-            <input type="search" value="${escapeHtml(_inquiryListState.search)}" placeholder="Suchen (Nr., Betreff, Ticket…)" oninput="onInquirySearchInput(this.value)"
-                   class="w-full pl-9 pr-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-          </div>
-          <label class="text-xs text-ink-500">Status:</label>
-          <select onchange="_inquiryListState.status=this.value;renderInquiries()" class="text-sm border border-ink-200 rounded-lg px-2 py-2">
-            <option value="alle"            ${_inquiryListState.status==='alle'?'selected':''}>alle</option>
-            <option value="offen"           ${_inquiryListState.status==='offen'?'selected':''}>offen</option>
-            <option value="in_bearbeitung"  ${_inquiryListState.status==='in_bearbeitung'?'selected':''}>in Bearbeitung</option>
-            <option value="beantwortet"     ${_inquiryListState.status==='beantwortet'?'selected':''}>beantwortet</option>
-            <option value="abgelehnt"       ${_inquiryListState.status==='abgelehnt'?'selected':''}>abgelehnt</option>
-            <option value="archiviert"      ${_inquiryListState.status==='archiviert'?'selected':''}>archiviert</option>
-          </select>
-          <div class="ml-auto">${viewModeToggle(_inquiryListState.viewMode, 'setInquiryViewMode')}</div>
-        </div>
-        ${(() => {
-          const vm = _inquiryListState.viewMode;
-          if (list.length === 0) return `<div class="p-10 text-center text-ink-500 text-sm">${q || _inquiryListState.status !== 'alle' ? 'Keine Treffer.' : 'Noch keine Anfragen. Lege die erste an mit „+ Neue Anfrage".'}</div>`;
-          if (vm === 'tabelle') {
-            return `
-              <div class="overflow-x-auto">
-                <table class="w-full text-sm">
-                  <thead class="bg-ink-50 text-xs uppercase tracking-wider text-ink-500"><tr>
-                    <th class="px-3 py-2 text-left">Nr.</th><th class="px-3 py-2 text-left">Ticket</th>
-                    <th class="px-3 py-2 text-left">Betreff</th><th class="px-3 py-2 text-left">Kunde</th>
-                    <th class="px-3 py-2 text-left">Status</th>
-                  </tr></thead>
-                  <tbody class="divide-y divide-ink-100">${list.map(rec => inquiryRowTabelle(rec, custMap)).join('')}</tbody>
-                </table>
-              </div>`;
-          }
-          if (vm === 'kompakt') {
-            return '<div class="divide-y divide-ink-100">' + list.map(rec => inquiryRowKompakt(rec, custMap)).join('') + '</div>';
-          }
-          return '<div class="divide-y divide-ink-100">' + list.map(rec => inquiryRow(rec, custMap)).join('') + '</div>';
-        })()}
       </div>
     </div>
   `;
   if (window.lucide) lucide.createIcons();
+  // Auto-Load der Tickets beim Seitenaufruf
+  setTimeout(() => loadFreshdeskTicketsPreview(), 50);
+}
+
+/* Löscht alle lokalen Inquiry-Records des aktuellen Mandanten. Mit Bestätigung. */
+async function deleteAllInquiries() {
+  const cur = getCurrentCompany();
+  if (!cur) return;
+  let all = [];
+  try { all = await readData('Inquiry'); } catch (e) { toast(e.message, 'error'); return; }
+  const list = all.filter(i => (i.fields.company_id || []).includes(cur.id));
+  if (list.length === 0) { toast('Keine alten Anfragen vorhanden', 'info'); renderInquiries(); return; }
+  const confirmText = `${list.length} alte Anfrage${list.length===1?'':'n'} endgültig löschen?\n\nDas kann nicht rückgängig gemacht werden.`;
+  if (!confirm(confirmText)) return;
+  let ok = 0, fail = 0;
+  for (const rec of list) {
+    try {
+      await deleteData('Inquiry', rec.id);
+      ok++;
+    } catch (e) { fail++; }
+  }
+  toast(`${ok} gelöscht${fail > 0 ? ', ' + fail + ' Fehler' : ''}`, fail > 0 ? 'warn' : 'success', 4000);
+  renderInquiries();
 }
 
 function onInquirySearchInput(value) {
