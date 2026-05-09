@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.26';
+const APP_VERSION = 'v3.27';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1304,8 +1304,12 @@ async function proxyFetch(path, opts = {}) {
 }
 
 async function freshdeskFetch(path) {
-  // Pfad sieht aus wie "api/v2/..." — Proxy hängt /freshdesk davor
-  return proxyFetch('freshdesk/' + String(path).replace(/^\/+/, ''));
+  // Proxy erwartet "freshdesk/api/v2/..." — wir hängen api/v2 automatisch
+  // davor, wenn der Aufrufer es nicht schon mitgibt. So müssen die Caller
+  // nur den eigentlichen Endpoint nennen (z.B. "search/tickets?...").
+  let p = String(path).replace(/^\/+/, '');
+  if (!p.startsWith('api/v2/')) p = 'api/v2/' + p;
+  return proxyFetch('freshdesk/' + p);
 }
 
 async function askAI(prompt, opts = {}) {
