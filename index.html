@@ -568,7 +568,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.08';
+const APP_VERSION = 'v3.09';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1254,19 +1254,25 @@ function closeModal2() {
 const _comboboxData = {};
 
 function renderCombobox(opts) {
-  // opts: { id, name, items: [{id,label,secondary}], current, placeholder, onChange (Funktionsname auf window) }
+  // opts: { id, name, items: [{id,label,secondary}], current, placeholder, onChange (Funktionsname auf window), disabled }
   _comboboxData[opts.id] = opts.items || [];
   const cur = (opts.items || []).find(i => i.id === opts.current);
   const dataOnchange = opts.onChange ? ` data-onchange="${escapeHtml(opts.onChange)}"` : '';
+  const disabled = !!opts.disabled;
+  const disabledAttrs = disabled ? 'disabled readonly' : '';
+  const inputCls = disabled
+    ? 'w-full pl-3 pr-3 py-2 border border-ink-200 rounded-lg bg-ink-50 text-ink-500 cursor-not-allowed'
+    : 'w-full pl-3 pr-8 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30';
+  const handlers = disabled ? '' : `oninput="onComboboxInput('${escapeHtml(opts.id)}')" onfocus="onComboboxFocus('${escapeHtml(opts.id)}')"`;
   return `
-    <div class="relative" data-combobox="${escapeHtml(opts.id)}"${dataOnchange}>
+    <div class="relative" data-combobox="${escapeHtml(opts.id)}"${dataOnchange}${disabled ? ' data-disabled="1"' : ''}>
       <input id="${escapeHtml(opts.id)}_search" type="text" autocomplete="off" value="${escapeHtml(cur?.label || '')}" placeholder="${escapeHtml(opts.placeholder || 'Suchen…')}"
-             oninput="onComboboxInput('${escapeHtml(opts.id)}')" onfocus="onComboboxFocus('${escapeHtml(opts.id)}')"
-             class="w-full pl-3 pr-8 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+             ${handlers} ${disabledAttrs}
+             class="${inputCls}">
       <input id="${escapeHtml(opts.id)}_value" type="hidden" name="${escapeHtml(opts.name || '')}" value="${escapeHtml(opts.current || '')}">
-      <button type="button" onclick="onComboboxClear('${escapeHtml(opts.id)}')" class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-ink-400 hover:text-ink-700" title="Auswahl löschen">
+      ${disabled ? '' : `<button type="button" onclick="onComboboxClear('${escapeHtml(opts.id)}')" class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-ink-400 hover:text-ink-700" title="Auswahl löschen">
         <i data-lucide="x" class="w-4 h-4"></i>
-      </button>
+      </button>`}
       <div id="${escapeHtml(opts.id)}_dropdown" class="hidden absolute z-50 left-0 right-0 mt-1 bg-white border border-ink-200 rounded-lg shadow-card max-h-64 overflow-y-auto"></div>
     </div>
   `;
@@ -14575,11 +14581,7 @@ async function openInvoiceModal(id, opts = {}) {
           <label class="block text-sm font-medium text-ink-700 mb-1">Fällig am</label>
           <input name="due_date" type="date" value="${escapeHtml(f.due_date || '')}" ${lockedAttr} class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 disabled:bg-ink-50" style="width:180px;max-width:100%;">
         </div>
-        <div>
-          <label class="block text-sm font-medium text-ink-700 mb-1">Bezahlt am</label>
-          <input name="payment_date" type="date" value="${escapeHtml(f.payment_date || '')}" class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30" style="width:180px;max-width:100%;">
-          <p class="text-[10px] text-ink-400 italic">Auch nach Festschreibung änderbar — z.B. bei Zahlungseingang.</p>
-        </div>
+        <input type="hidden" name="payment_date" value="${escapeHtml(f.payment_date || '')}">
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
