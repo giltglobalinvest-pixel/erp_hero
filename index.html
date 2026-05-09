@@ -494,6 +494,10 @@
               <i data-lucide="package" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Vorlagenpakete</span>
             </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-settings">
+              <i data-lucide="key-round" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Einstellungen</span>
+            </button>
           </div>
         </div>
       </nav>
@@ -573,7 +577,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.17';
+const APP_VERSION = 'v3.18';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1470,6 +1474,7 @@ function dispatchRoute(route) {
     case 'admin-users':     renderAdminUsers(); break;
     case 'admin-templates': renderAdminTextemplates(); break;
     case 'admin-bundles':   renderAdminQuoteBundles(); break;
+    case 'admin-settings':  renderAdminSettings(); break;
     default:                renderWelcome();
   }
 }
@@ -2620,6 +2625,248 @@ async function deleteQuoteBundle(id) {
     renderAdminQuoteBundles();
     toast('Gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   ADMIN: EINSTELLUNGEN (Master-Base Keys)
+   Liest und schreibt Records in Master-Base /Keys (gefiltert nach
+   project_id). Tokens werden maskiert angezeigt; Klartext erst nach
+   "Wert ändern". Schreiben benötigt einen airtableWriteKey, dessen
+   Scope auch die Master-Base umfasst — sonst klare Fehlermeldung.
+   ============================================================ */
+
+const SETTINGS_SECTIONS = [
+  {
+    title: 'Freshdesk-Anbindung',
+    icon: 'headphones',
+    desc: 'Damit das Anfragen-Modul Tickets aus Freshdesk laden kann (über den Val.town-Proxy).',
+    fields: [
+      { name: 'freshdeskProxyUrl',     label: 'Proxy-URL (Val.town)', type: 'url',    placeholder: 'https://username-freshdeskproxy.web.val.run' },
+      { name: 'freshdeskProxyToken',   label: 'Proxy Bearer-Token',   type: 'secret', placeholder: 'geheimer Token aus Val.town-Setup' },
+      { name: 'freshdeskSalesGroupId', label: 'Sales-Group-ID',       type: 'text',   placeholder: 'z.B. 12000123456' }
+    ]
+  },
+  {
+    title: 'Airtable',
+    icon: 'database',
+    desc: 'Schreib-Key wird für alle Schreiboperationen genutzt. Nur ändern, wenn der Token rotiert wird.',
+    fields: [
+      { name: 'airtableWriteKey', label: 'Airtable Write-Key', type: 'secret', placeholder: 'patXXXXXX.YYYY...', protected: true },
+      { name: 'airtableBaseId',   label: 'App-Base-ID',        type: 'text',   placeholder: 'appXXXXXXXXXX' }
+    ]
+  },
+  {
+    title: 'KI (optional)',
+    icon: 'sparkles',
+    desc: 'Anthropic-API-Key für KI-Features (Layout-Generator, Texteinfügung). Fällt auf den globalen Schlüssel zurück.',
+    fields: [
+      { name: 'anthropicKey', label: 'Anthropic API-Key', type: 'secret', placeholder: 'sk-ant-...' }
+    ]
+  }
+];
+
+async function _fetchMasterBaseKeys() {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' +
+    encodeURIComponent("{project_id}='" + APP_CONFIG.PROJECT_ID + "'");
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error('Konnte Keys nicht laden (HTTP ' + res.status + ')');
+  const data = await res.json();
+  return data.records || [];
+}
+
+async function _writeMasterBaseKey(keyName, value, existingRecordId) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt — bitte einloggen');
+  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys' +
+    (existingRecordId ? '/' + existingRecordId : '');
+  const method = existingRecordId ? 'PATCH' : 'POST';
+  const body = existingRecordId
+    ? { fields: { key_value: value } }
+    : { fields: { project_id: APP_CONFIG.PROJECT_ID, key_name: keyName, key_value: value } };
+  const res = await fetch(url, {
+    method,
+    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    if (res.status === 403 || res.status === 401) {
+      throw new Error('Kein Schreibzugriff auf Master-Base. Der airtableWriteKey braucht Scope für Base ' + APP_CONFIG.MASTER_BASE_ID + ' (data.records:write). Token in Airtable-Account erweitern.');
+    }
+    let msg = 'Speichern fehlgeschlagen (HTTP ' + res.status + ')';
+    try { const ej = JSON.parse(txt); if (ej.error?.message) msg = ej.error.message; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+async function _deleteMasterBaseKey(recordId) {
+  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt');
+  const res = await fetch(
+    'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys/' + recordId,
+    { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
+  );
+  if (!res.ok) {
+    if (res.status === 403 || res.status === 401) throw new Error('Kein Schreibzugriff auf Master-Base.');
+    throw new Error('Löschen fehlgeschlagen (HTTP ' + res.status + ')');
+  }
+  return true;
+}
+
+function _maskSecret(val) {
+  if (!val) return '';
+  if (val.length <= 10) return '••••••••';
+  return val.substring(0, 4) + '••••••••' + val.substring(val.length - 4);
+}
+
+// Spiegelt einen geänderten Key in APP_KEYS, damit er sofort wirkt
+function _applyKeyToAppState(keyName, value) {
+  if (keyName === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl     = value;
+  if (keyName === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken   = value;
+  if (keyName === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId = value;
+  if (keyName === 'anthropicKey')           APP_KEYS.anthropicKey          = value;
+  if (keyName === 'airtableWriteKey')       APP_KEYS.airtableWriteKey      = value;
+  if (keyName === 'airtableBaseId')         APP_KEYS.appBaseId             = value;
+}
+
+async function renderAdminSettings() {
+  setPageTitle('Einstellungen');
+  if (!APP_KEYS.user?.is_admin) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Nur für Admins.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Einstellungen…</p>';
+
+  let keys = [];
+  try {
+    keys = await _fetchMasterBaseKeys();
+  } catch (e) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Fehler: ${escapeHtml(e.message)}</div></div>`;
+    return;
+  }
+
+  const byName = {};
+  keys.forEach(rec => { byName[rec.fields.key_name] = rec; });
+
+  const fieldHtml = (f) => {
+    const rec = byName[f.name];
+    const val = rec?.fields?.key_value || '';
+    const recId = rec?.id || '';
+    const inputType = f.type === 'secret' ? 'password' : (f.type === 'url' ? 'url' : 'text');
+    const isSet = !!val;
+    return `
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-start py-4 border-b border-ink-100 last:border-b-0">
+        <div class="sm:col-span-1">
+          <label class="block text-sm font-medium text-ink-900">${escapeHtml(f.label)}</label>
+          <p class="text-[11px] text-ink-500 font-mono mt-0.5">${escapeHtml(f.name)}</p>
+          ${isSet
+            ? '<p class="text-[10px] uppercase tracking-wider text-emerald-700 bg-emerald-100 inline-block px-1.5 py-0.5 rounded mt-1 font-semibold">gesetzt</p>'
+            : '<p class="text-[10px] uppercase tracking-wider text-amber-700 bg-amber-100 inline-block px-1.5 py-0.5 rounded mt-1 font-semibold">leer</p>'}
+        </div>
+        <div class="sm:col-span-2 flex flex-col gap-2">
+          ${f.type === 'secret' && isSet ? `
+            <p class="text-xs text-ink-500 font-mono break-all">${escapeHtml(_maskSecret(val))}</p>
+            <details class="group">
+              <summary class="cursor-pointer text-xs text-brand-600 hover:text-brand-700 select-none flex items-center gap-1"><i data-lucide="pencil" class="w-3.5 h-3.5"></i> Wert ändern</summary>
+              <div class="mt-2 space-y-2">
+                <input type="${inputType}" id="settingsField_${f.name}" placeholder="${escapeHtml(f.placeholder || '')}" data-rec="${recId}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
+                <div class="flex gap-2 flex-wrap">
+                  <button type="button" onclick="saveSettingsField('${f.name}')" class="bg-brand-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium hover:bg-brand-600 flex items-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Speichern</button>
+                  ${f.protected
+                    ? ''
+                    : (recId ? `<button type="button" onclick="clearSettingsField('${f.name}', '${recId}')" class="text-red-600 hover:text-red-800 text-xs flex items-center gap-1"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Wert löschen</button>` : '')}
+                </div>
+              </div>
+            </details>
+          ` : `
+            <input type="${inputType}" id="settingsField_${f.name}" value="${f.type !== 'secret' ? escapeHtml(val) : ''}" placeholder="${escapeHtml(f.placeholder || '')}" data-rec="${recId}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
+            <div class="flex gap-2 flex-wrap">
+              <button type="button" onclick="saveSettingsField('${f.name}')" class="bg-brand-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium hover:bg-brand-600 flex items-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Speichern</button>
+              ${(!f.protected && recId) ? `<button type="button" onclick="clearSettingsField('${f.name}', '${recId}')" class="text-red-600 hover:text-red-800 text-xs flex items-center gap-1"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Wert löschen</button>` : ''}
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+  };
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-4xl mx-auto">
+      <div class="flex items-start justify-between mb-4 flex-wrap gap-2">
+        <div>
+          <h2 class="text-xl font-bold text-ink-900">Einstellungen</h2>
+          <p class="text-xs text-ink-500 mt-0.5">Master-Base Keys · Projekt <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">${escapeHtml(APP_CONFIG.PROJECT_ID)}</code></p>
+        </div>
+        <button type="button" onclick="renderAdminSettings()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i> Neu laden
+        </button>
+      </div>
+
+      <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 text-xs text-amber-900 flex items-start gap-2">
+        <i data-lucide="info" class="w-4 h-4 shrink-0 mt-0.5"></i>
+        <div>
+          <p class="font-medium">Sensitive Daten</p>
+          <p class="mt-0.5">Tokens werden maskiert dargestellt — Klartext erst nach „Wert ändern". Änderungen wirken sofort in der laufenden Sitzung; andere User sehen sie nach Neuladen / Re-Login.</p>
+        </div>
+      </div>
+
+      ${SETTINGS_SECTIONS.map(sect => `
+        <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden mb-4">
+          <div class="px-4 py-3 border-b border-ink-100 flex items-center gap-2 bg-ink-50/50">
+            <i data-lucide="${sect.icon}" class="w-4 h-4 text-brand-600"></i>
+            <div class="flex-1">
+              <h3 class="font-semibold text-ink-900 text-sm">${escapeHtml(sect.title)}</h3>
+              <p class="text-[11px] text-ink-500">${escapeHtml(sect.desc)}</p>
+            </div>
+          </div>
+          <div class="px-4">
+            ${sect.fields.map(fieldHtml).join('')}
+          </div>
+        </div>
+      `).join('')}
+
+      <div class="bg-ink-50 border border-ink-200 rounded-2xl p-4 text-xs text-ink-600">
+        <p class="font-semibold text-ink-700 mb-1">Hinweis zu Schreibrechten</p>
+        <p>Falls beim Speichern „Kein Schreibzugriff auf Master-Base" erscheint, hat der aktuelle <code>airtableWriteKey</code> keinen Scope für Base <code>${escapeHtml(APP_CONFIG.MASTER_BASE_ID)}</code>. In Airtable → Builder Hub → Personal Access Tokens muss die Master-Base zur Token-Scope-Liste hinzugefügt werden (Berechtigung <code>data.records:write</code>).</p>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function saveSettingsField(keyName) {
+  const input = document.getElementById('settingsField_' + keyName);
+  if (!input) return;
+  const val = (input.value || '').trim();
+  if (!val) return toast('Wert ist leer — zum Löschen "Wert löschen" benutzen', 'warn');
+  const recId = input.getAttribute('data-rec') || null;
+  try {
+    await _writeMasterBaseKey(keyName, val, recId);
+    _applyKeyToAppState(keyName, val);
+    toast('Gespeichert', 'success');
+    renderAdminSettings();
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+  }
+}
+
+async function clearSettingsField(keyName, recId) {
+  if (!recId) return toast('Kein Eintrag vorhanden', 'info');
+  // Schutz: airtableWriteKey nicht löschen — würde alle Schreibvorgänge brechen
+  if (keyName === 'airtableWriteKey') {
+    return toast('Der Write-Key darf nicht gelöscht werden — sonst ist die App nicht mehr beschreibbar. Stattdessen einen neuen Wert eintragen.', 'error', 8000);
+  }
+  if (!confirm('Wert für "' + keyName + '" wirklich löschen?')) return;
+  try {
+    await _deleteMasterBaseKey(recId);
+    _applyKeyToAppState(keyName, null);
+    toast('Gelöscht', 'success');
+    renderAdminSettings();
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+  }
 }
 
 /* ============================================================
