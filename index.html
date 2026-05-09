@@ -568,7 +568,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.12';
+const APP_VERSION = 'v3.13';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10205,7 +10205,7 @@ async function setupPwaAssets() {
    Kann via quote_id auf ein Angebot zurückverweisen (1 Angebot → N Aufträge).
    ============================================================ */
 
-const _orderListState = { search: '', sort: 'date_desc', showArchived: false, viewMode: 'standard' };
+const _orderListState = { search: '', sort: 'date_desc', showArchived: false, viewMode: 'standard', status: 'alle' };
 function setOrderViewMode(mode) { _orderListState.viewMode = mode; renderOrders(); }
 let _orderSearchTimer = null;
 
@@ -10268,16 +10268,24 @@ async function nextOrderNo(companyId) {
 
 function orderStatusBadge(status) {
   const map = {
-    'Entwurf':       'bg-ink-100 text-ink-700',
-    'Bestätigt':     'bg-blue-100 text-blue-700',
-    'In Bearbeitung':'bg-amber-100 text-amber-700',
-    'Geliefert':     'bg-emerald-100 text-emerald-700',
-    'Abgerechnet':   'bg-violet-100 text-violet-700',
-    'Storniert':     'bg-red-100 text-red-700',
-    'archiviert':    'bg-ink-200 text-ink-500',
+    'Entwurf':                 'bg-ink-100 text-ink-700',
+    'Bestätigt':               'bg-blue-100 text-blue-700',
+    'In Bearbeitung':          'bg-amber-100 text-amber-700',
+    'Geliefert':               'bg-emerald-100 text-emerald-700',
+    'Abgerechnet':             'bg-violet-100 text-violet-700',
+    'Abgerechnet & Geliefert': 'bg-violet-200 text-violet-800',
+    'Storniert':               'bg-red-100 text-red-700',
+    'archiviert':              'bg-ink-200 text-ink-500',
   };
   const cls = map[status] || 'bg-ink-100 text-ink-700';
   return `<span class="text-[10px] uppercase tracking-wider ${cls} px-1.5 py-0.5 rounded font-medium">${escapeHtml(status || 'Entwurf')}</span>`;
+}
+
+// Auftrag ist gelockt sobald ausgeliefert ODER abgerechnet ODER storniert/archiviert.
+// Inhalt bleibt unverändert, nur Status weiter änderbar (für Korrekturen).
+function isOrderLocked(orderFields) {
+  const status = orderFields?.status || 'Entwurf';
+  return ['Geliefert', 'Abgerechnet', 'Abgerechnet & Geliefert', 'Storniert', 'archiviert'].includes(status);
 }
 
 async function renderOrders() {
@@ -10322,7 +10330,12 @@ async function renderOrders() {
   window._linkedInvoicesByOrder = invoicesByOrder;
 
   let list = all.filter(o => (o.fields.company_id || []).includes(cur.id) || o.fields.company_id === cur.id);
-  if (!_orderListState.showArchived) list = list.filter(o => (o.fields.status || 'Entwurf') !== 'archiviert');
+  if (!_orderListState.showArchived && _orderListState.status !== 'archiviert') {
+    list = list.filter(o => (o.fields.status || 'Entwurf') !== 'archiviert');
+  }
+  if (_orderListState.status !== 'alle') {
+    list = list.filter(o => (o.fields.status || 'Entwurf') === _orderListState.status);
+  }
 
   const q = _orderListState.search.trim().toLowerCase();
   if (q) {
@@ -10365,6 +10378,17 @@ async function renderOrders() {
           <option value="date_desc"  ${sortKey==='date_desc'?'selected':''}>Datum ↓</option>
           <option value="date_asc"   ${sortKey==='date_asc'?'selected':''}>Datum ↑</option>
           <option value="order_no"   ${sortKey==='order_no'?'selected':''}>AB-Nr.</option>
+        </select>
+        <select onchange="_orderListState.status=this.value;renderOrders()" class="text-sm border border-ink-200 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500/30" title="Status-Filter">
+          <option value="alle"                     ${_orderListState.status==='alle'?'selected':''}>alle Status</option>
+          <option value="Entwurf"                  ${_orderListState.status==='Entwurf'?'selected':''}>Entwurf</option>
+          <option value="Bestätigt"                ${_orderListState.status==='Bestätigt'?'selected':''}>Bestätigt</option>
+          <option value="In Bearbeitung"           ${_orderListState.status==='In Bearbeitung'?'selected':''}>In Bearbeitung</option>
+          <option value="Geliefert"                ${_orderListState.status==='Geliefert'?'selected':''}>Geliefert</option>
+          <option value="Abgerechnet"              ${_orderListState.status==='Abgerechnet'?'selected':''}>Abgerechnet</option>
+          <option value="Abgerechnet & Geliefert"  ${_orderListState.status==='Abgerechnet & Geliefert'?'selected':''}>Abgerechnet &amp; Geliefert</option>
+          <option value="Storniert"                ${_orderListState.status==='Storniert'?'selected':''}>Storniert</option>
+          <option value="archiviert"               ${_orderListState.status==='archiviert'?'selected':''}>archiviert</option>
         </select>
         <label class="flex items-center gap-2 text-xs text-ink-700 cursor-pointer select-none">
           <input type="checkbox" ${_orderListState.showArchived?'checked':''} onchange="_orderListState.showArchived=this.checked;renderOrders()" class="w-4 h-4 rounded border-ink-300">
@@ -10602,13 +10626,27 @@ async function openOrderModal(id, opts = {}) {
 
   window._currentOrderIdInModal = id || null;
 
+  // LOCK: Auftrag ist gelockt wenn Status Geliefert / Abgerechnet / Storniert / archiviert
+  const orderLocked = isOrderLocked(f);
+  const orderLockedAttr = orderLocked ? 'disabled' : '';
+  const orderLockedBanner = orderLocked ? `
+    <div class="mb-3 p-3 bg-violet-50 border border-violet-200 rounded-lg flex items-start gap-2 text-sm">
+      <i data-lucide="lock" class="w-5 h-5 text-violet-700 mt-0.5 shrink-0"></i>
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-violet-900">Auftrag festgeschrieben</p>
+        <p class="text-xs text-violet-700 mt-0.5">Status „${escapeHtml(f.status)}" — Inhalt nicht mehr änderbar. Korrektur nur über Stornorechnung / Storno-Lieferschein.</p>
+      </div>
+    </div>
+  ` : '';
+
   openModal(`
     <div class="lg:flex lg:items-stretch">
-    <form data-order-form="1" onsubmit="saveOrder(event, '${id || ''}', false)" class="p-4 sm:p-6 lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto">
+    <form data-order-form="1" data-locked="${orderLocked ? '1' : '0'}" onsubmit="saveOrder(event, '${id || ''}', false)" class="p-4 sm:p-6 lg:w-1/2 lg:max-h-[88vh] lg:overflow-y-auto">
       <div class="flex items-baseline justify-between mb-4">
-        <h3 class="text-lg font-bold text-ink-900">${id ? 'Auftrag bearbeiten' : 'Neuer Auftrag'}</h3>
+        <h3 class="text-lg font-bold text-ink-900">${id ? (orderLocked ? 'Auftrag (festgeschrieben)' : 'Auftrag bearbeiten') : 'Neuer Auftrag'}</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
+      ${orderLockedBanner}
 
       ${linkedQuote ? `
         <div class="mb-3 p-2.5 bg-brand-50/50 border border-brand-200 rounded-lg flex items-center gap-2 text-sm">
@@ -10644,58 +10682,56 @@ async function openOrderModal(id, opts = {}) {
       <div class="space-y-3 mb-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">AB-Nr.</label>
-          <input name="order_no" value="${escapeHtml(f.order_no || '')}" class="px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30" style="width:200px;max-width:100%;">
+          <input name="order_no" value="${escapeHtml(f.order_no || '')}" ${orderLockedAttr} class="px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30 disabled:bg-ink-50 disabled:text-ink-500" style="width:200px;max-width:100%;">
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
-          <select name="status" class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30" style="width:220px;max-width:100%;">
-            ${['Entwurf','Bestätigt','In Bearbeitung','Geliefert','Abgerechnet','Storniert','archiviert'].map(s => `<option value="${s}" ${(f.status||'Entwurf')===s?'selected':''}>${s}</option>`).join('')}
+          <select name="status" class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30" style="width:240px;max-width:100%;">
+            ${['Entwurf','Bestätigt','In Bearbeitung','Geliefert','Abgerechnet','Abgerechnet & Geliefert','Storniert','archiviert'].map(s => `<option value="${s}" ${(f.status||'Entwurf')===s?'selected':''}>${s}</option>`).join('')}
           </select>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Datum</label>
-          <input name="date" type="date" value="${escapeHtml(f.date || '')}" class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30" style="width:180px;max-width:100%;">
+          <input name="date" type="date" value="${escapeHtml(f.date || '')}" ${orderLockedAttr} class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 disabled:bg-ink-50" style="width:180px;max-width:100%;">
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Bestätigt am</label>
-          <input name="confirmation_date" type="date" value="${escapeHtml(f.confirmation_date || '')}" class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30" style="width:180px;max-width:100%;">
+          <input name="confirmation_date" type="date" value="${escapeHtml(f.confirmation_date || '')}" ${orderLockedAttr} class="px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 disabled:bg-ink-50" style="width:180px;max-width:100%;">
         </div>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
         <div class="lg:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Kunde</label>
-          ${renderCombobox({ id: 'oc_customer', name: 'customer_id', items: customerItems, current: currentCustomerId, placeholder: 'Kunde suchen…', onChange: 'onOrderCustomerChange' })}
+          ${renderCombobox({ id: 'oc_customer', name: 'customer_id', items: customerItems, current: currentCustomerId, placeholder: 'Kunde suchen…', onChange: orderLocked ? '' : 'onOrderCustomerChange', disabled: orderLocked })}
         </div>
         <div class="lg:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Ansprechpartner</label>
-          ${renderCombobox({ id: 'oc_contact', name: 'contact_id', items: contactItemsFor(currentCustomerId), current: currentContactId, placeholder: 'Ansprechpartner suchen…' })}
+          ${renderCombobox({ id: 'oc_contact', name: 'contact_id', items: contactItemsFor(currentCustomerId), current: currentContactId, placeholder: 'Ansprechpartner suchen…', disabled: orderLocked })}
         </div>
         <div class="lg:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Adressen</label>
           <input type="hidden" name="delivery_address_id" id="oc_delivery_address_id" value="${escapeHtml(currentDeliveryAddressId)}">
           <input type="hidden" name="invoice_address_id"  id="oc_invoice_address_id"  value="${escapeHtml(currentInvoiceAddressId)}">
           <div class="flex flex-wrap gap-2">
-            <button type="button" id="oc_btn_delivery" onclick="openOrderAddressPicker('delivery')" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-left text-sm">
+            <button type="button" id="oc_btn_delivery" ${orderLockedAttr} onclick="${orderLocked ? '' : `openOrderAddressPicker('delivery')`}" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg ${orderLocked ? 'cursor-not-allowed opacity-70' : 'hover:bg-ink-50'} text-left text-sm">
               <i data-lucide="truck" class="w-4 h-4 text-brand-600 shrink-0"></i>
               <span class="flex-1 min-w-0">
                 <span class="block text-[10px] uppercase tracking-wider text-ink-500">Lieferadresse</span>
                 <span id="oc_label_delivery" class="block truncate text-ink-900">${escapeHtml(addressShortLabel(resolveAddress({ customer: customersInCompany.find(c => c.id === currentCustomerId), addresses: allAddresses, addressId: currentDeliveryAddressId, kind: 'delivery' })))}</span>
               </span>
-              <i data-lucide="pencil" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>
             </button>
-            <button type="button" id="oc_btn_billing" onclick="openOrderAddressPicker('billing')" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-left text-sm">
+            <button type="button" id="oc_btn_billing" ${orderLockedAttr} onclick="${orderLocked ? '' : `openOrderAddressPicker('billing')`}" class="flex-1 min-w-[180px] flex items-center gap-2 px-3 py-2 border border-ink-200 rounded-lg ${orderLocked ? 'cursor-not-allowed opacity-70' : 'hover:bg-ink-50'} text-left text-sm">
               <i data-lucide="receipt" class="w-4 h-4 text-brand-600 shrink-0"></i>
               <span class="flex-1 min-w-0">
                 <span class="block text-[10px] uppercase tracking-wider text-ink-500">Rechnungsadresse</span>
                 <span id="oc_label_billing" class="block truncate text-ink-900">${escapeHtml(addressShortLabel(resolveAddress({ customer: customersInCompany.find(c => c.id === currentCustomerId), addresses: allAddresses, addressId: currentInvoiceAddressId, kind: 'billing' })))}</span>
               </span>
-              <i data-lucide="pencil" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>
             </button>
           </div>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Zahlungsziel</label>
-          <select name="payment_terms" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <select name="payment_terms" ${orderLockedAttr} class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 disabled:bg-ink-50">
             <option value="">— wählen —</option>
             ${paymentTerms.map(t => `<option value="${escapeHtml(t.fields.name || '')}" ${initialPayment === (t.fields.name || '') ? 'selected' : ''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '')}</option>`).join('')}
             ${initialPayment && !paymentTerms.find(t => t.fields.name === initialPayment) ? `<option value="${escapeHtml(initialPayment)}" selected>${escapeHtml(initialPayment)} (alt)</option>` : ''}
@@ -10703,7 +10739,7 @@ async function openOrderModal(id, opts = {}) {
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Lieferbedingungen</label>
-          <select name="delivery_terms" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <select name="delivery_terms" ${orderLockedAttr} class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 disabled:bg-ink-50">
             <option value="">— wählen —</option>
             ${deliveryTerms.map(t => `<option value="${escapeHtml(t.fields.name || '')}" ${initialDelivery === (t.fields.name || '') ? 'selected' : ''}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(t.fields.name || '')}</option>`).join('')}
             ${initialDelivery && !deliveryTerms.find(t => t.fields.name === initialDelivery) ? `<option value="${escapeHtml(initialDelivery)}" selected>${escapeHtml(initialDelivery)} (alt)</option>` : ''}
@@ -10724,7 +10760,7 @@ async function openOrderModal(id, opts = {}) {
       </div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Positionen</h4>
-      <div id="orderItemsWrap">${renderOrderItems(id || '', items)}</div>
+      <div id="orderItemsWrap">${renderOrderItems(id || '', items, orderLocked)}</div>
 
       <div id="orderSums" class="mt-4 bg-ink-50 rounded-xl p-4 text-sm space-y-1">
         ${quoteSumsHtml(sums)}
@@ -11137,21 +11173,23 @@ async function updateOrderPreview() {
   if (window.lucide) lucide.createIcons();
 }
 
-function renderOrderItems(orderId, items) {
+function renderOrderItems(orderId, items, locked) {
   const sorted = [...(items || [])].sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
   const list = sorted.length === 0
     ? '<p class="text-xs text-ink-500 italic px-3 py-2">Noch keine Positionen.</p>'
-    : '<div id="oiList" class="space-y-2">' + sorted.map(it => `<div data-oi-row="${it.id}">${orderItemRow(orderId, it)}</div>`).join('') + '</div>';
+    : '<div id="oiList" class="space-y-2">' + sorted.map(it => `<div data-oi-row="${it.id}">${orderItemRow(orderId, it, locked)}</div>`).join('') + '</div>';
   return `
     ${list}
-    <div id="oiFormWrap" class="mt-2"></div>
-    <button id="addOiBtn" type="button" onclick="showOrderItemInlineForm('${orderId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
-      <i data-lucide="plus" class="w-4 h-4"></i> Position hinzufügen
-    </button>
+    ${!locked ? `
+      <div id="oiFormWrap" class="mt-2"></div>
+      <button id="addOiBtn" type="button" onclick="showOrderItemInlineForm('${orderId}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
+        <i data-lucide="plus" class="w-4 h-4"></i> Position hinzufügen
+      </button>
+    ` : ''}
   `;
 }
 
-function orderItemRow(orderId, it) {
+function orderItemRow(orderId, it, locked) {
   const f = it.fields || {};
   const lineNet = calcLineNet(f.qty, f.unit_price_net, f.discount_pct);
   const split = splitDescriptionTitleAndBody(f.description || '');
@@ -11176,12 +11214,14 @@ function orderItemRow(orderId, it) {
         </div>
         <div class="flex items-center gap-2 shrink-0">
           <span class="font-mono text-sm tabular-nums text-ink-900">${formatPrice(lineNet)} €</span>
-          <button type="button" onclick="showOrderItemInlineForm('${orderId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
-            <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
-          </button>
-          <button type="button" onclick="deleteOrderItemInline('${orderId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
-            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
-          </button>
+          ${!locked ? `
+            <button type="button" onclick="showOrderItemInlineForm('${orderId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-white rounded" title="Bearbeiten">
+              <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+            </button>
+            <button type="button" onclick="deleteOrderItemInline('${orderId}','${it.id}')" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-white rounded" title="Löschen">
+              <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+            </button>
+          ` : ''}
         </div>
       </div>
     </div>
@@ -11477,15 +11517,21 @@ async function saveOrder(e, id, keepOpen) {
   const form = e?.target?.tagName === 'FORM' ? e.target : (e?.target?.closest?.('form') || document.querySelector('#modalBox form[data-order-form]'));
   if (!form) return;
   const fd = new FormData(form);
+  const wasLocked = form.dataset.locked === '1';
   const fields = {};
-  ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id','bundle_id'].forEach(k => {
-    fields[k] = (fd.get(k) || '').trim();
-  });
-  const cidSel = (fd.get('customer_id') || '').trim();
-  const conSel = (fd.get('contact_id')  || '').trim();
-  fields.customer_id = cidSel;
-  fields.contact_id  = conSel;
-  fields.status = fields.status || 'Entwurf';
+  if (wasLocked) {
+    // Festgeschrieben — nur Status änderbar (für Statuskorrekturen)
+    fields.status = (fd.get('status') || 'Entwurf').trim();
+  } else {
+    ['order_no','description','date','confirmation_date','status','payment_terms','delivery_terms','notes','order_title','delivery_address_id','invoice_address_id','bundle_id'].forEach(k => {
+      fields[k] = (fd.get(k) || '').trim();
+    });
+    const cidSel = (fd.get('customer_id') || '').trim();
+    const conSel = (fd.get('contact_id')  || '').trim();
+    fields.customer_id = cidSel;
+    fields.contact_id  = conSel;
+    fields.status = fields.status || 'Entwurf';
+  }
   if (!id) fields.company_id = cur.id;
   if (id)  { fields.lock_user_id = ''; fields.lock_until = ''; }
   _stripEmptyDateFields(fields, ['date','confirmation_date']);
@@ -11690,28 +11736,41 @@ function confirmCreateLinkedDoc(orderId, kind) {
   }, 100);
 }
 
-/* Setzt den Status eines Auftrags abhängig vom verknüpften Doku-Typ:
-   - 'delivery' → 'Geliefert' (wenn nicht schon 'Abgerechnet' oder 'Storniert')
-   - 'invoice'  → 'Abgerechnet' (überschreibt 'Geliefert')
-   Stille Aktualisierung ohne Toast (nur wenn sich der Status tatsächlich ändert). */
-async function _bumpOrderStatusFromLinkedDoc(orderId, kind) {
+/* Berechnet den Auftrag-Status anhand ALLER verknüpften Lieferscheine + Rechnungen:
+   - hat versendete/gelieferte Lieferscheine UND festgeschriebene Rechnung → 'Abgerechnet & Geliefert'
+   - nur festgeschriebene Rechnung → 'Abgerechnet'
+   - nur versendete Lieferscheine → 'Geliefert'
+   - sonst: aktueller Status bleibt
+   Storniert/archiviert wird nie überschrieben. */
+async function _bumpOrderStatusFromLinkedDoc(orderId, _kind /* unused, beibehalten für API-Kompat */) {
   if (!orderId) return;
   try {
-    const all = await readData('Order');
-    const order = all.find(o => o.id === orderId);
+    const [allOrd, allDel, allInv] = await Promise.all([
+      readData('Order'),
+      readData('DeliveryNote').catch(()=>[]),
+      readData('Invoice').catch(()=>[])
+    ]);
+    const order = allOrd.find(o => o.id === orderId);
     if (!order) return;
     const current = order.fields.status || 'Entwurf';
-    // Nicht überschreiben wenn manuell auf Endstatus
     if (current === 'Storniert' || current === 'archiviert') return;
+
+    const dels = allDel.filter(d => _readIdValue(d.fields.order_id) === orderId);
+    const invs = allInv.filter(i => _readIdValue(i.fields.order_id) === orderId);
+    const hasShipped = dels.some(d => {
+      const s = d.fields.status || 'Entwurf';
+      return s !== 'Entwurf' && s !== 'Storniert' && s !== 'archiviert';
+    });
+    const hasLockedInvoice = invs.some(i => {
+      const s = i.fields.status || 'Entwurf';
+      return s !== 'Entwurf' && s !== 'Storniert' && s !== 'archiviert';
+    });
+
     let target = null;
-    if (kind === 'invoice') {
-      // Rechnung trumpft alles
-      target = 'Abgerechnet';
-    } else if (kind === 'delivery') {
-      // Geliefert nur wenn nicht schon abgerechnet
-      if (current === 'Abgerechnet') return;
-      target = 'Geliefert';
-    }
+    if (hasShipped && hasLockedInvoice) target = 'Abgerechnet & Geliefert';
+    else if (hasLockedInvoice)          target = 'Abgerechnet';
+    else if (hasShipped)                target = 'Geliefert';
+
     if (!target || target === current) return;
     await updateData('Order', orderId, { status: target });
   } catch (err) { console.warn('[orderStatusBump]', err); }
