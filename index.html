@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.22';
+const APP_VERSION = 'v3.23';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1151,23 +1151,24 @@ async function uploadFileToRecord(recordId, attachmentField, file) {
 async function loadFreshdeskTicketsPreview() {
   const wrap = document.getElementById('freshdeskTicketsWrap');
   if (!wrap) return;
-  if (!APP_KEYS.freshdeskProxyUrl || !APP_KEYS.freshdeskProxyToken) {
+  if (!_proxyBase()) {
     wrap.innerHTML = `
       <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
-        <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> Freshdesk-Proxy nicht konfiguriert</p>
-        <p>Lege in der Master-Base „Keys"-Tabelle für dieses Projekt 3 Records an:</p>
-        <ul class="list-disc pl-5 mt-2 space-y-0.5">
-          <li><code class="text-[11px] bg-amber-100 px-1 rounded">freshdeskProxyUrl</code> = deine Val.town-URL</li>
-          <li><code class="text-[11px] bg-amber-100 px-1 rounded">freshdeskProxyToken</code> = dein ALLOWED_TOKEN</li>
-          <li><code class="text-[11px] bg-amber-100 px-1 rounded">freshdeskSalesGroupId</code> = numerische Group-ID</li>
-        </ul>
-        <p class="mt-2">Nach dem Anlegen einmal abmelden + neu einloggen, dann „Laden" klicken.</p>
+        <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> API-Proxy nicht konfiguriert</p>
+        <p>Bitte Admin → <strong>Einstellungen</strong> öffnen und den Val.town-Setup-Wizard durchspielen.</p>
       </div>`;
     if (window.lucide) lucide.createIcons();
     return;
   }
   if (!APP_KEYS.freshdeskSalesGroupId) {
-    wrap.innerHTML = '<p class="text-xs text-amber-700 italic">Sales-Group-ID fehlt in Master-Base Keys (<code>freshdeskSalesGroupId</code>).</p>';
+    wrap.innerHTML = `
+      <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
+        <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> Sales-Group-ID fehlt</p>
+        <p>Damit nur Sales-Tickets geladen werden, brauche ich die Group-ID. Eintragen unter Admin → <strong>Einstellungen</strong> (Step 5).</p>
+        <p class="mt-2">ID herausfinden via Curl:</p>
+        <code class="block mt-1 bg-amber-100 p-2 rounded text-[10px] break-all">curl -H "Authorization: Bearer DEIN_USER_KEY" ${escapeHtml(_proxyBase() || '')}/freshdesk/api/v2/groups</code>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
     return;
   }
   wrap.innerHTML = '<p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade Tickets von Freshdesk…</p>';
