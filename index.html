@@ -543,7 +543,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.98';
+const APP_VERSION = 'v2.99';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10363,21 +10363,6 @@ async function openOrderModal(id, opts = {}) {
       items = allItems.filter(it => (it.fields.order_id || []).includes(id) || it.fields.order_id === id)
         .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
     } catch (e) {}
-    // Verlinkte Bestellungen laden
-    try {
-      const allPurchases = await readData('SupplierOrder').catch(()=>[]);
-      const allSuppliers = await readData('Supplier').catch(()=>[]);
-      const supMapL = {}; allSuppliers.forEach(s => { supMapL[s.id] = s.fields; });
-      window._linkedPurchasesForOrder = allPurchases
-        .filter(p => {
-          const oid = (p.fields.order_id || [])[0] || p.fields.order_id || '';
-          return oid === id;
-        })
-        .map(p => {
-          const sid = (p.fields.supplier_id || [])[0] || p.fields.supplier_id || '';
-          return { ...p, _supplier: supMapL[sid] };
-        });
-    } catch (e) { window._linkedPurchasesForOrder = []; }
   } else {
     f.order_no = await nextOrderNo(cur.id);
     const today = new Date();
@@ -10544,15 +10529,26 @@ async function openOrderModal(id, opts = {}) {
             ${initialDelivery && !deliveryTerms.find(t => t.fields.name === initialDelivery) ? `<option value="${escapeHtml(initialDelivery)}" selected>${escapeHtml(initialDelivery)} (alt)</option>` : ''}
           </select>
         </div>
-        <div class="lg:col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Titel / Tagline</label>
-          <input name="order_title" placeholder="z.B. Auftragsbestätigung zu Servicetausch" value="${escapeHtml(f.order_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-        <div class="lg:col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Einleitung</label>
-          <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
-          <div id="order_intro_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
-        </div>
+      </div>
+
+      <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
+      <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
+
+      <div class="mt-3 mb-2">
+        <button type="button" id="orderAdvancedToggle" onclick="toggleOrderAdvanced()" class="text-xs text-ink-500 hover:text-ink-900 flex items-center gap-1.5">
+          <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+          <span id="orderAdvancedToggleLbl">Titel · Einleitung · Schlusstext anzeigen</span>
+        </button>
+        <p class="text-[11px] text-ink-400 italic mt-1">Werden i.d.R. aus dem Vorlagenpaket übernommen — bei Bedarf hier individuell überschreiben.</p>
+      </div>
+
+      <div data-order-advanced style="display:none;" class="mt-3">
+        <label class="block text-sm font-medium text-ink-700 mb-1">Titel / Tagline</label>
+        <input name="order_title" placeholder="z.B. Auftragsbestätigung zu Servicetausch" value="${escapeHtml(f.order_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+      <div data-order-advanced style="display:none;" class="mt-3">
+        <label class="block text-sm font-medium text-ink-700 mb-1">Einleitung</label>
+        <div id="order_intro_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;max-height:240px;"></div>
       </div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Positionen</h4>
@@ -10562,46 +10558,10 @@ async function openOrderModal(id, opts = {}) {
         ${quoteSumsHtml(sums)}
       </div>
 
-      <div class="mt-5">
+      <div data-order-advanced style="display:none;" class="mt-5">
         <label class="block text-sm font-medium text-ink-700 mb-1">Schlusstext</label>
-        <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
-        <div id="order_closing_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
+        <div id="order_closing_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;max-height:240px;"></div>
       </div>
-
-      ${id ? `
-        <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-1.5"><i data-lucide="shopping-cart" class="w-3.5 h-3.5"></i> Lieferantenbestellungen</h4>
-        <div id="orderLinkedPurchasesWrap">
-          ${(() => {
-            const lps = window._linkedPurchasesForOrder || [];
-            if (lps.length === 0) {
-              return '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Noch keine Bestellungen für diesen Auftrag erstellt. Tipp: Beim Speichern wird automatisch nach Lieferanten-Positionen gefragt.</p>';
-            }
-            return '<div class="space-y-2">' + lps.map(p => {
-              const f = p.fields || {};
-              const sup = p._supplier || {};
-              return `
-                <button type="button" onclick="closeModal();setTimeout(()=>openSupplierOrderModal('${p.id}'),100)" class="w-full text-left p-3 bg-ink-50 hover:bg-ink-100 rounded-lg border border-ink-100 flex items-center gap-3">
-                  <i data-lucide="shopping-cart" class="w-4 h-4 text-blue-600 shrink-0"></i>
-                  <div class="flex-1 min-w-0">
-                    <div class="flex items-baseline gap-2 flex-wrap">
-                      <span class="text-xs font-mono text-ink-500">${escapeHtml(f.purchase_no || '–')}</span>
-                      <span class="font-medium text-ink-900 truncate">${escapeHtml(sup.name1 || '— ohne Lieferant —')}</span>
-                      ${purchaseStatusBadge(f.status || 'Entwurf')}
-                    </div>
-                    <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(formatDeDate(f.date))}${f.expected_delivery ? ' · Liefertermin: ' + escapeHtml(formatDeDate(f.expected_delivery)) : ''}</p>
-                  </div>
-                  <span class="font-mono text-sm tabular-nums text-ink-900 shrink-0">${formatPrice(f.total_gross || 0)} €</span>
-                  <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 shrink-0"></i>
-                </button>
-              `;
-            }).join('') + '</div>' + `
-              <button type="button" onclick="manuallyCreateSupplierOrders('${id}')" class="text-sm text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1.5 mt-3">
-                <i data-lucide="plus" class="w-4 h-4"></i> Weitere Bestellungen erzeugen
-              </button>
-            `;
-          })()}
-        </div>
-      ` : ''}
 
       <button type="button" onclick="exportOrderAsPdf()" class="lg:hidden w-full mt-4 px-3 py-3 text-sm rounded-lg bg-ink-900 text-white hover:bg-ink-800 flex items-center justify-center gap-2 font-semibold">
         <i data-lucide="file-down" class="w-4 h-4"></i> Vorschau / PDF erzeugen
@@ -10639,6 +10599,11 @@ async function openOrderModal(id, opts = {}) {
   setTimeout(async () => {
     await initSimpleQuillEditor('order_intro_editor', 'description', f.description || '', 'Einleitung — kann formatiert werden');
     await initSimpleQuillEditor('order_closing_editor', 'notes', f.notes || '', 'Schlusstext — kann formatiert werden');
+    // Wenn bestehender Inhalt vorhanden → Toggle auto-öffnen
+    const hasAdv = (f.order_title || '').trim()
+      || splitDescriptionTitleAndBody(f.description || '').title
+      || splitDescriptionTitleAndBody(f.notes || '').title;
+    if (hasAdv) toggleOrderAdvanced();
   }, 60);
   setTimeout(updateOrderPreview, 200);
   // Form-Listener für live preview
@@ -10648,6 +10613,22 @@ async function openOrderModal(id, opts = {}) {
     const trigger = () => { clearTimeout(dbTimer); dbTimer = setTimeout(updateOrderPreview, 250); };
     form.addEventListener('input', trigger);
     form.addEventListener('change', trigger);
+  }
+}
+
+/* Toggle für Titel + Einleitung + Schlusstext im Auftrag-Modal */
+function toggleOrderAdvanced() {
+  const sections = document.querySelectorAll('#modalBox [data-order-advanced]');
+  if (!sections.length) return;
+  const isHidden = sections[0].style.display === 'none';
+  sections.forEach(el => el.style.display = isHidden ? '' : 'none');
+  const lbl = document.getElementById('orderAdvancedToggleLbl');
+  const btn = document.getElementById('orderAdvancedToggle');
+  if (lbl) lbl.textContent = isHidden ? 'Titel · Einleitung · Schlusstext ausblenden' : 'Titel · Einleitung · Schlusstext anzeigen';
+  if (btn) {
+    const icon = btn.querySelector('[data-lucide]');
+    if (icon) icon.setAttribute('data-lucide', isHidden ? 'chevron-up' : 'chevron-down');
+    if (window.lucide) lucide.createIcons();
   }
 }
 
@@ -10852,6 +10833,9 @@ async function applyOrderBundle(bundleId, opts = {}) {
   };
   if (f.intro_template_id)   applyQuill(f.intro_template_id,   'description', 'order_intro_editor');
   if (f.closing_template_id) applyQuill(f.closing_template_id, 'notes',       'order_closing_editor');
+  // Erweiterte Sektion automatisch ausklappen, damit User den Inhalt sieht
+  const adv = document.querySelector('#modalBox [data-order-advanced]');
+  if (adv && adv.style.display === 'none') toggleOrderAdvanced();
   if (typeof updateOrderPreview === 'function') updateOrderPreview();
   if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
 }
@@ -11306,9 +11290,6 @@ async function saveOrder(e, id, keepOpen) {
     }
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
     window._currentOrderIdInModal = savedId;
-    // Nach Save fragen ob Lieferantenbestellungen erzeugt werden sollen
-    // (nur für gespeicherte Aufträge mit mind. 1 Position mit Lieferant, die noch keine Bestellung haben)
-    await promptCreateSupplierOrdersIfApplicable(savedId);
     if (keepOpen) {
       toast('Gespeichert', 'success');
       await openOrderModal(savedId);
@@ -11612,7 +11593,7 @@ async function renderSupplierOrders() {
     <div class="max-w-6xl mx-auto bg-white rounded-2xl shadow-card overflow-hidden">
       <div class="flex items-center justify-between px-4 py-3 border-b border-ink-100">
         <h2 class="text-xl font-bold text-ink-900">Bestellungen</h2>
-        <button type="button" onclick="openSupplierOrderModal()" class="bg-brand-500 hover:bg-brand-600 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-1.5">
+        <button type="button" onclick="newSupplierOrderFlow()" class="bg-brand-500 hover:bg-brand-600 text-white px-3 py-2 rounded-lg text-sm flex items-center gap-1.5">
           <i data-lucide="plus" class="w-4 h-4"></i> Neue Bestellung
         </button>
       </div>
@@ -11877,15 +11858,26 @@ async function openSupplierOrderModal(id, opts = {}) {
             ${initialDelivery && !deliveryTerms.find(t => t.fields.name === initialDelivery) ? `<option value="${escapeHtml(initialDelivery)}" selected>${escapeHtml(initialDelivery)} (alt)</option>` : ''}
           </select>
         </div>
-        <div class="lg:col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Titel / Tagline</label>
-          <input name="purchase_title" placeholder="z.B. Bestellung Servicetausch" value="${escapeHtml(f.purchase_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-        </div>
-        <div class="lg:col-span-2">
-          <label class="block text-sm font-medium text-ink-700 mb-1">Einleitung</label>
-          <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
-          <div id="purchase_intro_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
-        </div>
+      </div>
+
+      <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
+      <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
+
+      <div class="mt-3 mb-2">
+        <button type="button" id="purchaseAdvancedToggle" onclick="togglePurchaseAdvanced()" class="text-xs text-ink-500 hover:text-ink-900 flex items-center gap-1.5">
+          <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+          <span id="purchaseAdvancedToggleLbl">Titel · Einleitung · Schlusstext anzeigen</span>
+        </button>
+        <p class="text-[11px] text-ink-400 italic mt-1">Werden i.d.R. aus dem Vorlagenpaket übernommen — bei Bedarf hier individuell überschreiben.</p>
+      </div>
+
+      <div data-purchase-advanced style="display:none;" class="mt-3">
+        <label class="block text-sm font-medium text-ink-700 mb-1">Titel / Tagline</label>
+        <input name="purchase_title" placeholder="z.B. Bestellung Servicetausch" value="${escapeHtml(f.purchase_title || '')}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+      </div>
+      <div data-purchase-advanced style="display:none;" class="mt-3">
+        <label class="block text-sm font-medium text-ink-700 mb-1">Einleitung</label>
+        <div id="purchase_intro_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;max-height:240px;"></div>
       </div>
 
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Positionen</h4>
@@ -11895,10 +11887,9 @@ async function openSupplierOrderModal(id, opts = {}) {
         ${quoteSumsHtml(sums)}
       </div>
 
-      <div class="mt-5">
+      <div data-purchase-advanced style="display:none;" class="mt-5">
         <label class="block text-sm font-medium text-ink-700 mb-1">Schlusstext</label>
-        <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
-        <div id="purchase_closing_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
+        <div id="purchase_closing_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;max-height:240px;"></div>
       </div>
 
       <button type="button" onclick="exportSupplierOrderAsPdf()" class="lg:hidden w-full mt-4 px-3 py-3 text-sm rounded-lg bg-ink-900 text-white hover:bg-ink-800 flex items-center justify-center gap-2 font-semibold">
@@ -11936,6 +11927,10 @@ async function openSupplierOrderModal(id, opts = {}) {
   setTimeout(async () => {
     await initSimpleQuillEditor('purchase_intro_editor', 'description', f.description || '', 'Einleitung — kann formatiert werden');
     await initSimpleQuillEditor('purchase_closing_editor', 'notes', f.notes || '', 'Schlusstext — kann formatiert werden');
+    const hasAdv = (f.purchase_title || '').trim()
+      || splitDescriptionTitleAndBody(f.description || '').title
+      || splitDescriptionTitleAndBody(f.notes || '').title;
+    if (hasAdv) togglePurchaseAdvanced();
   }, 60);
   setTimeout(updatePurchasePreview, 200);
   const form = document.querySelector('form[data-purchase-form]');
@@ -11944,6 +11939,22 @@ async function openSupplierOrderModal(id, opts = {}) {
     const trigger = () => { clearTimeout(dbTimer); dbTimer = setTimeout(updatePurchasePreview, 250); };
     form.addEventListener('input', trigger);
     form.addEventListener('change', trigger);
+  }
+}
+
+/* Toggle für Titel + Einleitung + Schlusstext im Bestellung-Modal */
+function togglePurchaseAdvanced() {
+  const sections = document.querySelectorAll('#modalBox [data-purchase-advanced]');
+  if (!sections.length) return;
+  const isHidden = sections[0].style.display === 'none';
+  sections.forEach(el => el.style.display = isHidden ? '' : 'none');
+  const lbl = document.getElementById('purchaseAdvancedToggleLbl');
+  const btn = document.getElementById('purchaseAdvancedToggle');
+  if (lbl) lbl.textContent = isHidden ? 'Titel · Einleitung · Schlusstext ausblenden' : 'Titel · Einleitung · Schlusstext anzeigen';
+  if (btn) {
+    const icon = btn.querySelector('[data-lucide]');
+    if (icon) icon.setAttribute('data-lucide', isHidden ? 'chevron-up' : 'chevron-down');
+    if (window.lucide) lucide.createIcons();
   }
 }
 
@@ -11972,6 +11983,195 @@ function onPurchaseSupplierChange(value) {
         if (contactSearchEl) contactSearchEl.value = primaryItem.label;
       }
     }
+  }
+}
+
+/* Pre-Modal beim "+ Neue Bestellung" — fragt ob mit Auftrag verknüpft werden soll. */
+async function newSupplierOrderFlow() {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  // Aktive Aufträge des Mandanten laden
+  let allOrders = [], allCustomers = [];
+  try {
+    [allOrders, allCustomers] = await Promise.all([readData('Order').catch(()=>[]), readData('Customer').catch(()=>[])]);
+  } catch (e) { toast(e.message, 'error'); return; }
+  const custMap = {}; allCustomers.forEach(c => { custMap[c.id] = c.fields; });
+  const ordersInCo = allOrders.filter(o => {
+    const cid = o.fields.company_id;
+    const inCo = (Array.isArray(cid) ? cid.includes(cur.id) : cid === cur.id);
+    return inCo && (o.fields.status || 'Entwurf') !== 'archiviert';
+  });
+  // Nach Datum absteigend sortieren
+  ordersInCo.sort((a,b) => (b.fields.date || '').localeCompare(a.fields.date || ''));
+
+  openModal(`
+    <div class="p-6">
+      <h3 class="text-lg font-bold text-ink-900 mb-2 flex items-center gap-2">
+        <i data-lucide="shopping-cart" class="w-5 h-5 text-brand-600"></i> Neue Bestellung
+      </h3>
+      <p class="text-sm text-ink-600 mb-4">Möchtest du diese Bestellung mit einem Auftrag verknüpfen?</p>
+      <div class="space-y-3">
+        <button type="button" onclick="closeModal();setTimeout(()=>openSupplierOrderModal(),100);" class="w-full text-left p-4 border-2 border-ink-200 hover:border-brand-300 hover:bg-brand-50/30 rounded-lg flex items-start gap-3">
+          <i data-lucide="file-plus" class="w-5 h-5 text-ink-500 mt-0.5"></i>
+          <div class="flex-1 min-w-0">
+            <p class="font-semibold text-ink-900">Leere Bestellung</p>
+            <p class="text-xs text-ink-500 mt-0.5">Manuell anlegen — Lieferant und Positionen selbst auswählen.</p>
+          </div>
+        </button>
+        ${ordersInCo.length > 0 ? `
+          <div class="p-4 border-2 border-brand-300 bg-brand-50/40 rounded-lg">
+            <div class="flex items-center gap-3 mb-3">
+              <i data-lucide="link" class="w-5 h-5 text-brand-600"></i>
+              <p class="font-semibold text-ink-900">Aus Auftrag erzeugen</p>
+            </div>
+            <select id="newPoOrderPicker" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+              <option value="">— Auftrag wählen —</option>
+              ${ordersInCo.map(o => {
+                const cust = custMap[_readIdValue(o.fields.customer_id)] || {};
+                return `<option value="${o.id}">${escapeHtml(o.fields.order_no || '–')} · ${escapeHtml(cust.name1 || '–')}${o.fields.date ? ' · ' + escapeHtml(formatDeDate(o.fields.date)) : ''}</option>`;
+              }).join('')}
+            </select>
+            <p class="text-xs text-ink-500 mt-2">Items mit hinterlegtem Lieferant werden in die Bestellung übernommen. Bei mehreren Lieferanten kannst du im nächsten Schritt einen wählen.</p>
+            <button type="button" onclick="proceedNewPoFromOrder()" class="mt-3 w-full bg-brand-500 hover:bg-brand-600 text-white px-3 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5">
+              <i data-lucide="arrow-right" class="w-4 h-4"></i> Weiter
+            </button>
+          </div>
+        ` : '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Keine Aufträge vorhanden — du kannst nur leer beginnen.</p>'}
+      </div>
+      <div class="flex justify-end mt-4">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+      </div>
+    </div>
+  `);
+  if (window.lucide) lucide.createIcons();
+}
+
+async function proceedNewPoFromOrder() {
+  const sel = document.getElementById('newPoOrderPicker');
+  const orderId = sel?.value || '';
+  if (!orderId) { toast('Bitte einen Auftrag wählen', 'warn'); return; }
+  // Lieferanten in diesem Auftrag ermitteln (aus Positionen)
+  let allOI = [], allSup = [];
+  try {
+    [allOI, allSup] = await Promise.all([readData('OrderItem'), readData('Supplier')]);
+  } catch (e) { toast(e.message, 'error'); return; }
+  const items = allOI.filter(it => (it.fields.order_id || []).includes(orderId) || it.fields.order_id === orderId);
+  const bySupplier = {};
+  items.forEach(it => {
+    const sid = _readIdValue(it.fields.supplier_id);
+    if (!sid) return;
+    if (!bySupplier[sid]) bySupplier[sid] = [];
+    bySupplier[sid].push(it);
+  });
+  const supplierIds = Object.keys(bySupplier);
+  if (supplierIds.length === 0) {
+    // Keine Lieferanten in den Positionen — leer öffnen, aber order_id setzen
+    const order = await readData('Order').then(arr => arr.find(o => o.id === orderId)).catch(()=>null);
+    closeModal();
+    setTimeout(() => openSupplierOrderModal(null, { fromOrder: { id: orderId, order_id: orderId, supplier_id: '', contact_id: '', items: [], title: 'Bestellung zu ' + (order?.fields?.order_no || '') } }), 100);
+    return;
+  }
+  if (supplierIds.length === 1) {
+    // Genau 1 Lieferant — direkt fortfahren
+    const sid = supplierIds[0];
+    await launchPoFromOrderForSupplier(orderId, sid, bySupplier[sid]);
+    return;
+  }
+  // Mehrere Lieferanten — picker zeigen
+  const supOptions = supplierIds.map(sid => {
+    const sup = allSup.find(s => s.id === sid);
+    const cnt = bySupplier[sid].length;
+    return `<button type="button" onclick="launchPoFromOrderForSupplierAndClose('${orderId}','${sid}')" class="w-full text-left p-3 border border-ink-200 hover:border-brand-300 hover:bg-brand-50/30 rounded-lg flex items-center gap-3">
+      <i data-lucide="truck" class="w-4 h-4 text-ink-500"></i>
+      <span class="flex-1 min-w-0">
+        <span class="block font-medium text-ink-900 truncate">${escapeHtml(sup?.fields?.name1 || '— ohne Lieferant —')}</span>
+        <span class="block text-xs text-ink-500">${cnt} Position${cnt===1?'':'en'}</span>
+      </span>
+      <i data-lucide="chevron-right" class="w-4 h-4 text-ink-300"></i>
+    </button>`;
+  }).join('');
+  closeModal();
+  setTimeout(() => {
+    openModal(`
+      <div class="p-6">
+        <h3 class="text-lg font-bold text-ink-900 mb-1">Lieferant wählen</h3>
+        <p class="text-sm text-ink-500 mb-4">Der Auftrag enthält Positionen mehrerer Lieferanten. Für welchen soll die Bestellung erzeugt werden?</p>
+        <div class="space-y-2">${supOptions}</div>
+        <div class="flex justify-end mt-4">
+          <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+        </div>
+      </div>
+    `);
+    if (window.lucide) lucide.createIcons();
+  }, 80);
+}
+
+async function launchPoFromOrderForSupplierAndClose(orderId, supplierId) {
+  closeModal();
+  let allOI = [];
+  try { allOI = await readData('OrderItem'); } catch(e) {}
+  const items = allOI.filter(it => {
+    const oid = _readIdValue(it.fields.order_id);
+    const sid = _readIdValue(it.fields.supplier_id);
+    return oid === orderId && sid === supplierId;
+  });
+  setTimeout(() => launchPoFromOrderForSupplier(orderId, supplierId, items), 100);
+}
+
+async function launchPoFromOrderForSupplier(orderId, supplierId, items) {
+  // Bestellung + Items sofort in Airtable anlegen, dann das gespeicherte Modal öffnen.
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Mandant fehlt', 'error'); return; }
+  await ensureSupplierOrderSchema();
+  try {
+    const allContacts = await readData('Contact').catch(()=>[]);
+    const primaryContactId = findPrimaryContactId(allContacts, supplierId, 'supplier');
+    const order = await readData('Order').then(arr => arr.find(o => o.id === orderId)).catch(()=>null);
+    const purchaseNo = await nextPurchaseNo(cur.id);
+    const sumsItems = items.map(it => ({ fields: {
+      qty: it.fields.qty,
+      unit_price_net: it.fields.purchase_price || it.fields.unit_price_net || 0,
+      discount_pct: it.fields.discount_pct,
+      vat_rate: it.fields.vat_rate
+    }}));
+    const sums = calcQuoteSums(sumsItems);
+    const purchaseFields = {
+      purchase_no: purchaseNo,
+      company_id:  cur.id,
+      supplier_id: supplierId,
+      contact_id:  primaryContactId || '',
+      order_id:    orderId,
+      date:        new Date().toISOString().slice(0,10),
+      status:      'Entwurf',
+      purchase_title: 'Bestellung zu Auftrag ' + (order?.fields?.order_no || ''),
+      subtotal_net: sums.subtotal_net,
+      vat_total:    sums.vat_total,
+      total_gross:  sums.total_gross,
+    };
+    const created = await writeData('SupplierOrder', purchaseFields);
+    let pos = 1;
+    for (const it of items) {
+      const f = it.fields || {};
+      const ekPrice = +(f.purchase_price || f.unit_price_net || 0);
+      await writeData('SupplierOrderItem', {
+        purchase_id:    created.id,
+        pos:            pos++,
+        qty:            f.qty || 0,
+        unit:           f.unit || 'Stück',
+        unit_price_net: ekPrice,
+        discount_pct:   f.discount_pct || 0,
+        vat_rate:       f.vat_rate || 19,
+        description:    f.description || '',
+        article_id:     _readIdValue(f.article_id),
+        source_order_item_id: it.id || '',
+        line_total_net: calcLineNet(f.qty, ekPrice, f.discount_pct),
+        label: 'Pos.' + (pos-1) + ' · ' + (splitDescriptionTitleAndBody(f.description || '').title || '').substring(0,50),
+      });
+    }
+    toast(`Bestellung ${purchaseNo} erstellt mit ${items.length} Position${items.length===1?'':'en'}`, 'success', 3000);
+    setTimeout(() => openSupplierOrderModal(created.id), 100);
+  } catch (err) {
+    toast('Fehler beim Erzeugen: ' + err.message, 'error', 5000);
   }
 }
 
@@ -12037,6 +12237,8 @@ async function applyPurchaseBundle(bundleId, opts = {}) {
   }
   if (f.intro_template_id)   apply(f.intro_template_id,   'description', 'purchase_intro_editor');
   if (f.closing_template_id) apply(f.closing_template_id, 'notes',       'purchase_closing_editor');
+  const advP = document.querySelector('#modalBox [data-purchase-advanced]');
+  if (advP && advP.style.display === 'none') togglePurchaseAdvanced();
   if (typeof updatePurchasePreview === 'function') updatePurchasePreview();
   if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
 }
