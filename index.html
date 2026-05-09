@@ -568,7 +568,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.13';
+const APP_VERSION = 'v3.14';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -7237,7 +7237,8 @@ function renderQuotePreviewHtml(ctx, items, introRaw, closingRaw, articleMap) {
               const grossLine = (+(f.qty || 0)) * (+(f.unit_price_net || 0));
               const discAbs = grossLine * ((+(f.discount_pct || 0)) / 100);
               const rawDesc = f.description || '';
-              const aId = (f.article_id || [])[0];
+              // article_id kann Array (Quote/Order) oder String (Delivery/Invoice/Purchase) sein.
+              const aId = _readIdValue(f.article_id);
               const aRef = aId ? (articleMap[aId] || {}) : {};
               const aName1 = (aRef.name1 || '').trim();
               const aName2 = (aRef.name2 || '').trim();
