@@ -577,7 +577,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.18';
+const APP_VERSION = 'v3.19';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -622,7 +622,11 @@ const APP_KEYS = {
   companies: [],
   currentCompanyId: null,
   usersById: {},
-  // Freshdesk-Anbindung (Master-Base Keys)
+  // Val.town-Proxy: zentraler Endpoint für Anthropic + Freshdesk.
+  // Auth zum Proxy = User-API-Key (jeder Mitarbeiter hat eigenen).
+  apiProxyUrl: null,
+  // Freshdesk-Anbindung (nur Sales-Group-ID bleibt clientseitig — der API-Key
+  // liegt in Val.town als env var). Legacy-Felder bleiben für Migration.
   freshdeskProxyUrl: null,
   freshdeskProxyToken: null,
   freshdeskSalesGroupId: null
@@ -657,6 +661,7 @@ async function loginWithUserKey(userKey) {
       if (f.key_name === 'anthropicKey') APP_KEYS.anthropicKey = f.key_value;
       if (f.key_name === 'airtableWriteKey') APP_KEYS.airtableWriteKey = f.key_value;
       if (f.key_name === 'airtableBaseId') APP_KEYS.appBaseId = f.key_value;
+      if (f.key_name === 'apiProxyUrl')             APP_KEYS.apiProxyUrl            = f.key_value;
       if (f.key_name === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl      = f.key_value;
       if (f.key_name === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken    = f.key_value;
       if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
@@ -1089,26 +1094,58 @@ async function loadFreshdeskTicketsPreview() {
   }
 }
 
-async function freshdeskFetch(path) {
-  if (!APP_KEYS.freshdeskProxyUrl) throw new Error('Freshdesk-Proxy nicht konfiguriert (freshdeskProxyUrl fehlt in Master-Base Keys)');
-  const url = APP_KEYS.freshdeskProxyUrl.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '');
-  const headers = { 'Accept': 'application/json' };
-  if (APP_KEYS.freshdeskProxyToken) headers['Authorization'] = 'Bearer ' + APP_KEYS.freshdeskProxyToken;
-  const res = await fetch(url, { headers });
+/* ============================================================
+   API-PROXY (Val.town)
+   Zentraler Wrapper. Auth = User-API-Key (Bearer). Val.town
+   validiert den Key gegen Airtable/User und routet weiter.
+   Pfade:  /freshdesk/api/v2/...   /anthropic/v1/messages
+   ============================================================ */
+function _proxyBase() {
+  // apiProxyUrl ist der neue Master-Endpunkt. Fallback auf legacy
+  // freshdeskProxyUrl für Migration aus älteren Setups.
+  return APP_KEYS.apiProxyUrl || APP_KEYS.freshdeskProxyUrl || null;
+}
+function _userKeyForAuth() {
+  return localStorage.getItem('user_key_' + APP_CONFIG.PROJECT_ID) || '';
+}
+async function proxyFetch(path, opts = {}) {
+  const base = _proxyBase();
+  if (!base) throw new Error('API-Proxy nicht konfiguriert. Bitte Admin → Einstellungen → Val.town-Setup ausführen.');
+  const userKey = _userKeyForAuth();
+  if (!userKey) throw new Error('Nicht eingeloggt — User-Key fehlt für Proxy-Auth');
+  const url = base.replace(/\/+$/, '') + '/' + String(path).replace(/^\/+/, '');
+  const headers = Object.assign({
+    'Authorization': 'Bearer ' + userKey,
+    'Accept': 'application/json'
+  }, opts.headers || {});
+  if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  const res = await fetch(url, {
+    method: opts.method || 'GET',
+    headers,
+    body: opts.body ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : undefined
+  });
   if (!res.ok) {
-    let msg = 'Freshdesk-Proxy ' + res.status;
+    let msg = 'Proxy ' + res.status;
     try {
       const t = await res.text();
-      if (t) msg += ': ' + t.slice(0, 200);
+      if (t) {
+        try { const j = JSON.parse(t); if (j.error) msg += ': ' + (j.error.message || j.error); else msg += ': ' + t.slice(0, 200); }
+        catch { msg += ': ' + t.slice(0, 200); }
+      }
     } catch(e) {}
     throw new Error(msg);
   }
-  return await res.json();
+  const ct = res.headers.get('content-type') || '';
+  return ct.includes('application/json') ? res.json() : res.text();
+}
+
+async function freshdeskFetch(path) {
+  // Pfad sieht aus wie "api/v2/..." — Proxy hängt /freshdesk davor
+  return proxyFetch('freshdesk/' + String(path).replace(/^\/+/, ''));
 }
 
 async function askAI(prompt, opts = {}) {
-  if (!APP_KEYS.anthropicKey) throw new Error('KI nicht verfügbar (Anthropic-Key fehlt)');
-  // Multimodale Inhalte zusammenstellen: optional Bilder, dann Text
+  if (!_proxyBase()) throw new Error('KI nicht verfügbar — API-Proxy nicht konfiguriert (Admin → Einstellungen)');
   const content = [];
   if (Array.isArray(opts.images)) {
     for (const img of opts.images) {
@@ -1120,26 +1157,22 @@ async function askAI(prompt, opts = {}) {
     }
   }
   content.push({ type: 'text', text: prompt });
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'x-api-key': APP_KEYS.anthropicKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: opts.model || 'claude-sonnet-4-5-20250929',
-      max_tokens: opts.maxTokens || 2048,
-      messages: [{ role: 'user', content: content.length === 1 ? content[0].text : content }]
-    })
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error('AI-Anfrage fehlgeschlagen: ' + (err.error?.message || res.status));
+  // Proxy leitet an api.anthropic.com/v1/messages weiter — Anthropic-Key liegt
+  // in Val.town als env var. Browser sendet keinen Anthropic-Key mehr.
+  let data;
+  try {
+    data = await proxyFetch('anthropic/v1/messages', {
+      method: 'POST',
+      body: {
+        model: opts.model || 'claude-sonnet-4-5-20250929',
+        max_tokens: opts.maxTokens || 2048,
+        messages: [{ role: 'user', content: content.length === 1 ? content[0].text : content }]
+      }
+    });
+  } catch (e) {
+    throw new Error('AI-Anfrage fehlgeschlagen: ' + e.message);
   }
-  const data = await res.json();
-  return (data.content && data.content[0]) ? data.content[0].text : '';
+  return (data && data.content && data.content[0]) ? data.content[0].text : '';
 }
 
 /* ============================================================
@@ -1229,7 +1262,7 @@ function renderWelcome() {
       <div class="grid sm:grid-cols-3 gap-3">
         ${statusTile('Airtable', 'plug', APP_CONFIG.APP_BASE_ID ? 'verbunden' : 'nicht verbunden', !!APP_CONFIG.APP_BASE_ID)}
         ${statusTile('Schreibrechte', 'pencil', APP_KEYS.airtableWriteKey ? 'aktiv' : 'fehlt', !!APP_KEYS.airtableWriteKey)}
-        ${statusTile('KI', 'sparkles', APP_KEYS.anthropicKey ? 'aktiv' : 'nicht konfiguriert', !!APP_KEYS.anthropicKey)}
+        ${statusTile('KI · Proxy', 'sparkles', _proxyBase() ? 'verbunden' : 'nicht konfiguriert', !!_proxyBase())}
       </div>
     </div>
   `;
@@ -2628,42 +2661,174 @@ async function deleteQuoteBundle(id) {
 }
 
 /* ============================================================
-   ADMIN: EINSTELLUNGEN (Master-Base Keys)
-   Liest und schreibt Records in Master-Base /Keys (gefiltert nach
-   project_id). Tokens werden maskiert angezeigt; Klartext erst nach
-   "Wert ändern". Schreiben benötigt einen airtableWriteKey, dessen
-   Scope auch die Master-Base umfasst — sonst klare Fehlermeldung.
+   ADMIN: EINSTELLUNGEN — Val.town Setup-Wizard
+   Der Val.town-Proxy ist die einzige Stelle, an der API-Keys für
+   Anthropic + Freshdesk leben. Browser hält keine externen Keys mehr.
+   Auth zum Proxy = User-API-Key (Bearer). Val.town validiert ihn
+   gegen Airtable User-Tabelle (mit In-Memory-Cache).
    ============================================================ */
 
-const SETTINGS_SECTIONS = [
-  {
-    title: 'Freshdesk-Anbindung',
-    icon: 'headphones',
-    desc: 'Damit das Anfragen-Modul Tickets aus Freshdesk laden kann (über den Val.town-Proxy).',
-    fields: [
-      { name: 'freshdeskProxyUrl',     label: 'Proxy-URL (Val.town)', type: 'url',    placeholder: 'https://username-freshdeskproxy.web.val.run' },
-      { name: 'freshdeskProxyToken',   label: 'Proxy Bearer-Token',   type: 'secret', placeholder: 'geheimer Token aus Val.town-Setup' },
-      { name: 'freshdeskSalesGroupId', label: 'Sales-Group-ID',       type: 'text',   placeholder: 'z.B. 12000123456' }
-    ]
-  },
-  {
-    title: 'Airtable',
-    icon: 'database',
-    desc: 'Schreib-Key wird für alle Schreiboperationen genutzt. Nur ändern, wenn der Token rotiert wird.',
-    fields: [
-      { name: 'airtableWriteKey', label: 'Airtable Write-Key', type: 'secret', placeholder: 'patXXXXXX.YYYY...', protected: true },
-      { name: 'airtableBaseId',   label: 'App-Base-ID',        type: 'text',   placeholder: 'appXXXXXXXXXX' }
-    ]
-  },
-  {
-    title: 'KI (optional)',
-    icon: 'sparkles',
-    desc: 'Anthropic-API-Key für KI-Features (Layout-Generator, Texteinfügung). Fällt auf den globalen Schlüssel zurück.',
-    fields: [
-      { name: 'anthropicKey', label: 'Anthropic API-Key', type: 'secret', placeholder: 'sk-ant-...' }
-    ]
+// Der komplette Val.town-Code als Copy-Paste-Vorlage. Wird in der
+// Settings-UI angezeigt; User legt einen "HTTP val" in Val.town an
+// und fügt diesen Code ein. Alle Secrets kommen aus env vars.
+const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy
+// =====================================================================
+// HTTP-Val für Val.town. Routet:
+//   POST /anthropic/v1/messages   →  api.anthropic.com (mit ANTHROPIC_API_KEY)
+//   GET  /freshdesk/api/v2/...    →  <domain>.freshdesk.com (mit FRESHDESK_API_KEY)
+//   GET  /health                  →  nur Auth-Check (für "Verbindung testen")
+//
+// Auth: Browser sendet "Authorization: Bearer <user_api_key>".
+//   Der Proxy schaut den Key in Airtable User-Tabelle nach (status='aktiv').
+//   Lookup ist 60 s gecached, damit aktive User keine Latenz spüren.
+//
+// ENV VARS in Val.town setzen:
+//   AIRTABLE_READ_KEY   — Read-Token mit Scope auf App-Base
+//   AIRTABLE_BASE_ID    — App-Base-ID (appCu...)
+//   ANTHROPIC_API_KEY   — sk-ant-...
+//   FRESHDESK_DOMAIN    — Subdomain ohne .freshdesk.com (z.B. flpliftparts)
+//   FRESHDESK_API_KEY   — Freshdesk Personal API Key
+// =====================================================================
+
+const USER_CACHE = new Map(); // userKey → { user, expires }
+const CACHE_TTL_MS = 60_000;
+
+async function lookupUser(userKey: string) {
+  const cached = USER_CACHE.get(userKey);
+  if (cached && cached.expires > Date.now()) return cached.user;
+  const baseId = Deno.env.get("AIRTABLE_BASE_ID");
+  const readKey = Deno.env.get("AIRTABLE_READ_KEY");
+  if (!baseId || !readKey) throw new Error("Server-Konfiguration: AIRTABLE_BASE_ID/AIRTABLE_READ_KEY fehlt");
+  const formula = \`AND({api_key}='\${userKey.replace(/'/g, "\\\\'")}',{status}='aktiv')\`;
+  const url = \`https://api.airtable.com/v0/\${baseId}/User?filterByFormula=\${encodeURIComponent(formula)}\`;
+  const res = await fetch(url, { headers: { Authorization: \`Bearer \${readKey}\` } });
+  if (!res.ok) throw new Error(\`User-Lookup fehlgeschlagen: \${res.status}\`);
+  const data = await res.json();
+  const rec = (data.records || [])[0];
+  if (!rec) return null;
+  const user = { id: rec.id, name: rec.fields.name || "", is_admin: !!rec.fields.is_admin };
+  USER_CACHE.set(userKey, { user, expires: Date.now() + CACHE_TTL_MS });
+  return user;
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "authorization, content-type",
+      "access-control-allow-methods": "GET, POST, OPTIONS"
+    }
+  });
+}
+
+export default async function (req: Request): Promise<Response> {
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-headers": "authorization, content-type",
+        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-max-age": "86400"
+      }
+    });
   }
-];
+
+  // 1) Auth — User-Key aus Bearer-Header
+  const auth = req.headers.get("authorization") || "";
+  const userKey = auth.replace(/^Bearer\\s+/i, "").trim();
+  if (!userKey) return jsonResponse({ error: "Missing Bearer token (user api_key)" }, 401);
+  let user;
+  try {
+    user = await lookupUser(userKey);
+  } catch (e) {
+    return jsonResponse({ error: e.message }, 500);
+  }
+  if (!user) return jsonResponse({ error: "Ungültiger User-Key oder Account inaktiv" }, 401);
+
+  // 2) Pfad parsen
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/^\\/+/, "");
+
+  // Health-Check (für "Verbindung testen" in der App)
+  if (path === "health") {
+    return jsonResponse({ ok: true, user: { name: user.name, is_admin: user.is_admin } });
+  }
+
+  // 3) Anthropic
+  if (path === "anthropic/v1/messages") {
+    if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return jsonResponse({ error: "ANTHROPIC_API_KEY env var fehlt in Val.town" }, 500);
+    const body = await req.text();
+    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+      },
+      body
+    });
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") || "application/json",
+        "access-control-allow-origin": "*"
+      }
+    });
+  }
+
+  // 4) Freshdesk
+  if (path.startsWith("freshdesk/")) {
+    const fdPath = path.replace(/^freshdesk\\//, "");
+    if (!fdPath.startsWith("api/v2/")) {
+      return jsonResponse({ error: "Bad path. Erwartet: /freshdesk/api/v2/..." }, 400);
+    }
+    const domain = Deno.env.get("FRESHDESK_DOMAIN");
+    const fdKey  = Deno.env.get("FRESHDESK_API_KEY");
+    if (!domain || !fdKey) return jsonResponse({ error: "FRESHDESK_DOMAIN/FRESHDESK_API_KEY env var fehlt in Val.town" }, 500);
+    const target = \`https://\${domain}.freshdesk.com/\${fdPath}\${url.search}\`;
+    const basic = btoa(\`\${fdKey}:X\`);
+    const init: RequestInit = {
+      method: req.method,
+      headers: {
+        "Authorization": \`Basic \${basic}\`,
+        "Content-Type": "application/json"
+      }
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
+    const upstream = await fetch(target, init);
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") || "application/json",
+        "access-control-allow-origin": "*"
+      }
+    });
+  }
+
+  return jsonResponse({ error: \`Route nicht gefunden: \${path}\` }, 404);
+}
+`;
+
+// Definitionen für Env-Vars-Tabelle im Wizard. "value" wird zur
+// Laufzeit aus der App geliefert (Read-Key + Base-ID), die anderen
+// muss der User selbst beschaffen.
+function _valtownEnvVars() {
+  return [
+    { name: 'AIRTABLE_READ_KEY',  hint: 'Read-Token für Airtable. Der bereits in der App eingebettete Read-Key kann verwendet werden:', value: APP_CONFIG.AIRTABLE_READ_KEY, secret: true },
+    { name: 'AIRTABLE_BASE_ID',   hint: 'App-Base-ID — wo die User-Tabelle liegt:', value: APP_CONFIG.APP_BASE_ID, secret: false },
+    { name: 'ANTHROPIC_API_KEY',  hint: 'Anthropic Console → API Keys → Create. Beginnt mit sk-ant-...', value: '', secret: true },
+    { name: 'FRESHDESK_DOMAIN',   hint: 'Subdomain ohne .freshdesk.com (z.B. wenn URL flpliftparts.freshdesk.com → "flpliftparts")', value: '', secret: false },
+    { name: 'FRESHDESK_API_KEY',  hint: 'Freshdesk → Profil-Icon → Profile Settings → "Your API Key"', value: '', secret: true }
+  ];
+}
 
 async function _fetchMasterBaseKeys() {
   const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
@@ -2729,6 +2894,9 @@ function _applyKeyToAppState(keyName, value) {
   if (keyName === 'airtableBaseId')         APP_KEYS.appBaseId             = value;
 }
 
+// State für Wizard (welcher Step expanded ist)
+let _settingsWizState = { proxyUrlInput: '', salesGroupInput: '', testResult: null };
+
 async function renderAdminSettings() {
   setPageTitle('Einstellungen');
   if (!APP_KEYS.user?.is_admin) {
@@ -2738,135 +2906,269 @@ async function renderAdminSettings() {
   }
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Einstellungen…</p>';
 
+  // Aktuelle Master-Base-Keys laden für Statusanzeige
   let keys = [];
-  try {
-    keys = await _fetchMasterBaseKeys();
-  } catch (e) {
+  try { keys = await _fetchMasterBaseKeys(); }
+  catch (e) {
     document.getElementById('pageContent').innerHTML = `
-      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Fehler: ${escapeHtml(e.message)}</div></div>`;
+      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Fehler beim Laden: ${escapeHtml(e.message)}</div></div>`;
     return;
   }
-
   const byName = {};
   keys.forEach(rec => { byName[rec.fields.key_name] = rec; });
+  const proxyRec     = byName['apiProxyUrl'];
+  const proxyUrl     = proxyRec?.fields?.key_value || '';
+  const salesRec     = byName['freshdeskSalesGroupId'];
+  const salesGroupId = salesRec?.fields?.key_value || '';
 
-  const fieldHtml = (f) => {
-    const rec = byName[f.name];
-    const val = rec?.fields?.key_value || '';
-    const recId = rec?.id || '';
-    const inputType = f.type === 'secret' ? 'password' : (f.type === 'url' ? 'url' : 'text');
-    const isSet = !!val;
-    return `
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-start py-4 border-b border-ink-100 last:border-b-0">
-        <div class="sm:col-span-1">
-          <label class="block text-sm font-medium text-ink-900">${escapeHtml(f.label)}</label>
-          <p class="text-[11px] text-ink-500 font-mono mt-0.5">${escapeHtml(f.name)}</p>
-          ${isSet
-            ? '<p class="text-[10px] uppercase tracking-wider text-emerald-700 bg-emerald-100 inline-block px-1.5 py-0.5 rounded mt-1 font-semibold">gesetzt</p>'
-            : '<p class="text-[10px] uppercase tracking-wider text-amber-700 bg-amber-100 inline-block px-1.5 py-0.5 rounded mt-1 font-semibold">leer</p>'}
-        </div>
-        <div class="sm:col-span-2 flex flex-col gap-2">
-          ${f.type === 'secret' && isSet ? `
-            <p class="text-xs text-ink-500 font-mono break-all">${escapeHtml(_maskSecret(val))}</p>
-            <details class="group">
-              <summary class="cursor-pointer text-xs text-brand-600 hover:text-brand-700 select-none flex items-center gap-1"><i data-lucide="pencil" class="w-3.5 h-3.5"></i> Wert ändern</summary>
-              <div class="mt-2 space-y-2">
-                <input type="${inputType}" id="settingsField_${f.name}" placeholder="${escapeHtml(f.placeholder || '')}" data-rec="${recId}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
-                <div class="flex gap-2 flex-wrap">
-                  <button type="button" onclick="saveSettingsField('${f.name}')" class="bg-brand-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium hover:bg-brand-600 flex items-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Speichern</button>
-                  ${f.protected
-                    ? ''
-                    : (recId ? `<button type="button" onclick="clearSettingsField('${f.name}', '${recId}')" class="text-red-600 hover:text-red-800 text-xs flex items-center gap-1"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Wert löschen</button>` : '')}
-                </div>
-              </div>
-            </details>
-          ` : `
-            <input type="${inputType}" id="settingsField_${f.name}" value="${f.type !== 'secret' ? escapeHtml(val) : ''}" placeholder="${escapeHtml(f.placeholder || '')}" data-rec="${recId}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
-            <div class="flex gap-2 flex-wrap">
-              <button type="button" onclick="saveSettingsField('${f.name}')" class="bg-brand-500 text-white rounded-lg px-3 py-1.5 text-xs font-medium hover:bg-brand-600 flex items-center gap-1"><i data-lucide="save" class="w-3.5 h-3.5"></i> Speichern</button>
-              ${(!f.protected && recId) ? `<button type="button" onclick="clearSettingsField('${f.name}', '${recId}')" class="text-red-600 hover:text-red-800 text-xs flex items-center gap-1"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Wert löschen</button>` : ''}
-            </div>
-          `}
-        </div>
-      </div>
-    `;
-  };
+  const isProxySet = !!proxyUrl;
+  const envVars = _valtownEnvVars();
+
+  // Status-Tile-Helper
+  const statusBadge = (ok, txt) => ok
+    ? `<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="check-circle-2" class="w-3 h-3"></i> ${escapeHtml(txt)}</span>`
+    : `<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="alert-circle" class="w-3 h-3"></i> ${escapeHtml(txt)}</span>`;
+
+  const stepHeader = (n, title, badge) => `
+    <div class="flex items-center gap-3 mb-3">
+      <div class="w-8 h-8 rounded-full bg-brand-500 text-white flex items-center justify-center text-sm font-bold shrink-0">${n}</div>
+      <h3 class="font-semibold text-ink-900 text-base flex-1">${escapeHtml(title)}</h3>
+      ${badge || ''}
+    </div>
+  `;
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-4xl mx-auto">
       <div class="flex items-start justify-between mb-4 flex-wrap gap-2">
         <div>
-          <h2 class="text-xl font-bold text-ink-900">Einstellungen</h2>
-          <p class="text-xs text-ink-500 mt-0.5">Master-Base Keys · Projekt <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">${escapeHtml(APP_CONFIG.PROJECT_ID)}</code></p>
+          <h2 class="text-xl font-bold text-ink-900">Einstellungen · Val.town-Setup</h2>
+          <p class="text-xs text-ink-500 mt-0.5">Externe API-Keys (Anthropic, Freshdesk) liegen ausschließlich serverseitig in Val.town. Im Browser bleibt nur der User-API-Key für die Auth.</p>
         </div>
         <button type="button" onclick="renderAdminSettings()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
           <i data-lucide="refresh-cw" class="w-4 h-4"></i> Neu laden
         </button>
       </div>
 
-      <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 text-xs text-amber-900 flex items-start gap-2">
-        <i data-lucide="info" class="w-4 h-4 shrink-0 mt-0.5"></i>
-        <div>
-          <p class="font-medium">Sensitive Daten</p>
-          <p class="mt-0.5">Tokens werden maskiert dargestellt — Klartext erst nach „Wert ändern". Änderungen wirken sofort in der laufenden Sitzung; andere User sehen sie nach Neuladen / Re-Login.</p>
+      <!-- Architektur-Diagramm -->
+      <div class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl p-4 mb-4">
+        <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Architektur</p>
+        <pre class="text-[11px] sm:text-xs text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Browser (ERP)  ──[ Bearer: User-Key ]──▶  Val.town-Proxy  ──┬──▶  Anthropic
+                                                            │
+                                                            └──▶  Freshdesk
+
+Val.town hält serverseitig:  ANTHROPIC_API_KEY · FRESHDESK_API_KEY · AIRTABLE_READ_KEY
+Browser hält nur:            User-API-Key (jeder Mitarbeiter individuell)</pre>
+      </div>
+
+      <!-- Setup-Status -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 mb-6">
+        <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-3">Status</p>
+        <div class="grid sm:grid-cols-2 gap-3 text-sm">
+          <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
+            <span class="text-ink-700">Proxy-URL gesetzt</span>
+            ${statusBadge(isProxySet, isProxySet ? 'OK' : 'fehlt')}
+          </div>
+          <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
+            <span class="text-ink-700">Verbindung</span>
+            <button type="button" onclick="testProxyConnection()" class="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1" ${!isProxySet ? 'disabled' : ''}>
+              <i data-lucide="zap" class="w-3.5 h-3.5"></i> Test
+            </button>
+          </div>
+        </div>
+        <div id="proxyTestResult" class="mt-3"></div>
+      </div>
+
+      <!-- ============ STEP 1 ============ -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+        ${stepHeader(1, 'Val.town-Account anlegen + HTTP-Val erstellen', '')}
+        <div class="text-sm text-ink-700 space-y-2 pl-11">
+          <p>1. Auf <a href="https://val.town" target="_blank" class="text-brand-600 hover:text-brand-700 underline">val.town</a> einloggen (oder kostenlos registrieren).</p>
+          <p>2. Oben rechts <strong>„New Val"</strong> klicken → Typ <strong>„HTTP"</strong> wählen.</p>
+          <p>3. Den Val z.B. <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">erp-api-proxy</code> nennen.</p>
         </div>
       </div>
 
-      ${SETTINGS_SECTIONS.map(sect => `
-        <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden mb-4">
-          <div class="px-4 py-3 border-b border-ink-100 flex items-center gap-2 bg-ink-50/50">
-            <i data-lucide="${sect.icon}" class="w-4 h-4 text-brand-600"></i>
-            <div class="flex-1">
-              <h3 class="font-semibold text-ink-900 text-sm">${escapeHtml(sect.title)}</h3>
-              <p class="text-[11px] text-ink-500">${escapeHtml(sect.desc)}</p>
-            </div>
+      <!-- ============ STEP 2 ============ -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+        ${stepHeader(2, 'Code in den Val einfügen', '')}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">Den vorhandenen Beispiel-Code in Val.town komplett ersetzen mit:</p>
+          <div class="relative">
+            <button type="button" onclick="copyValTownCode(this)" class="absolute top-2 right-2 z-10 bg-ink-900 text-white text-xs px-2.5 py-1.5 rounded-lg hover:bg-ink-700 flex items-center gap-1.5 shadow">
+              <i data-lucide="copy" class="w-3.5 h-3.5"></i> Code kopieren
+            </button>
+            <pre id="valtownCodeBlock" class="bg-ink-900 text-emerald-200 text-[11px] leading-relaxed font-mono p-4 pt-12 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre"></pre>
           </div>
-          <div class="px-4">
-            ${sect.fields.map(fieldHtml).join('')}
+          <p class="text-xs text-ink-500 mt-2">Anschließend in Val.town oben auf <strong>„Save"</strong> klicken.</p>
+        </div>
+      </div>
+
+      <!-- ============ STEP 3 ============ -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+        ${stepHeader(3, 'Environment Variables in Val.town setzen', '')}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-3">In Val.town: rechts in der Seitenleiste → <strong>„Environment Variables"</strong> → für jede Zeile <strong>„+ Add"</strong> klicken und Name + Wert eintragen.</p>
+          <div class="bg-ink-50 rounded-lg overflow-hidden border border-ink-200">
+            ${envVars.map(v => `
+              <div class="grid grid-cols-12 gap-2 px-3 py-3 border-b border-ink-200 last:border-b-0 items-start">
+                <div class="col-span-12 sm:col-span-4">
+                  <p class="font-mono text-xs font-semibold text-ink-900">${escapeHtml(v.name)}</p>
+                  ${v.secret ? '<span class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-semibold">secret</span>' : ''}
+                </div>
+                <div class="col-span-12 sm:col-span-8 space-y-1">
+                  <p class="text-[11px] text-ink-600">${escapeHtml(v.hint)}</p>
+                  ${v.value ? `
+                    <div class="flex items-center gap-2">
+                      <code class="bg-white border border-ink-200 px-2 py-1 rounded text-[11px] font-mono break-all flex-1 select-all">${escapeHtml(v.value)}</code>
+                      <button type="button" onclick="copyToClipboard('${escapeHtml(v.value).replace(/'/g, "\\'")}', this)" class="text-xs text-brand-600 hover:text-brand-700 flex items-center gap-1 shrink-0">
+                        <i data-lucide="copy" class="w-3.5 h-3.5"></i> kopieren
+                      </button>
+                    </div>
+                  ` : `<p class="text-[11px] text-amber-700 italic">Wert musst du selbst beschaffen.</p>`}
+                </div>
+              </div>
+            `).join('')}
+          </div>
+          <p class="text-xs text-ink-500 mt-3"><strong>Wichtig:</strong> Nach dem Anlegen aller Env-Vars in Val.town nochmal <strong>„Save"</strong> drücken (oder Val neu deployen), damit die Werte aktiv werden.</p>
+        </div>
+      </div>
+
+      <!-- ============ STEP 4 ============ -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+        ${stepHeader(4, 'Val.town-URL hier eintragen', isProxySet ? statusBadge(true, 'gesetzt') : '')}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">In Val.town wird oben über dem Code-Editor die <strong>HTTP-Endpoint-URL</strong> angezeigt (z.B. <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">https://benutzername-erpapiproxy.web.val.run</code>). Diese hier eintragen:</p>
+          <div class="flex gap-2 flex-wrap">
+            <input type="url" id="settingsProxyUrl" value="${escapeHtml(proxyUrl)}" placeholder="https://benutzername-erpapiproxy.web.val.run" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
+            <button type="button" onclick="saveProxyUrl()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+              <i data-lucide="save" class="w-4 h-4"></i> Speichern
+            </button>
+          </div>
+          <p class="text-[11px] text-ink-500 mt-1">URL ohne abschließenden Slash. Wird in der Master-Base unter <code>apiProxyUrl</code> abgelegt.</p>
+        </div>
+      </div>
+
+      <!-- ============ STEP 5 ============ -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+        ${stepHeader(5, 'Freshdesk Sales-Group-ID setzen', salesGroupId ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">Damit das Anfragen-Modul nur Tickets der Sales-Gruppe lädt, brauchen wir deren ID. <em>Sobald der Proxy steht</em>, kann man sie via:</p>
+          <code class="block bg-ink-900 text-emerald-200 text-[11px] font-mono p-3 rounded-lg mb-2 break-all">curl -H "Authorization: Bearer DEIN_USER_KEY" ${escapeHtml(proxyUrl || 'PROXY_URL')}/freshdesk/api/v2/groups</code>
+          <p class="text-sm text-ink-700 mb-2">…in der Antwort die ID der Gruppe „Sales" suchen und hier eintragen:</p>
+          <div class="flex gap-2 flex-wrap">
+            <input type="text" id="settingsSalesGroupId" value="${escapeHtml(salesGroupId)}" placeholder="z.B. 12000123456" class="flex-1 min-w-[200px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
+            <button type="button" onclick="saveSalesGroupId()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+              <i data-lucide="save" class="w-4 h-4"></i> Speichern
+            </button>
           </div>
         </div>
-      `).join('')}
-
-      <div class="bg-ink-50 border border-ink-200 rounded-2xl p-4 text-xs text-ink-600">
-        <p class="font-semibold text-ink-700 mb-1">Hinweis zu Schreibrechten</p>
-        <p>Falls beim Speichern „Kein Schreibzugriff auf Master-Base" erscheint, hat der aktuelle <code>airtableWriteKey</code> keinen Scope für Base <code>${escapeHtml(APP_CONFIG.MASTER_BASE_ID)}</code>. In Airtable → Builder Hub → Personal Access Tokens muss die Master-Base zur Token-Scope-Liste hinzugefügt werden (Berechtigung <code>data.records:write</code>).</p>
       </div>
+
+      <!-- Legacy Master-Base Keys (collapsed) -->
+      <details class="bg-ink-50 border border-ink-200 rounded-2xl p-4 mb-4 group">
+        <summary class="cursor-pointer text-sm font-medium text-ink-700 flex items-center gap-2"><i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition"></i> Erweitert: alle Master-Base Keys ansehen</summary>
+        <div class="mt-3 space-y-1.5">
+          ${keys.length === 0 ? '<p class="text-xs text-ink-500 italic">Keine Keys vorhanden.</p>' : keys.map(rec => {
+            const f = rec.fields || {};
+            const isSecret = /key$|token$|Key$|Token$/.test(f.key_name || '');
+            const v = isSecret ? _maskSecret(f.key_value || '') : (f.key_value || '');
+            return `<div class="flex items-baseline gap-3 text-xs"><code class="font-mono font-semibold text-ink-700 shrink-0">${escapeHtml(f.key_name || '')}</code><span class="text-ink-500 break-all">${escapeHtml(v || '(leer)')}</span></div>`;
+          }).join('')}
+          <p class="text-[11px] text-ink-500 italic mt-3">Diese Liste ist read-only. Schreiboperationen laufen über die Steps oben.</p>
+        </div>
+      </details>
     </div>
   `;
+
+  // Code-Block befüllen (textContent damit kein HTML interpretiert wird)
+  const codeEl = document.getElementById('valtownCodeBlock');
+  if (codeEl) codeEl.textContent = VALTOWN_PROXY_CODE;
+
   if (window.lucide) lucide.createIcons();
 }
 
-async function saveSettingsField(keyName) {
-  const input = document.getElementById('settingsField_' + keyName);
-  if (!input) return;
-  const val = (input.value || '').trim();
-  if (!val) return toast('Wert ist leer — zum Löschen "Wert löschen" benutzen', 'warn');
-  const recId = input.getAttribute('data-rec') || null;
+async function copyToClipboard(text, btnEl) {
   try {
-    await _writeMasterBaseKey(keyName, val, recId);
-    _applyKeyToAppState(keyName, val);
-    toast('Gespeichert', 'success');
+    await navigator.clipboard.writeText(text);
+    if (btnEl) {
+      const original = btnEl.innerHTML;
+      btnEl.innerHTML = '<i data-lucide="check" class="w-3.5 h-3.5"></i> kopiert';
+      if (window.lucide) lucide.createIcons();
+      setTimeout(() => { btnEl.innerHTML = original; if (window.lucide) lucide.createIcons(); }, 1500);
+    } else {
+      toast('Kopiert', 'success', 1200);
+    }
+  } catch (e) {
+    toast('Kopieren fehlgeschlagen — bitte manuell markieren', 'error');
+  }
+}
+
+async function copyValTownCode(btnEl) {
+  await copyToClipboard(VALTOWN_PROXY_CODE, btnEl);
+}
+
+async function saveProxyUrl() {
+  const inp = document.getElementById('settingsProxyUrl');
+  if (!inp) return;
+  let val = (inp.value || '').trim().replace(/\/+$/, '');
+  if (!val) return toast('URL ist leer', 'warn');
+  if (!/^https?:\/\//i.test(val)) return toast('URL muss mit http(s):// beginnen', 'warn');
+  try {
+    const keys = await _fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'apiProxyUrl');
+    await _writeMasterBaseKey('apiProxyUrl', val, existing?.id || null);
+    APP_KEYS.apiProxyUrl = val;
+    toast('Proxy-URL gespeichert', 'success');
     renderAdminSettings();
   } catch (e) {
     toast(e.message, 'error', 7000);
   }
 }
 
-async function clearSettingsField(keyName, recId) {
-  if (!recId) return toast('Kein Eintrag vorhanden', 'info');
-  // Schutz: airtableWriteKey nicht löschen — würde alle Schreibvorgänge brechen
-  if (keyName === 'airtableWriteKey') {
-    return toast('Der Write-Key darf nicht gelöscht werden — sonst ist die App nicht mehr beschreibbar. Stattdessen einen neuen Wert eintragen.', 'error', 8000);
-  }
-  if (!confirm('Wert für "' + keyName + '" wirklich löschen?')) return;
+async function saveSalesGroupId() {
+  const inp = document.getElementById('settingsSalesGroupId');
+  if (!inp) return;
+  const val = (inp.value || '').trim();
+  if (!val) return toast('ID ist leer', 'warn');
   try {
-    await _deleteMasterBaseKey(recId);
-    _applyKeyToAppState(keyName, null);
-    toast('Gelöscht', 'success');
+    const keys = await _fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'freshdeskSalesGroupId');
+    await _writeMasterBaseKey('freshdeskSalesGroupId', val, existing?.id || null);
+    APP_KEYS.freshdeskSalesGroupId = val;
+    toast('Sales-Group-ID gespeichert', 'success');
     renderAdminSettings();
   } catch (e) {
     toast(e.message, 'error', 7000);
   }
+}
+
+async function testProxyConnection() {
+  const wrap = document.getElementById('proxyTestResult');
+  if (!wrap) return;
+  if (!_proxyBase()) {
+    wrap.innerHTML = '<p class="text-xs text-amber-700 italic">Bitte erst Proxy-URL eintragen (Step 4).</p>';
+    return;
+  }
+  wrap.innerHTML = '<p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Teste…</p>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    const data = await proxyFetch('health');
+    wrap.innerHTML = `
+      <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-900">
+        <p class="font-semibold flex items-center gap-1.5"><i data-lucide="check-circle-2" class="w-4 h-4"></i> Verbindung erfolgreich</p>
+        <p class="mt-1">Authentifiziert als <strong>${escapeHtml(data?.user?.name || '?')}</strong>${data?.user?.is_admin ? ' (admin)' : ''}.</p>
+      </div>
+    `;
+  } catch (e) {
+    wrap.innerHTML = `
+      <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-900">
+        <p class="font-semibold flex items-center gap-1.5"><i data-lucide="alert-circle" class="w-4 h-4"></i> Fehler</p>
+        <p class="mt-1 break-words">${escapeHtml(e.message)}</p>
+        <p class="mt-2 text-red-700">Mögliche Ursachen: URL falsch, Code in Val.town fehlt/alt, Env-Vars fehlen, Read-Key hat keinen Scope auf User-Tabelle.</p>
+      </div>
+    `;
+  }
+  if (window.lucide) lucide.createIcons();
 }
 
 /* ============================================================
@@ -3009,7 +3311,7 @@ async function openLayoutEdit(id) {
 async function generateLayoutWithAI() {
   const desc = (document.getElementById('layout_description')?.value || '').trim();
   if (!desc) { toast('Bitte erst eine Beschreibung eingeben', 'warn'); return; }
-  if (!APP_KEYS.anthropicKey) { toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error'); return; }
+  if (!_proxyBase()) { toast('KI nicht verfügbar — API-Proxy nicht konfiguriert (Admin → Einstellungen)', 'error'); return; }
   const btn = document.getElementById('layoutAiBtn');
   const lbl = document.getElementById('layoutAiLbl');
   if (btn) btn.disabled = true;
@@ -3224,7 +3526,7 @@ async function generateTemplateWithAI() {
   const briefEl = document.getElementById('tpl_ai_brief');
   const brief = (briefEl?.value || '').trim();
   if (!brief) { toast('Bitte erst eine Beschreibung eingeben', 'warn'); return; }
-  if (!APP_KEYS.anthropicKey) { toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error'); return; }
+  if (!_proxyBase()) { toast('KI nicht verfügbar — API-Proxy nicht konfiguriert (Admin → Einstellungen)', 'error'); return; }
   const docType = document.getElementById('tpl_doc_type')?.value || 'Angebot';
   const section = document.querySelector('#modalBox select[name="section"]')?.value || 'Einleitung';
   const quill = window._tplQuill;
@@ -4918,8 +5220,8 @@ async function analyzeInquiry() {
   if (!rawText && !voiceText && _inquiryImages.length === 0) {
     return toast('Bitte erst Text, Sprache oder Bilder hinzufügen', 'warn');
   }
-  if (!APP_KEYS.anthropicKey) {
-    return toast('KI nicht verfügbar — Anthropic-Key fehlt in den Projekt-Keys', 'error');
+  if (!_proxyBase()) {
+    return toast('KI nicht verfügbar — API-Proxy nicht konfiguriert (Admin → Einstellungen)', 'error');
   }
   const btn = document.getElementById('inq_analyze_btn');
   const lbl = document.getElementById('inq_analyze_label');
@@ -5490,8 +5792,8 @@ async function analyzeInquiryWizard() {
   if (!w.data.raw_text && !w.data.voice_text && _inquiryImages.length === 0) {
     return toast('Bitte erst Text, Sprache oder Bilder hinzufügen', 'warn');
   }
-  if (!APP_KEYS.anthropicKey) {
-    return toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error');
+  if (!_proxyBase()) {
+    return toast('KI nicht verfügbar — API-Proxy nicht konfiguriert (Admin → Einstellungen)', 'error');
   }
   const btn = document.getElementById('inq_analyze_btn');
   const lbl = document.getElementById('inq_analyze_label');
@@ -6508,7 +6810,7 @@ function _activeLayoutConfig() {
 
 function openLayoutLiveAdjust() {
   if (!APP_KEYS.user?.is_admin) { toast('Nur für Admins', 'error'); return; }
-  if (!APP_KEYS.anthropicKey) { toast('KI nicht verfügbar — Anthropic-Key fehlt', 'error'); return; }
+  if (!_proxyBase()) { toast('KI nicht verfügbar — API-Proxy nicht konfiguriert (Admin → Einstellungen)', 'error'); return; }
   const initial = _activeLayoutConfig();
   _liveLayoutState = { ...initial }; // arbeitet mit dieser Working Copy
   openModal2(`
