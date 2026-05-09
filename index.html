@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.27';
+const APP_VERSION = 'v3.28';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3181,7 +3181,14 @@ export default async function (req: Request): Promise<Response> {
     if (!fdPath.startsWith("api/v2/")) {
       return jsonResponse({ error: "Bad path. Erwartet: /freshdesk/api/v2/..." }, 400);
     }
-    const domain = Deno.env.get("FRESHDESK_DOMAIN");
+    let domain = Deno.env.get("FRESHDESK_DOMAIN") || "";
+    // Defensive Parsing: wenn User versehentlich "https://", ".freshdesk.com",
+    // trailing slash etc. mit eingetragen hat, sauber abschneiden.
+    domain = domain
+      .replace(/^https?:\\/\\//i, "")
+      .replace(/\\.freshdesk\\.com\\/?$/i, "")
+      .replace(/\\/+$/, "")
+      .trim();
     if (!domain) return jsonResponse({ error: "FRESHDESK_DOMAIN env var fehlt in Val.town" }, 500);
     // Per-User-Key bevorzugt (aus Airtable User.freshdesk_api_key);
     // Fallback: env var FRESHDESK_API_KEY (für User ohne eigenen Key).
