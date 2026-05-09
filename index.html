@@ -577,7 +577,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.19';
+const APP_VERSION = 'v3.20';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1903,12 +1903,14 @@ function userRow(rec) {
   const inactive = f.status !== 'aktiv';
   const isAdmin = !!f.is_admin;
   const cnt = (f.allowed_companies || []).length;
+  const hasFreshdesk = !!(f.freshdesk_api_key || '').trim();
   return `
     <div class="flex items-center justify-between p-4">
       <div class="min-w-0">
         <div class="flex items-center gap-2 flex-wrap">
           <p class="font-medium ${inactive ? 'text-ink-500' : 'text-ink-900'} truncate">${escapeHtml(f.name || '–')}</p>
           ${isAdmin ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded">admin</span>' : ''}
+          ${hasFreshdesk ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded inline-flex items-center gap-0.5" title="Eigener Freshdesk-Key gesetzt"><i data-lucide="headphones" class="w-2.5 h-2.5"></i> FD</span>' : ''}
         </div>
         <p class="text-xs text-ink-500 mt-0.5 truncate">
           ${escapeHtml(f.role || '—')} · ${cnt} Firma${cnt===1?'':'n'} · ${escapeHtml(f.status || '—')}
@@ -1936,6 +1938,12 @@ function generateApiKey() {
 }
 
 async function openUserModal(id) {
+  // Sicherstellen, dass das Feld freshdesk_api_key in der User-Tabelle existiert
+  // (idempotent — legt nur an, wenn nicht vorhanden)
+  await ensureFields('User', [
+    { name: 'freshdesk_api_key', type: 'singleLineText' }
+  ]).catch(()=>{});
+
   let f = {};
   if (id) {
     const all = await readData('User');
@@ -1965,10 +1973,22 @@ async function openUserModal(id) {
       <label class="block text-sm font-medium text-ink-700 mb-1">Rolle</label>
       <input name="role" value="${escapeHtml(f.role || '')}" placeholder="z.B. Buchhaltung" class="w-full mb-3 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
 
-      <label class="block text-sm font-medium text-ink-700 mb-1">API-Key</label>
+      <label class="block text-sm font-medium text-ink-700 mb-1">API-Key <span class="text-ink-500 font-normal text-xs">(für Login in der App)</span></label>
       <div class="flex gap-2 mb-3">
         <input id="userApiKey" name="api_key" required value="${escapeHtml(apiKey)}" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs">
         <button type="button" onclick="document.getElementById('userApiKey').value=generateApiKey()" class="px-3 py-2 text-xs rounded-lg border border-ink-200 hover:bg-ink-50">Neu</button>
+      </div>
+
+      <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 mb-3">
+        <label class="block text-sm font-medium text-ink-900 mb-1 flex items-center gap-1.5"><i data-lucide="headphones" class="w-3.5 h-3.5 text-emerald-700"></i> Freshdesk API-Key <span class="text-ink-500 font-normal text-xs">(persönlich)</span></label>
+        ${id && (f.freshdesk_api_key || '').trim() ? `
+          <p class="text-[11px] text-ink-500 font-mono mb-1.5">aktuell: ${escapeHtml(_maskSecret(f.freshdesk_api_key))}</p>
+          <input type="password" name="freshdesk_api_key" value="" placeholder="zum Beibehalten leer lassen" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+          <p class="text-[11px] text-ink-500 mt-1">Leer lassen = aktueller Wert bleibt. Neuer Wert überschreibt.</p>
+        ` : `
+          <input type="password" name="freshdesk_api_key" value="" placeholder="z.B. aBcDeFgHiJ123456 (aus Freshdesk → Profile Settings)" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+          <p class="text-[11px] text-ink-500 mt-1">Optional. Wenn gesetzt: Freshdesk-Tickets werden mit diesem User-Account abgerufen. Wenn leer: Fallback auf Val.town env var.</p>
+        `}
       </div>
 
       <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
@@ -2006,6 +2026,9 @@ async function saveUser(e, id) {
     is_admin:  fd.get('is_admin') === 'on',
     allowed_companies: fd.getAll('allowed_companies')
   };
+  // Freshdesk-Key: leer = nicht ändern (beim Edit), beim Anlegen = nur setzen wenn gefüllt
+  const freshdeskKey = (fd.get('freshdesk_api_key') || '').trim();
+  if (freshdeskKey) fields.freshdesk_api_key = freshdeskKey;
   if (!fields.name)    return toast('Name fehlt', 'error');
   if (!fields.api_key) return toast('API-Key fehlt', 'error');
   if (!id) fields.created = new Date().toISOString().slice(0,10);
@@ -2670,24 +2693,29 @@ async function deleteQuoteBundle(id) {
 
 // Der komplette Val.town-Code als Copy-Paste-Vorlage. Wird in der
 // Settings-UI angezeigt; User legt einen "HTTP val" in Val.town an
-// und fügt diesen Code ein. Alle Secrets kommen aus env vars.
+// und fügt diesen Code ein. Alle Secrets kommen aus env vars oder
+// vom Airtable User-Record (per-User Freshdesk-Key).
 const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy
 // =====================================================================
 // HTTP-Val für Val.town. Routet:
 //   POST /anthropic/v1/messages   →  api.anthropic.com (mit ANTHROPIC_API_KEY)
-//   GET  /freshdesk/api/v2/...    →  <domain>.freshdesk.com (mit FRESHDESK_API_KEY)
+//   GET  /freshdesk/api/v2/...    →  <domain>.freshdesk.com
+//                                     (User-eigener Key bevorzugt,
+//                                      env var FRESHDESK_API_KEY als Fallback)
 //   GET  /health                  →  nur Auth-Check (für "Verbindung testen")
 //
 // Auth: Browser sendet "Authorization: Bearer <user_api_key>".
 //   Der Proxy schaut den Key in Airtable User-Tabelle nach (status='aktiv').
 //   Lookup ist 60 s gecached, damit aktive User keine Latenz spüren.
+//   Aus dem User-Record wird auch das Feld 'freshdesk_api_key' gelesen
+//   und für Freshdesk-Calls bevorzugt verwendet (statt env var).
 //
 // ENV VARS in Val.town setzen:
 //   AIRTABLE_READ_KEY   — Read-Token mit Scope auf App-Base
 //   AIRTABLE_BASE_ID    — App-Base-ID (appCu...)
 //   ANTHROPIC_API_KEY   — sk-ant-...
 //   FRESHDESK_DOMAIN    — Subdomain ohne .freshdesk.com (z.B. flpliftparts)
-//   FRESHDESK_API_KEY   — Freshdesk Personal API Key
+//   FRESHDESK_API_KEY   — (optional) Fallback wenn User keinen eigenen Key hat
 // =====================================================================
 
 const USER_CACHE = new Map(); // userKey → { user, expires }
@@ -2706,7 +2734,12 @@ async function lookupUser(userKey: string) {
   const data = await res.json();
   const rec = (data.records || [])[0];
   if (!rec) return null;
-  const user = { id: rec.id, name: rec.fields.name || "", is_admin: !!rec.fields.is_admin };
+  const user = {
+    id: rec.id,
+    name: rec.fields.name || "",
+    is_admin: !!rec.fields.is_admin,
+    freshdesk_api_key: (rec.fields.freshdesk_api_key || "").trim() || null
+  };
   USER_CACHE.set(userKey, { user, expires: Date.now() + CACHE_TTL_MS });
   return user;
 }
@@ -2755,7 +2788,14 @@ export default async function (req: Request): Promise<Response> {
 
   // Health-Check (für "Verbindung testen" in der App)
   if (path === "health") {
-    return jsonResponse({ ok: true, user: { name: user.name, is_admin: user.is_admin } });
+    return jsonResponse({
+      ok: true,
+      user: {
+        name: user.name,
+        is_admin: user.is_admin,
+        has_freshdesk_key: !!user.freshdesk_api_key
+      }
+    });
   }
 
   // 3) Anthropic
@@ -2790,8 +2830,13 @@ export default async function (req: Request): Promise<Response> {
       return jsonResponse({ error: "Bad path. Erwartet: /freshdesk/api/v2/..." }, 400);
     }
     const domain = Deno.env.get("FRESHDESK_DOMAIN");
-    const fdKey  = Deno.env.get("FRESHDESK_API_KEY");
-    if (!domain || !fdKey) return jsonResponse({ error: "FRESHDESK_DOMAIN/FRESHDESK_API_KEY env var fehlt in Val.town" }, 500);
+    if (!domain) return jsonResponse({ error: "FRESHDESK_DOMAIN env var fehlt in Val.town" }, 500);
+    // Per-User-Key bevorzugt (aus Airtable User.freshdesk_api_key);
+    // Fallback: env var FRESHDESK_API_KEY (für User ohne eigenen Key).
+    const fdKey = user.freshdesk_api_key || Deno.env.get("FRESHDESK_API_KEY");
+    if (!fdKey) return jsonResponse({
+      error: "Kein Freshdesk-Key verfügbar. Entweder beim User in der App eintragen (Admin → Benutzer) oder FRESHDESK_API_KEY env var in Val.town setzen."
+    }, 500);
     const target = \`https://\${domain}.freshdesk.com/\${fdPath}\${url.search}\`;
     const basic = btoa(\`\${fdKey}:X\`);
     const init: RequestInit = {
@@ -2822,11 +2867,11 @@ export default async function (req: Request): Promise<Response> {
 // muss der User selbst beschaffen.
 function _valtownEnvVars() {
   return [
-    { name: 'AIRTABLE_READ_KEY',  hint: 'Read-Token für Airtable. Der bereits in der App eingebettete Read-Key kann verwendet werden:', value: APP_CONFIG.AIRTABLE_READ_KEY, secret: true },
-    { name: 'AIRTABLE_BASE_ID',   hint: 'App-Base-ID — wo die User-Tabelle liegt:', value: APP_CONFIG.APP_BASE_ID, secret: false },
-    { name: 'ANTHROPIC_API_KEY',  hint: 'Anthropic Console → API Keys → Create. Beginnt mit sk-ant-...', value: '', secret: true },
-    { name: 'FRESHDESK_DOMAIN',   hint: 'Subdomain ohne .freshdesk.com (z.B. wenn URL flpliftparts.freshdesk.com → "flpliftparts")', value: '', secret: false },
-    { name: 'FRESHDESK_API_KEY',  hint: 'Freshdesk → Profil-Icon → Profile Settings → "Your API Key"', value: '', secret: true }
+    { name: 'AIRTABLE_READ_KEY',  hint: 'Read-Token für Airtable. Der bereits in der App eingebettete Read-Key kann verwendet werden:', value: APP_CONFIG.AIRTABLE_READ_KEY, secret: true, required: true },
+    { name: 'AIRTABLE_BASE_ID',   hint: 'App-Base-ID — wo die User-Tabelle liegt:', value: APP_CONFIG.APP_BASE_ID, secret: false, required: true },
+    { name: 'ANTHROPIC_API_KEY',  hint: 'Anthropic Console → API Keys → Create. Beginnt mit sk-ant-...', value: '', secret: true, required: true },
+    { name: 'FRESHDESK_DOMAIN',   hint: 'Subdomain ohne .freshdesk.com (z.B. wenn URL flpliftparts.freshdesk.com → "flpliftparts")', value: '', secret: false, required: true },
+    { name: 'FRESHDESK_API_KEY',  hint: 'OPTIONAL — Fallback-Key. Wird nur verwendet, wenn ein User keinen eigenen Freshdesk-Key in seinem Profil hat. Empfehlung: leer lassen und stattdessen pro Mitarbeiter den persönlichen Key in Admin → Benutzer eintragen.', value: '', secret: true, required: false }
   ];
 }
 
@@ -2952,12 +2997,15 @@ async function renderAdminSettings() {
       <!-- Architektur-Diagramm -->
       <div class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl p-4 mb-4">
         <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Architektur</p>
-        <pre class="text-[11px] sm:text-xs text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Browser (ERP)  ──[ Bearer: User-Key ]──▶  Val.town-Proxy  ──┬──▶  Anthropic
+        <pre class="text-[11px] sm:text-xs text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Browser (ERP)  ──[ Bearer: User-Key ]──▶  Val.town-Proxy  ──┬──▶  Anthropic   (env var)
                                                             │
-                                                            └──▶  Freshdesk
+                                                            └──▶  Freshdesk   (User.freshdesk_api_key
+                                                                              · env-var-Fallback)
 
-Val.town hält serverseitig:  ANTHROPIC_API_KEY · FRESHDESK_API_KEY · AIRTABLE_READ_KEY
-Browser hält nur:            User-API-Key (jeder Mitarbeiter individuell)</pre>
+Val.town liest:    User-Record aus Airtable (User-Key validieren + freshdesk_api_key)
+Val.town hält:     ANTHROPIC_API_KEY · AIRTABLE_READ_KEY · (optional FRESHDESK_API_KEY)
+Browser hält nur:  User-API-Key (jeder Mitarbeiter individuell)</pre>
+        <p class="text-[11px] text-emerald-800 mt-2 flex items-start gap-1.5"><i data-lucide="info" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>Freshdesk pro Mitarbeiter:</strong> Persönliche Freshdesk-Keys werden direkt am User-Record gepflegt (Admin → Benutzer → Bearbeiten). Tickets, die von der App aus aktualisiert werden, erscheinen in Freshdesk unter dem jeweiligen Mitarbeiter-Account.</span></p>
       </div>
 
       <!-- Setup-Status -->
@@ -3013,7 +3061,10 @@ Browser hält nur:            User-API-Key (jeder Mitarbeiter individuell)</pre>
               <div class="grid grid-cols-12 gap-2 px-3 py-3 border-b border-ink-200 last:border-b-0 items-start">
                 <div class="col-span-12 sm:col-span-4">
                   <p class="font-mono text-xs font-semibold text-ink-900">${escapeHtml(v.name)}</p>
-                  ${v.secret ? '<span class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-semibold">secret</span>' : ''}
+                  <div class="flex gap-1 flex-wrap mt-0.5">
+                    ${v.secret ? '<span class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-semibold">secret</span>' : ''}
+                    ${v.required === false ? '<span class="text-[10px] uppercase tracking-wider bg-ink-200 text-ink-700 px-1.5 py-0.5 rounded font-semibold">optional</span>' : ''}
+                  </div>
                 </div>
                 <div class="col-span-12 sm:col-span-8 space-y-1">
                   <p class="text-[11px] text-ink-600">${escapeHtml(v.hint)}</p>
@@ -3153,10 +3204,14 @@ async function testProxyConnection() {
   if (window.lucide) lucide.createIcons();
   try {
     const data = await proxyFetch('health');
+    const fdInfo = data?.user?.has_freshdesk_key
+      ? '<span class="inline-flex items-center gap-1 mt-1.5 text-[10px] uppercase tracking-wider bg-emerald-200 text-emerald-800 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="headphones" class="w-3 h-3"></i> persönlicher Freshdesk-Key gesetzt</span>'
+      : '<p class="text-[11px] mt-1.5 text-emerald-700">Hinweis: Du hast keinen persönlichen Freshdesk-Key am User-Record — Calls laufen über den env-var-Fallback (sofern gesetzt).</p>';
     wrap.innerHTML = `
       <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-900">
         <p class="font-semibold flex items-center gap-1.5"><i data-lucide="check-circle-2" class="w-4 h-4"></i> Verbindung erfolgreich</p>
         <p class="mt-1">Authentifiziert als <strong>${escapeHtml(data?.user?.name || '?')}</strong>${data?.user?.is_admin ? ' (admin)' : ''}.</p>
+        ${fdInfo}
       </div>
     `;
   } catch (e) {
