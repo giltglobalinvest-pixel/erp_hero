@@ -568,7 +568,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.06';
+const APP_VERSION = 'v3.07';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1095,12 +1095,14 @@ function renderWelcome() {
 
       <h3 class="mt-8 mb-3 text-sm font-semibold text-ink-500 uppercase tracking-wider">Roadmap</h3>
       <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        ${roadmapCard('v1.0', 'Login & Shell', 'check', 'done', 'Aktuelle Version')}
-        ${roadmapCard('v1.1', 'Stammdaten', 'database', 'next', 'Kunden, Lieferanten, Artikel')}
-        ${roadmapCard('v1.2', 'Angebote', 'file-text', 'soon', 'Editor mit Empfänger & Positionen')}
-        ${roadmapCard('v1.3', 'Verkauf', 'shopping-cart', 'soon', 'Aufträge, Lieferscheine, Rechnungen')}
-        ${roadmapCard('v1.4', 'Einkauf', 'shopping-cart', 'soon', 'Bestellungen')}
-        ${roadmapCard('v1.5', 'Statistiken', 'bar-chart-3', 'soon', 'Auswertungen & KI-Insights')}
+        ${roadmapCard('v1.0', 'Login & Shell', 'check', 'done', 'Mandantenfähig, Auth via Airtable')}
+        ${roadmapCard('v1.1', 'Stammdaten', 'database', 'done', 'Kunden, Lieferanten, Artikel, Adressen, Kontakte')}
+        ${roadmapCard('v1.2', 'Angebote', 'file-text', 'done', 'Editor mit Vorlagenpaketen, Live-Vorschau, PDF')}
+        ${roadmapCard('v1.3', 'Verkauf', 'shopping-cart', 'done', 'Aufträge, Lieferscheine, Rechnungen (DSGVO)')}
+        ${roadmapCard('v1.4', 'Einkauf', 'package', 'done', 'Lieferantenbestellungen aus Aufträgen')}
+        ${roadmapCard('v1.5', 'Freshdesk-Anbindung', 'inbox', 'next', 'Tickets als Anfragen importieren via Proxy')}
+        ${roadmapCard('v1.6', 'Mahnwesen + Storno', 'alert-circle', 'soon', 'Mahnstufen, Stornorechnung, Zahlungsabgleich')}
+        ${roadmapCard('v1.7', 'Statistiken', 'bar-chart-3', 'soon', 'Auswertungen & KI-Insights')}
       </div>
 
       <h3 class="mt-8 mb-3 text-sm font-semibold text-ink-500 uppercase tracking-wider">Status</h3>
