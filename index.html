@@ -88,7 +88,8 @@
      Position fixed top:-200vh sorgt dafür, dass html2canvas die Sheets noch messen kann. */
   @media (max-width: 1023px) {
     #quotePreviewPane[data-mobile-hidden="true"]:not([data-mobile-show="1"]),
-    #orderPreviewPane[data-mobile-hidden="true"]:not([data-mobile-show="1"]) {
+    #orderPreviewPane[data-mobile-hidden="true"]:not([data-mobile-show="1"]),
+    #purchasePreviewPane[data-mobile-hidden="true"]:not([data-mobile-show="1"]) {
       position: fixed !important;
       top: -200vh !important;
       left: 0 !important;
@@ -170,6 +171,24 @@
     }
     form[data-order-form] .grid:not([data-keep-mobile-cols]) [class*="col-span-"] {
       grid-column: auto !important;
+    }
+    /* Bestellung-Form analog */
+    form[data-purchase-form] .grid:not([data-keep-mobile-cols]) {
+      grid-template-columns: 1fr !important;
+    }
+    form[data-purchase-form] .grid:not([data-keep-mobile-cols]) [class*="col-span-"] {
+      grid-column: auto !important;
+    }
+    form[data-purchase-form] [id$="_description_editor"] {
+      height: 220px !important;
+      min-height: 220px !important;
+      max-height: 220px !important;
+      flex: 0 0 auto !important;
+    }
+    form[data-purchase-form] [id$="_description_editor"] .ql-editor {
+      height: 220px !important;
+      max-height: 220px !important;
+      overflow-y: auto !important;
     }
     /* Article-Form Mobile: Grids komplett deaktivieren — Kinder stapeln als block.
        Garantiert, dass keine Felder überlappen, egal was Quill oder Tailwind machen. */
@@ -524,7 +543,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v2.97';
+const APP_VERSION = 'v2.98';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2189,9 +2208,11 @@ async function renderAdminQuoteBundles() {
     : bundles.map(b => {
         const f = b.fields;
         const dt = bundleDocType(b);
-        const dtBadge = dt === 'Auftrag'
-          ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">Auftrag</span>'
-          : '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">Angebot</span>';
+        const dtBadge = dt === 'Bestellung'
+          ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded">Bestellung</span>'
+          : (dt === 'Auftrag'
+              ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">Auftrag</span>'
+              : '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">Angebot</span>');
         return `
           <div class="flex items-center justify-between gap-3 px-4 py-3 hover:bg-ink-50 border-b border-ink-100">
             <div class="flex-1 min-w-0">
@@ -2222,9 +2243,10 @@ async function renderAdminQuoteBundles() {
         <div class="flex items-center gap-2">
           <label class="text-xs text-ink-500">Typ:</label>
           <select onchange="_bundleAdminState.docType=this.value;renderAdminQuoteBundles()" class="text-sm border border-ink-200 rounded-lg px-2 py-2">
-            <option value="alle"    ${_bundleAdminState.docType==='alle'?'selected':''}>alle</option>
-            <option value="Angebot" ${_bundleAdminState.docType==='Angebot'?'selected':''}>Angebot</option>
-            <option value="Auftrag" ${_bundleAdminState.docType==='Auftrag'?'selected':''}>Auftrag</option>
+            <option value="alle"       ${_bundleAdminState.docType==='alle'?'selected':''}>alle</option>
+            <option value="Angebot"    ${_bundleAdminState.docType==='Angebot'?'selected':''}>Angebot</option>
+            <option value="Auftrag"    ${_bundleAdminState.docType==='Auftrag'?'selected':''}>Auftrag</option>
+            <option value="Bestellung" ${_bundleAdminState.docType==='Bestellung'?'selected':''}>Bestellung</option>
           </select>
           <button onclick="openQuoteBundleEdit()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2 shrink-0"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>
         </div>
@@ -2277,12 +2299,13 @@ async function openQuoteBundleEdit(id) {
           <select name="doc_type" onchange="(function(s){if(confirm('Doc-Typ ändern? Vorlagenauswahl wird neu geladen — ungespeicherte Eingaben gehen verloren.')){window._pendingBundleDocType=s.value;openQuoteBundleEdit('${id || ''}');}else{s.value='${docType}';}})(this)" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
             <option value="Angebot" ${docType==='Angebot'?'selected':''}>Angebot</option>
             <option value="Auftrag" ${docType==='Auftrag'?'selected':''}>Auftrag (Auftragsbestätigung)</option>
+            <option value="Bestellung" ${docType==='Bestellung'?'selected':''}>Bestellung (Lieferantenbestellung)</option>
           </select>
           <p class="text-[11px] text-ink-500 mt-1">Bestimmt, in welchen Modul-Pickern dieses Paket erscheint. Bei Änderung werden die passenden Textbausteine geladen.</p>
         </div>
         <div class="flex items-center gap-2">
           <input id="bdl_default" name="is_default" type="checkbox" ${f.is_default ? 'checked' : ''} class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-brand-500/30">
-          <label for="bdl_default" class="text-sm text-ink-700">Als Standard markieren (wird bei neuen ${docType==='Auftrag'?'Aufträgen':'Angeboten'} automatisch gewählt)</label>
+          <label for="bdl_default" class="text-sm text-ink-700">Als Standard markieren (wird bei neuen ${docType==='Bestellung'?'Bestellungen':(docType==='Auftrag'?'Aufträgen':'Angeboten')} automatisch gewählt)</label>
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Titel-Vorlage</label>
@@ -10527,7 +10550,8 @@ async function openOrderModal(id, opts = {}) {
         </div>
         <div class="lg:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Einleitung</label>
-          <textarea name="description" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+          <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
+          <div id="order_intro_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
         </div>
       </div>
 
@@ -10540,7 +10564,8 @@ async function openOrderModal(id, opts = {}) {
 
       <div class="mt-5">
         <label class="block text-sm font-medium text-ink-700 mb-1">Schlusstext</label>
-        <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+        <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
+        <div id="order_closing_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
       </div>
 
       ${id ? `
@@ -10610,7 +10635,12 @@ async function openOrderModal(id, opts = {}) {
     _currentLock = { table: 'Order', recordId: id };
     startLockHeartbeat('Order', id);
   }
-  setTimeout(updateOrderPreview, 100);
+  // Quill-Editoren für Einleitung + Schlusstext (analog Quote)
+  setTimeout(async () => {
+    await initSimpleQuillEditor('order_intro_editor', 'description', f.description || '', 'Einleitung — kann formatiert werden');
+    await initSimpleQuillEditor('order_closing_editor', 'notes', f.notes || '', 'Schlusstext — kann formatiert werden');
+  }, 60);
+  setTimeout(updateOrderPreview, 200);
   // Form-Listener für live preview
   const form = document.querySelector('form[data-order-form]');
   if (form) {
@@ -10794,22 +10824,34 @@ async function applyOrderBundle(bundleId, opts = {}) {
   if (!bundle) return;
   const f = bundle.fields || {};
   const ctx = await buildOrderVariableContext();
-  const setVal = (selector, value) => {
-    const el = document.querySelector(selector);
-    if (!el) return;
-    el.value = value;
-    // Trigger input event damit Live-Vorschau triggert
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-  const apply = (tplId, fieldName) => {
+  // Title (plain input, plain text)
+  if (f.title_template_id) {
+    const tpl = (window._orderTemplates || []).find(t => t.id === f.title_template_id);
+    if (tpl) {
+      const content = substituteVariables(tpl.fields.content || '', 'Auftrag', ctx);
+      const titleEl = document.querySelector('#modalBox form[data-order-form] [name="order_title"]');
+      if (titleEl) { titleEl.value = content.replace(/<[^>]+>/g, '').trim(); titleEl.dispatchEvent(new Event('input', { bubbles: true })); }
+    }
+  }
+  // Quill-aware Apply für Einleitung + Schlusstext
+  const applyQuill = (tplId, fieldName, editorId) => {
     const tpl = (window._orderTemplates || []).find(t => t.id === tplId);
     if (!tpl) return;
     const content = substituteVariables(tpl.fields.content || '', 'Auftrag', ctx);
-    setVal(`#modalBox form[data-order-form] [name="${fieldName}"]`, content);
+    const editorEl = document.getElementById(editorId);
+    const quillContainer = editorEl?.querySelector('.ql-editor');
+    if (quillContainer) {
+      if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(content)) {
+        quillContainer.innerHTML = content;
+      } else {
+        quillContainer.innerHTML = `<p>${escapeHtml(content)}</p>`;
+      }
+      const hidden = document.querySelector(`#modalBox form[data-order-form] input[name="${fieldName}"]`);
+      if (hidden) hidden.value = quillContainer.innerHTML;
+    }
   };
-  if (f.title_template_id)   apply(f.title_template_id,   'order_title');
-  if (f.intro_template_id)   apply(f.intro_template_id,   'description');
-  if (f.closing_template_id) apply(f.closing_template_id, 'notes');
+  if (f.intro_template_id)   applyQuill(f.intro_template_id,   'description', 'order_intro_editor');
+  if (f.closing_template_id) applyQuill(f.closing_template_id, 'notes',       'order_closing_editor');
   if (typeof updateOrderPreview === 'function') updateOrderPreview();
   if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
 }
@@ -11481,6 +11523,7 @@ async function ensureSupplierOrderSchema() {
     { name: 'subtotal_net',         type: 'number',   options: { precision: 2 } },
     { name: 'vat_total',            type: 'number',   options: { precision: 2 } },
     { name: 'total_gross',          type: 'number',   options: { precision: 2 } },
+    { name: 'bundle_id',            type: 'singleLineText' },
     { name: 'lock_user_id',         type: 'singleLineText' },
     { name: 'lock_until',           type: 'singleLineText' },
   ]).catch(()=>{});
@@ -11683,13 +11726,24 @@ async function openSupplierOrderModal(id, opts = {}) {
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   await ensureSupplierOrderSchema();
 
-  let f = {}, items = [], allSuppliers = [], allContacts = [], allOrders = [], allPaymentTerms = [], allDeliveryTerms = [], allCompanies = [];
+  let f = {}, items = [], allSuppliers = [], allContacts = [], allOrders = [], allPaymentTerms = [], allDeliveryTerms = [], allCompanies = [], allBundles = [], allTemplates = [];
   try {
-    [allSuppliers, allContacts, allOrders, allPaymentTerms, allDeliveryTerms, allCompanies] = await Promise.all([
+    [allSuppliers, allContacts, allOrders, allPaymentTerms, allDeliveryTerms, allCompanies, allBundles, allTemplates] = await Promise.all([
       readData('Supplier'), readData('Contact'), readData('Order').catch(()=>[]),
-      readData('PaymentTerm'), readData('DeliveryTerm'), readData('Company').catch(()=>[])
+      readData('PaymentTerm'), readData('DeliveryTerm'), readData('Company').catch(()=>[]),
+      readData('QuoteBundle').catch(()=>[]), readData('Textemplate').catch(()=>[])
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
+  // Bundles + Templates für 'Bestellung' filtern
+  window._purchaseBundles = allBundles
+    .filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert' && bundleDocType(b) === 'Bestellung')
+    .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  window._purchaseTemplates = allTemplates.filter(t =>
+    (t.fields.company_id || []).includes(cur.id) &&
+    (t.fields.doc_type === 'Bestellung') &&
+    (t.fields.status || 'aktiv') === 'aktiv'
+  );
+  const defaultPurchaseBundle = window._purchaseBundles.find(b => b.fields.is_default);
 
   if (id) {
     const all = await readData('SupplierOrder');
@@ -11764,6 +11818,19 @@ async function openSupplierOrderModal(id, opts = {}) {
         </div>
       ` : ''}
 
+      ${(window._purchaseBundles || []).length > 0 ? `
+        <div class="mb-3 p-3 bg-brand-50/50 border border-brand-200 rounded-lg">
+          <label class="block text-sm font-medium text-brand-700 mb-1 flex items-center gap-1.5">
+            <i data-lucide="package" class="w-4 h-4"></i> Vorlagenpaket (Bestellung)
+          </label>
+          <select name="bundle_id" onchange="onPurchaseBundlePick(this.value)" class="w-full px-3 py-2 border border-brand-300 bg-white rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— kein Paket / manuell —</option>
+            ${(window._purchaseBundles || []).map(b => `<option value="${b.id}" ${(f.bundle_id || (id ? '' : (defaultPurchaseBundle?.id || '')))===b.id?'selected':''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
+          </select>
+          <p class="text-xs text-ink-500 mt-1">Bei Auswahl werden Titel + Texte aus dem Paket übernommen.</p>
+        </div>
+      ` : ''}
+
       <div class="space-y-3 mb-3">
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">B-Nr.</label>
@@ -11816,7 +11883,8 @@ async function openSupplierOrderModal(id, opts = {}) {
         </div>
         <div class="lg:col-span-2">
           <label class="block text-sm font-medium text-ink-700 mb-1">Einleitung</label>
-          <textarea name="description" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.description || '')}</textarea>
+          <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
+          <div id="purchase_intro_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
         </div>
       </div>
 
@@ -11829,7 +11897,8 @@ async function openSupplierOrderModal(id, opts = {}) {
 
       <div class="mt-5">
         <label class="block text-sm font-medium text-ink-700 mb-1">Schlusstext</label>
-        <textarea name="notes" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">${escapeHtml(f.notes || '')}</textarea>
+        <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
+        <div id="purchase_closing_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;"></div>
       </div>
 
       <button type="button" onclick="exportSupplierOrderAsPdf()" class="lg:hidden w-full mt-4 px-3 py-3 text-sm rounded-lg bg-ink-900 text-white hover:bg-ink-800 flex items-center justify-center gap-2 font-semibold">
@@ -11864,7 +11933,11 @@ async function openSupplierOrderModal(id, opts = {}) {
     _currentLock = { table: 'SupplierOrder', recordId: id };
     startLockHeartbeat('SupplierOrder', id);
   }
-  setTimeout(updatePurchasePreview, 100);
+  setTimeout(async () => {
+    await initSimpleQuillEditor('purchase_intro_editor', 'description', f.description || '', 'Einleitung — kann formatiert werden');
+    await initSimpleQuillEditor('purchase_closing_editor', 'notes', f.notes || '', 'Schlusstext — kann formatiert werden');
+  }, 60);
+  setTimeout(updatePurchasePreview, 200);
   const form = document.querySelector('form[data-purchase-form]');
   if (form) {
     let dbTimer = null;
@@ -11900,6 +11973,72 @@ function onPurchaseSupplierChange(value) {
       }
     }
   }
+}
+
+async function onPurchaseBundlePick(bundleId) {
+  if (!bundleId) return;
+  const hasContent = ['purchase_title','description','notes'].some(n => {
+    const el = document.querySelector(`#modalBox form[data-purchase-form] [name="${n}"]`);
+    return el && el.value && el.value.trim();
+  });
+  if (hasContent) {
+    if (!confirm('Aktuelle Eingaben durch das Paket ersetzen?')) {
+      const sel = document.querySelector('#modalBox select[name="bundle_id"]');
+      if (sel) sel.value = sel.dataset.prev || '';
+      return;
+    }
+  }
+  await applyPurchaseBundle(bundleId);
+  const sel = document.querySelector('#modalBox select[name="bundle_id"]');
+  if (sel) sel.dataset.prev = bundleId;
+}
+
+async function applyPurchaseBundle(bundleId, opts = {}) {
+  const bundle = (window._purchaseBundles || []).find(b => b.id === bundleId);
+  if (!bundle) return;
+  const f = bundle.fields || {};
+  const ctx = await buildPurchaseVariableContext();
+  const apply = (tplId, fieldName, editorId) => {
+    const tpl = (window._purchaseTemplates || []).find(t => t.id === tplId);
+    if (!tpl) return;
+    const content = substituteVariables(tpl.fields.content || '', 'Bestellung', ctx);
+    // Quill-Editor falls vorhanden, sonst Hidden-Input
+    if (editorId) {
+      const editorEl = document.getElementById(editorId);
+      if (editorEl) {
+        const quillContainer = editorEl.querySelector('.ql-editor');
+        if (quillContainer) {
+          if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(content)) {
+            quillContainer.innerHTML = content;
+          } else {
+            quillContainer.innerHTML = `<p>${escapeHtml(content)}</p>`;
+          }
+          // Hidden-Input syncen
+          const hidden = document.querySelector(`#modalBox form[data-purchase-form] input[name="${fieldName}"]`);
+          if (hidden) hidden.value = quillContainer.innerHTML;
+          return;
+        }
+      }
+    }
+    // Fallback: direkt den Hidden-Input setzen
+    const fld = document.querySelector(`#modalBox form[data-purchase-form] [name="${fieldName}"]`);
+    if (fld) {
+      fld.value = content;
+      fld.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  };
+  if (f.title_template_id) {
+    const tpl = (window._purchaseTemplates || []).find(t => t.id === f.title_template_id);
+    if (tpl) {
+      const content = substituteVariables(tpl.fields.content || '', 'Bestellung', ctx);
+      const titleEl = document.querySelector('#modalBox form[data-purchase-form] [name="purchase_title"]');
+      if (titleEl) { titleEl.value = content.replace(/<[^>]+>/g, '').trim(); titleEl.dispatchEvent(new Event('input', { bubbles: true })); }
+    }
+  }
+  if (f.intro_template_id)   apply(f.intro_template_id,   'description', 'purchase_intro_editor');
+  if (f.closing_template_id) apply(f.closing_template_id, 'notes',       'purchase_closing_editor');
+  if (typeof updatePurchasePreview === 'function') updatePurchasePreview();
+  if (!opts.silent) toast('Paket „' + (f.name || '–') + '" angewendet', 'success', 1500);
 }
 
 async function buildPurchaseVariableContext() {
@@ -12268,7 +12407,7 @@ async function _silentSavePurchaseHeader() {
   if (!form) return null;
   const fd = new FormData(form);
   const fields = {};
-  ['purchase_no','description','date','expected_delivery','status','payment_terms','delivery_terms','notes','purchase_title'].forEach(k => {
+  ['purchase_no','description','date','expected_delivery','status','payment_terms','delivery_terms','notes','purchase_title','bundle_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   fields.supplier_id = (fd.get('supplier_id') || '').trim();
@@ -12290,7 +12429,7 @@ async function saveSupplierOrder(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['purchase_no','description','date','expected_delivery','status','payment_terms','delivery_terms','notes','purchase_title'].forEach(k => {
+  ['purchase_no','description','date','expected_delivery','status','payment_terms','delivery_terms','notes','purchase_title','bundle_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   fields.supplier_id = (fd.get('supplier_id') || '').trim();
