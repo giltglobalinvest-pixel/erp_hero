@@ -313,6 +313,11 @@
         <p id="loginHint" class="text-xs text-brand-50/80 mt-1.5">Den Key bekommst du vom Admin.</p>
       </div>
 
+      <label class="flex items-center gap-2 select-none cursor-pointer">
+        <input id="loginRememberMe" type="checkbox" class="w-4 h-4 rounded border-ink-300 text-brand-500 focus:ring-2 focus:ring-white/60 bg-white">
+        <span class="text-sm text-white/95">Angemeldet bleiben <span class="text-brand-50/70 text-xs">(auf diesem Gerät, 30 Tage)</span></span>
+      </label>
+
       <button id="loginBtn" type="submit"
         class="w-full h-12 rounded-lg bg-ink-900 hover:bg-ink-800 active:bg-black text-white font-semibold transition flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed">
         <span id="loginBtnLabel">Login</span>
@@ -577,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.20';
+const APP_VERSION = 'v3.21';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -633,12 +638,90 @@ const APP_KEYS = {
 };
 
 /* ============================================================
-   AIRTABLE: AUTH
+   AUTH: Session-Token-basiert via Val.town-Proxy
+   - Login: User gibt User-Key ein → Proxy /auth → Session-Token zurück
+   - User-Key wird NIE persistiert (nur einmalig im Login-Form)
+   - Session-Token in localStorage (longLived) oder sessionStorage (Tab)
+   - Auto-Login validiert Token via /me am Proxy
+   - Bootstrap-Modus: solange apiProxyUrl noch nicht in Master-Base steht,
+     loggt der Admin direkt gegen Airtable ein (Legacy-Fallback)
    ============================================================ */
-async function loginWithUserKey(userKey) {
-  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
 
-  // 1. User in App-Base/User suchen
+const SESSION_STORAGE_KEY = 'session_token_' + APP_CONFIG.PROJECT_ID;
+const LEGACY_USER_KEY     = 'user_key_'       + APP_CONFIG.PROJECT_ID;
+
+function _getStoredToken() {
+  return localStorage.getItem(SESSION_STORAGE_KEY) || sessionStorage.getItem(SESSION_STORAGE_KEY) || '';
+}
+function _setStoredToken(token, longLived) {
+  if (longLived) {
+    localStorage.setItem(SESSION_STORAGE_KEY, token);
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  } else {
+    sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+  // Alten User-Key auf jeden Fall löschen
+  localStorage.removeItem(LEGACY_USER_KEY);
+  APP_KEYS.sessionToken = token;
+}
+function _clearStoredToken() {
+  localStorage.removeItem(SESSION_STORAGE_KEY);
+  sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  localStorage.removeItem(LEGACY_USER_KEY);
+  APP_KEYS.sessionToken = null;
+}
+
+// Master-Base Keys laden — nutzt nur den Read-Key (kein User nötig).
+// Wird beim Boot aufgerufen, damit apiProxyUrl bekannt ist, BEVOR
+// versucht wird, ein Session-Token zu validieren.
+async function loadProjectKeys() {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
+  try {
+    const res = await fetch(
+      'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' +
+      encodeURIComponent("{project_id}='" + APP_CONFIG.PROJECT_ID + "'"),
+      { headers }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      (data.records || []).forEach(rec => {
+        const f = rec.fields || {};
+        if (f.key_name === 'anthropicKey')           APP_KEYS.anthropicKey           = f.key_value;
+        if (f.key_name === 'airtableWriteKey')       APP_KEYS.airtableWriteKey       = f.key_value;
+        if (f.key_name === 'airtableBaseId')         APP_KEYS.appBaseId              = f.key_value;
+        if (f.key_name === 'apiProxyUrl')            APP_KEYS.apiProxyUrl            = f.key_value;
+        if (f.key_name === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl      = f.key_value;
+        if (f.key_name === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken    = f.key_value;
+        if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
+      });
+    }
+  } catch (_) {}
+  // Globale Fallback-Keys (anthropicKey)
+  if (!APP_KEYS.anthropicKey) {
+    try {
+      const res = await fetch(
+        'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + "/Keys?filterByFormula=" +
+        encodeURIComponent("{project_id}='GLOBAL'"),
+        { headers }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        (data.records || []).forEach(rec => {
+          const f = rec.fields || {};
+          if (f.key_name === 'anthropicKey') APP_KEYS.anthropicKey = f.key_value;
+        });
+      }
+    } catch (_) {}
+  }
+}
+
+// Bootstrap-Login: nur wenn kein Proxy konfiguriert. Validiert User direkt
+// gegen Airtable (read-only). Hinterlegt KEIN Session-Token, fordert beim
+// nächsten Reload erneuten Login. Sinnvoll für initiales Setup, bevor der
+// Wizard gelaufen ist.
+async function _bootstrapLogin(userKey) {
+  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
   const formula = "AND({api_key}='" + userKey.replace(/'/g, "\\'") + "',{status}='aktiv')";
   const userRes = await fetch(
     'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/User?filterByFormula=' + encodeURIComponent(formula),
@@ -648,47 +731,86 @@ async function loginWithUserKey(userKey) {
   const userData = await userRes.json();
   if (!userData.records || !userData.records.length) throw new Error('Ungültiger Key oder Account inaktiv');
   APP_KEYS.user = { ...userData.records[0].fields, _id: userData.records[0].id };
+  await Promise.all([loadCompanies(), loadUsersCache()]);
+  // Bootstrap-Modus: keine Persistenz. User muss bei nächstem Reload neu einloggen.
+  return APP_KEYS.user;
+}
 
-  // 2. Projekt-Keys laden
-  const projectKeysRes = await fetch(
-    'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' + encodeURIComponent("{project_id}='" + APP_CONFIG.PROJECT_ID + "'"),
-    { headers }
-  );
-  if (projectKeysRes.ok) {
-    const projectKeysData = await projectKeysRes.json();
-    (projectKeysData.records || []).forEach(rec => {
-      const f = rec.fields || {};
-      if (f.key_name === 'anthropicKey') APP_KEYS.anthropicKey = f.key_value;
-      if (f.key_name === 'airtableWriteKey') APP_KEYS.airtableWriteKey = f.key_value;
-      if (f.key_name === 'airtableBaseId') APP_KEYS.appBaseId = f.key_value;
-      if (f.key_name === 'apiProxyUrl')             APP_KEYS.apiProxyUrl            = f.key_value;
-      if (f.key_name === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl      = f.key_value;
-      if (f.key_name === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken    = f.key_value;
-      if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
-    });
+// Login via Proxy /auth → Session-Token, kein User-Key im Browser persistiert.
+async function loginWithUserKey(userKey, longLived = false) {
+  // Wenn Proxy noch nicht konfiguriert ist (frisches Setup): Bootstrap-Modus
+  if (!APP_KEYS.apiProxyUrl) {
+    return await _bootstrapLogin(userKey);
   }
+  const proxyBase = APP_KEYS.apiProxyUrl.replace(/\/+$/, '');
+  let res;
+  try {
+    res = await fetch(proxyBase + '/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_key: userKey, long_lived: !!longLived })
+    });
+  } catch (e) {
+    throw new Error('Proxy nicht erreichbar: ' + e.message);
+  }
+  if (!res.ok) {
+    let msg = 'Login fehlgeschlagen (HTTP ' + res.status + ')';
+    try { const ej = await res.json(); if (ej.error) msg = ej.error; } catch (_) {}
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  if (!data.session_token) throw new Error('Proxy hat kein Session-Token zurückgeliefert');
+  _setStoredToken(data.session_token, !!longLived);
+  APP_KEYS.user = {
+    _id: data.user.id,
+    name: data.user.name,
+    role: data.user.role,
+    is_admin: data.user.is_admin,
+    allowed_companies: data.user.allowed_companies || []
+  };
+  await Promise.all([loadCompanies(), loadUsersCache()]);
+  return APP_KEYS.user;
+}
 
-  // 3. Globale Fallback-Keys (anthropicKey)
-  if (!APP_KEYS.anthropicKey) {
-    const globalKeysRes = await fetch(
-      'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + "/Keys?filterByFormula=" + encodeURIComponent("{project_id}='GLOBAL'"),
-      { headers }
-    );
-    if (globalKeysRes.ok) {
-      const globalKeysData = await globalKeysRes.json();
-      (globalKeysData.records || []).forEach(rec => {
-        const f = rec.fields || {};
-        if (f.key_name === 'anthropicKey') APP_KEYS.anthropicKey = f.key_value;
+// Auto-Login beim App-Start: gespeichertes Session-Token via /me validieren.
+// Migriert zusätzlich legacy gespeicherte User-Keys: holt damit ein Session-Token.
+async function tryAutoLogin() {
+  // 1) Vorhandenes Session-Token validieren
+  const token = _getStoredToken();
+  if (token && APP_KEYS.apiProxyUrl) {
+    try {
+      const res = await fetch(APP_KEYS.apiProxyUrl.replace(/\/+$/, '') + '/me', {
+        headers: { 'Authorization': 'Bearer ' + token }
       });
+      if (res.ok) {
+        const data = await res.json();
+        APP_KEYS.user = {
+          _id: data.user.id,
+          name: data.user.name,
+          role: data.user.role,
+          is_admin: data.user.is_admin,
+          allowed_companies: data.user.allowed_companies || []
+        };
+        APP_KEYS.sessionToken = token;
+        await Promise.all([loadCompanies(), loadUsersCache()]);
+        return true;
+      }
+      // Token abgelaufen oder ungültig
+      _clearStoredToken();
+    } catch (_) { /* Proxy nicht erreichbar — Legacy-Migration unten versuchen */ }
+  }
+  // 2) Legacy: alter User-Key in localStorage → automatisch zu Session-Token migrieren
+  const legacyKey = localStorage.getItem(LEGACY_USER_KEY);
+  if (legacyKey) {
+    try {
+      // Legacy-Keys waren persistent → bei Migration ebenfalls "angemeldet bleiben"
+      await loginWithUserKey(legacyKey, true);
+      return true;
+    } catch (_) {
+      localStorage.removeItem(LEGACY_USER_KEY);
     }
   }
-
-  // 4. Firmen + User-Cache (für Lock-Anzeige) laden
-  await Promise.all([loadCompanies(), loadUsersCache()]);
-
-  // 5. Key persistieren
-  localStorage.setItem('user_key_' + APP_CONFIG.PROJECT_ID, userKey);
-  return APP_KEYS.user;
+  return false;
 }
 
 /* ============================================================
@@ -852,20 +974,19 @@ window.addEventListener('beforeunload', () => {
   } catch (e) {}
 });
 
-async function tryAutoLogin() {
-  const savedKey = localStorage.getItem('user_key_' + APP_CONFIG.PROJECT_ID);
-  if (!savedKey) return false;
-  try {
-    await loginWithUserKey(savedKey);
-    return true;
-  } catch (e) {
-    localStorage.removeItem('user_key_' + APP_CONFIG.PROJECT_ID);
-    return false;
+async function logout() {
+  // Session serverseitig invalidieren (best effort)
+  const token = _getStoredToken();
+  if (token && APP_KEYS.apiProxyUrl) {
+    try {
+      await fetch(APP_KEYS.apiProxyUrl.replace(/\/+$/, '') + '/logout', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token },
+        keepalive: true
+      });
+    } catch (_) {}
   }
-}
-
-function logout() {
-  localStorage.removeItem('user_key_' + APP_CONFIG.PROJECT_ID);
+  _clearStoredToken();
   for (const k in APP_KEYS) APP_KEYS[k] = null;
   location.reload();
 }
@@ -1105,17 +1226,19 @@ function _proxyBase() {
   // freshdeskProxyUrl für Migration aus älteren Setups.
   return APP_KEYS.apiProxyUrl || APP_KEYS.freshdeskProxyUrl || null;
 }
-function _userKeyForAuth() {
-  return localStorage.getItem('user_key_' + APP_CONFIG.PROJECT_ID) || '';
+// Liefert das aktuelle Bearer-Token: bevorzugt Session-Token, fällt auf
+// einen ggf. noch vorhandenen Legacy-User-Key zurück (für Übergang).
+function _bearerForProxy() {
+  return APP_KEYS.sessionToken || _getStoredToken() || localStorage.getItem(LEGACY_USER_KEY) || '';
 }
 async function proxyFetch(path, opts = {}) {
   const base = _proxyBase();
   if (!base) throw new Error('API-Proxy nicht konfiguriert. Bitte Admin → Einstellungen → Val.town-Setup ausführen.');
-  const userKey = _userKeyForAuth();
-  if (!userKey) throw new Error('Nicht eingeloggt — User-Key fehlt für Proxy-Auth');
+  const bearer = _bearerForProxy();
+  if (!bearer) throw new Error('Nicht eingeloggt — Session-Token fehlt für Proxy-Auth');
   const url = base.replace(/\/+$/, '') + '/' + String(path).replace(/^\/+/, '');
   const headers = Object.assign({
-    'Authorization': 'Bearer ' + userKey,
+    'Authorization': 'Bearer ' + bearer,
     'Accept': 'application/json'
   }, opts.headers || {});
   if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
@@ -2007,9 +2130,14 @@ async function openUserModal(id) {
         ${companiesHtml}
       </div>
 
-      <div class="flex justify-end gap-2">
-        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
-        <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+      <div class="flex justify-between items-center gap-2 flex-wrap">
+        <div>
+          ${id ? `<button type="button" onclick="revokeAllSessions('${id}', '${escapeHtml((f.name || '').replace(/'/g, ''))}')" class="text-xs text-red-600 hover:text-red-800 flex items-center gap-1" title="Alle aktiven Browser-Sessions dieses Users im Val.town-Proxy invalidieren"><i data-lucide="log-out" class="w-3.5 h-3.5"></i> Alle Sessions abmelden</button>` : ''}
+        </div>
+        <div class="flex gap-2">
+          <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
+          <button type="submit" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600">Speichern</button>
+        </div>
       </div>
     </form>
   `);
@@ -2047,6 +2175,34 @@ async function toggleUserStatus(id, currentlyInactive) {
     renderAdminUsers();
     toast(currentlyInactive ? 'Aktiviert' : 'Deaktiviert', 'success');
   } catch (err) { toast(err.message, 'error'); }
+}
+
+// Alle aktiven Browser-Sessions eines Users im Val.town-Proxy invalidieren.
+// Nützlich z.B. bei verlorenem Handy oder Mitarbeiter-Austritt.
+async function revokeAllSessions(userId, userName) {
+  if (!APP_KEYS.user?.is_admin) return toast('Nur für Admins', 'error');
+  if (!APP_KEYS.apiProxyUrl) return toast('API-Proxy nicht konfiguriert', 'error');
+  const label = userName ? '"' + userName + '"' : 'diesem User';
+  if (!confirm('Alle aktiven Browser-Sessions von ' + label + ' im Proxy abmelden?\n\n• Alle offenen Browser-Tabs/Handys werden beim nächsten Call abgemeldet.\n• Login-Key bleibt unverändert — User kann sich danach normal neu einloggen.\n• Bei Mitarbeiter-Austritt zusätzlich Status auf "inaktiv" setzen.')) return;
+  try {
+    const res = await fetch(APP_KEYS.apiProxyUrl.replace(/\/+$/, '') + '/sessions/revoke-user', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + (APP_KEYS.sessionToken || _getStoredToken()),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ user_id: userId })
+    });
+    if (!res.ok) {
+      let msg = 'Fehler (HTTP ' + res.status + ')';
+      try { const ej = await res.json(); if (ej.error) msg = ej.error; } catch (_) {}
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    toast(data.revoked + ' Session(s) abgemeldet', 'success');
+  } catch (e) {
+    toast(e.message, 'error', 6000);
+  }
 }
 
 /* ============================================================
@@ -2695,20 +2851,26 @@ async function deleteQuoteBundle(id) {
 // Settings-UI angezeigt; User legt einen "HTTP val" in Val.town an
 // und fügt diesen Code ein. Alle Secrets kommen aus env vars oder
 // vom Airtable User-Record (per-User Freshdesk-Key).
-const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy
+const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth
 // =====================================================================
 // HTTP-Val für Val.town. Routet:
-//   POST /anthropic/v1/messages   →  api.anthropic.com (mit ANTHROPIC_API_KEY)
-//   GET  /freshdesk/api/v2/...    →  <domain>.freshdesk.com
-//                                     (User-eigener Key bevorzugt,
-//                                      env var FRESHDESK_API_KEY als Fallback)
-//   GET  /health                  →  nur Auth-Check (für "Verbindung testen")
+//   POST /auth                     →  Login: User-Key prüfen, Session-Token ausgeben
+//   POST /logout                   →  aktuelle Session invalidieren
+//   GET  /me                       →  aktuellen User abrufen (für Auto-Login)
+//   POST /sessions/revoke-user     →  ALLE Sessions eines Users killen (Admin only)
+//   POST /anthropic/v1/messages    →  api.anthropic.com (mit ANTHROPIC_API_KEY)
+//   GET  /freshdesk/api/v2/...     →  <domain>.freshdesk.com
+//                                      (User-eigener Key bevorzugt,
+//                                       env var FRESHDESK_API_KEY als Fallback)
+//   GET  /health                   →  Auth-Check (für "Verbindung testen")
 //
-// Auth: Browser sendet "Authorization: Bearer <user_api_key>".
-//   Der Proxy schaut den Key in Airtable User-Tabelle nach (status='aktiv').
-//   Lookup ist 60 s gecached, damit aktive User keine Latenz spüren.
-//   Aus dem User-Record wird auch das Feld 'freshdesk_api_key' gelesen
-//   und für Freshdesk-Calls bevorzugt verwendet (statt env var).
+// Auth-Flow:
+//   1) Browser POSTet user_key an /auth → bekommt session_token zurück
+//   2) Browser nutzt für alle weiteren Calls "Authorization: Bearer <session_token>"
+//   3) User-Key wird im Browser nirgends persistiert
+//   4) Session-Token läuft ab (8h kurz, 30d lang) und liegt nur in In-Memory-Map
+//   5) Legacy-Modus: Bearer-Token kann auch ein User-Key sein (für Übergang;
+//      sollte nach kompletter Migration aller Browser-Tabs entfernt werden)
 //
 // ENV VARS in Val.town setzen:
 //   AIRTABLE_READ_KEY   — Read-Token mit Scope auf App-Base
@@ -2718,8 +2880,17 @@ const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy
 //   FRESHDESK_API_KEY   — (optional) Fallback wenn User keinen eigenen Key hat
 // =====================================================================
 
-const USER_CACHE = new Map(); // userKey → { user, expires }
-const CACHE_TTL_MS = 60_000;
+const USER_CACHE    = new Map(); // userKey → { user, expires }
+const SESSIONS      = new Map(); // sessionToken → { userId, name, isAdmin, freshdeskApiKey, expires, longLived }
+const CACHE_TTL_MS  = 60_000;
+const SESSION_SHORT = 8 * 60 * 60 * 1000;        // 8 h
+const SESSION_LONG  = 30 * 24 * 60 * 60 * 1000;  // 30 d
+
+function generateSessionToken(): string {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 async function lookupUser(userKey: string) {
   const cached = USER_CACHE.get(userKey);
@@ -2737,11 +2908,47 @@ async function lookupUser(userKey: string) {
   const user = {
     id: rec.id,
     name: rec.fields.name || "",
+    role: rec.fields.role || "",
     is_admin: !!rec.fields.is_admin,
+    allowed_companies: rec.fields.allowed_companies || [],
     freshdesk_api_key: (rec.fields.freshdesk_api_key || "").trim() || null
   };
   USER_CACHE.set(userKey, { user, expires: Date.now() + CACHE_TTL_MS });
   return user;
+}
+
+// Resolves a Bearer token to user info. Tries session map first, then
+// falls back to legacy direct-user-key lookup (for migration).
+async function resolveAuth(token: string) {
+  if (!token) return null;
+  // 1) Session token (preferred)
+  const sess = SESSIONS.get(token);
+  if (sess) {
+    if (sess.expires < Date.now()) { SESSIONS.delete(token); return null; }
+    return {
+      kind: "session",
+      userId: sess.userId,
+      name: sess.name,
+      role: sess.role || "",
+      is_admin: sess.isAdmin,
+      allowed_companies: sess.allowedCompanies || [],
+      freshdesk_api_key: sess.freshdeskApiKey
+    };
+  }
+  // 2) Legacy: Bearer == user_key (Übergangsmodus, nicht persistieren)
+  try {
+    const u = await lookupUser(token);
+    if (u) return {
+      kind: "legacy",
+      userId: u.id,
+      name: u.name,
+      role: u.role,
+      is_admin: u.is_admin,
+      allowed_companies: u.allowed_companies,
+      freshdesk_api_key: u.freshdesk_api_key
+    };
+  } catch (_) { /* fall through */ }
+  return null;
 }
 
 function jsonResponse(body: unknown, status = 200) {
@@ -2770,26 +2977,93 @@ export default async function (req: Request): Promise<Response> {
     });
   }
 
-  // 1) Auth — User-Key aus Bearer-Header
-  const auth = req.headers.get("authorization") || "";
-  const userKey = auth.replace(/^Bearer\\s+/i, "").trim();
-  if (!userKey) return jsonResponse({ error: "Missing Bearer token (user api_key)" }, 401);
-  let user;
-  try {
-    user = await lookupUser(userKey);
-  } catch (e) {
-    return jsonResponse({ error: e.message }, 500);
-  }
-  if (!user) return jsonResponse({ error: "Ungültiger User-Key oder Account inaktiv" }, 401);
-
-  // 2) Pfad parsen
   const url = new URL(req.url);
   const path = url.pathname.replace(/^\\/+/, "");
 
+  // ===== /auth: Login mit user_key, gibt session_token zurück =====
+  if (path === "auth" && req.method === "POST") {
+    let body: any = {};
+    try { body = await req.json(); } catch (_) {}
+    const userKey = (body.user_key || "").toString().trim();
+    const longLived = !!body.long_lived;
+    if (!userKey) return jsonResponse({ error: "user_key fehlt" }, 400);
+    let user;
+    try { user = await lookupUser(userKey); }
+    catch (e) { return jsonResponse({ error: e.message }, 500); }
+    if (!user) return jsonResponse({ error: "Ungültiger Login-Key oder Account inaktiv" }, 401);
+    const token = generateSessionToken();
+    const ttl = longLived ? SESSION_LONG : SESSION_SHORT;
+    SESSIONS.set(token, {
+      userId: user.id,
+      name: user.name,
+      role: user.role,
+      isAdmin: user.is_admin,
+      allowedCompanies: user.allowed_companies,
+      freshdeskApiKey: user.freshdesk_api_key,
+      expires: Date.now() + ttl,
+      longLived
+    });
+    return jsonResponse({
+      session_token: token,
+      expires_in: Math.floor(ttl / 1000),
+      user: {
+        id: user.id,
+        name: user.name,
+        role: user.role,
+        is_admin: user.is_admin,
+        allowed_companies: user.allowed_companies,
+        has_freshdesk_key: !!user.freshdesk_api_key
+      }
+    });
+  }
+
+  // 1) Auth — Token aus Bearer-Header (Session-Token oder legacy User-Key)
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.replace(/^Bearer\\s+/i, "").trim();
+  if (!token) return jsonResponse({ error: "Missing Bearer token" }, 401);
+  const user = await resolveAuth(token);
+  if (!user) return jsonResponse({ error: "Ungültiges Token oder abgelaufen" }, 401);
+
+  // ===== /logout: aktuelle Session killen =====
+  if (path === "logout" && req.method === "POST") {
+    if (user.kind === "session") SESSIONS.delete(token);
+    return jsonResponse({ ok: true });
+  }
+
+  // ===== /me: aktuelle User-Daten (für Auto-Login) =====
+  if (path === "me") {
+    return jsonResponse({
+      user: {
+        id: user.userId,
+        name: user.name,
+        role: user.role,
+        is_admin: user.is_admin,
+        allowed_companies: user.allowed_companies,
+        has_freshdesk_key: !!user.freshdesk_api_key
+      }
+    });
+  }
+
+  // ===== /sessions/revoke-user: Admin killt alle Sessions eines Users =====
+  if (path === "sessions/revoke-user" && req.method === "POST") {
+    if (!user.is_admin) return jsonResponse({ error: "Nur für Admins" }, 403);
+    let body: any = {};
+    try { body = await req.json(); } catch (_) {}
+    const targetId = (body.user_id || "").toString();
+    if (!targetId) return jsonResponse({ error: "user_id fehlt" }, 400);
+    let count = 0;
+    for (const [k, v] of SESSIONS.entries()) {
+      if (v.userId === targetId) { SESSIONS.delete(k); count++; }
+    }
+    return jsonResponse({ revoked: count });
+  }
+
+  // 2) Pfad-Routing für proxied Calls
   // Health-Check (für "Verbindung testen" in der App)
   if (path === "health") {
     return jsonResponse({
       ok: true,
+      auth_kind: user.kind,
       user: {
         name: user.name,
         is_admin: user.is_admin,
@@ -2997,15 +3271,24 @@ async function renderAdminSettings() {
       <!-- Architektur-Diagramm -->
       <div class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl p-4 mb-4">
         <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Architektur</p>
-        <pre class="text-[11px] sm:text-xs text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Browser (ERP)  ──[ Bearer: User-Key ]──▶  Val.town-Proxy  ──┬──▶  Anthropic   (env var)
-                                                            │
-                                                            └──▶  Freshdesk   (User.freshdesk_api_key
-                                                                              · env-var-Fallback)
+        <pre class="text-[11px] sm:text-xs text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Login (1×):  Browser ──[ user_key, einmalig ]──▶  Val.town  ──▶  Airtable User-Tabelle
+             Browser ◀──[ session_token       ]──   Val.town
+             User-Key wird im Browser SOFORT vergessen ✓
 
-Val.town liest:    User-Record aus Airtable (User-Key validieren + freshdesk_api_key)
-Val.town hält:     ANTHROPIC_API_KEY · AIRTABLE_READ_KEY · (optional FRESHDESK_API_KEY)
-Browser hält nur:  User-API-Key (jeder Mitarbeiter individuell)</pre>
-        <p class="text-[11px] text-emerald-800 mt-2 flex items-start gap-1.5"><i data-lucide="info" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>Freshdesk pro Mitarbeiter:</strong> Persönliche Freshdesk-Keys werden direkt am User-Record gepflegt (Admin → Benutzer → Bearbeiten). Tickets, die von der App aus aktualisiert werden, erscheinen in Freshdesk unter dem jeweiligen Mitarbeiter-Account.</span></p>
+Calls:       Browser ──[ Bearer: session_token ]──▶  Val.town  ──┬──▶  Anthropic   (env var)
+                                                                  │
+                                                                  └──▶  Freshdesk   (User.freshdesk_api_key
+                                                                                    · env-var-Fallback)
+
+Browser hält:    session_token (8h Tab / 30 Tage Gerät · kurzlebig)
+Val.town hält:   In-Memory Session-Map · ANTHROPIC_API_KEY · AIRTABLE_READ_KEY
+                 (optional FRESHDESK_API_KEY-Fallback)
+Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
+        <div class="text-[11px] text-emerald-800 mt-2 space-y-1.5">
+          <p class="flex items-start gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>User-Login-Key</strong> wird nirgendwo im Browser persistiert — er steht nur einmalig im Login-Form und wird nach erfolgreichem Login sofort verworfen.</span></p>
+          <p class="flex items-start gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>Session-Token</strong> ist kurzlebig und kann jederzeit zentral invalidiert werden (Admin → Benutzer → „Alle Sessions abmelden").</span></p>
+          <p class="flex items-start gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>Persönliche Freshdesk-Keys</strong> liegen serverseitig in Airtable und werden nie an den Browser ausgeliefert.</span></p>
+        </div>
       </div>
 
       <!-- Setup-Status -->
@@ -10801,9 +11084,14 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
   clearLoginError();
   const key = document.getElementById('loginKey').value.trim();
   if (!key) return showLoginError('Bitte Key eingeben.');
+  const longLived = !!document.getElementById('loginRememberMe')?.checked;
   setLoginLoading(true);
   try {
-    await loginWithUserKey(key);
+    await loginWithUserKey(key, longLived);
+    // Eingegebenen Key sofort aus dem Form-Feld entfernen, damit er nicht
+    // im DOM verbleibt (auch nicht im Browser-State zurück-Navigation)
+    const keyEl = document.getElementById('loginKey');
+    if (keyEl) keyEl.value = '';
     toast('Willkommen zurück, ' + (APP_KEYS.user?.name || 'Kollege') + '!', 'success');
     showApp();
   } catch (err) {
@@ -10812,6 +11100,15 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     setLoginLoading(false);
   }
 });
+
+// Default: "Angemeldet bleiben" auf Touch-Geräten (Handy/Tablet) vorausgewählt,
+// auf Desktop nicht. Wird beim ersten Login-Form-Render gesetzt.
+function _setDefaultRememberMe() {
+  const cb = document.getElementById('loginRememberMe');
+  if (!cb) return;
+  const isTouch = (navigator.maxTouchPoints || 0) > 0 || /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent || '');
+  cb.checked = isTouch;
+}
 
 /* ============================================================
    UPDATE-CHECK (raw.githubusercontent.com — bypasst GitHub-Pages-CDN)
@@ -16839,7 +17136,14 @@ async function init() {
   document.getElementById('loginVersionLabel').textContent = APP_VERSION;
   setupPwaAssets();
 
-  // Auto-Login
+  // 1) Master-Base Keys laden (read-only, kein User nötig). Liefert vor allem
+  //    apiProxyUrl, ohne die kein /me-Call gegen Val.town möglich wäre.
+  await loadProjectKeys();
+
+  // 2) Default-Status der "Angemeldet bleiben"-Checkbox je Gerät
+  _setDefaultRememberMe();
+
+  // 3) Auto-Login: Session-Token validieren oder legacy User-Key migrieren
   const ok = await tryAutoLogin();
   if (ok) showApp();
   else showLoginScreen();
