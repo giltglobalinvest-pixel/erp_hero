@@ -543,7 +543,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.00';
+const APP_VERSION = 'v3.01';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10596,15 +10596,10 @@ async function openOrderModal(id, opts = {}) {
     _currentLock = { table: 'Order', recordId: id };
     startLockHeartbeat('Order', id);
   }
-  // Quill-Editoren für Einleitung + Schlusstext (analog Quote)
+  // Quill-Editoren für Einleitung + Schlusstext (analog Quote) — Toggle bleibt eingeklappt
   setTimeout(async () => {
     await initSimpleQuillEditor('order_intro_editor', 'description', f.description || '', 'Einleitung — kann formatiert werden');
     await initSimpleQuillEditor('order_closing_editor', 'notes', f.notes || '', 'Schlusstext — kann formatiert werden');
-    // Wenn bestehender Inhalt vorhanden → Toggle auto-öffnen
-    const hasAdv = (f.order_title || '').trim()
-      || splitDescriptionTitleAndBody(f.description || '').title
-      || splitDescriptionTitleAndBody(f.notes || '').title;
-    if (hasAdv) toggleOrderAdvanced();
   }, 60);
   setTimeout(updateOrderPreview, 200);
   // Form-Listener für live preview
@@ -11929,10 +11924,6 @@ async function openSupplierOrderModal(id, opts = {}) {
   setTimeout(async () => {
     await initSimpleQuillEditor('purchase_intro_editor', 'description', f.description || '', 'Einleitung — kann formatiert werden');
     await initSimpleQuillEditor('purchase_closing_editor', 'notes', f.notes || '', 'Schlusstext — kann formatiert werden');
-    const hasAdv = (f.purchase_title || '').trim()
-      || splitDescriptionTitleAndBody(f.description || '').title
-      || splitDescriptionTitleAndBody(f.notes || '').title;
-    if (hasAdv) togglePurchaseAdvanced();
   }, 60);
   setTimeout(updatePurchasePreview, 200);
   const form = document.querySelector('form[data-purchase-form]');
