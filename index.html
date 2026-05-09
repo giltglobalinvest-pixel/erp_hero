@@ -410,10 +410,6 @@
             <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
           </button>
           <div class="nav-items pl-2 mt-1 space-y-0.5 hidden">
-            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
-              <i data-lucide="mail-search" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Preisanfragen</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.4</span>
-            </button>
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="bestellungen">
               <i data-lucide="shopping-cart" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Bestellungen</span>
             </button>
@@ -543,7 +539,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.01';
+const APP_VERSION = 'v3.02';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1072,7 +1068,7 @@ function renderWelcome() {
         ${roadmapCard('v1.1', 'Stammdaten', 'database', 'next', 'Kunden, Lieferanten, Artikel')}
         ${roadmapCard('v1.2', 'Angebote', 'file-text', 'soon', 'Editor mit Empfänger & Positionen')}
         ${roadmapCard('v1.3', 'Verkauf', 'shopping-cart', 'soon', 'Aufträge, Lieferscheine, Rechnungen')}
-        ${roadmapCard('v1.4', 'Einkauf', 'mail-search', 'soon', 'Preisanfragen & Bestellungen')}
+        ${roadmapCard('v1.4', 'Einkauf', 'shopping-cart', 'soon', 'Bestellungen')}
         ${roadmapCard('v1.5', 'Statistiken', 'bar-chart-3', 'soon', 'Auswertungen & KI-Insights')}
       </div>
 
