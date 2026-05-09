@@ -459,9 +459,14 @@
             <i data-lucide="chevron-down" class="w-4 h-4 nav-chevron transition-transform"></i>
           </button>
           <div class="nav-items pl-2 mt-1 space-y-0.5 hidden">
-            <button class="nav-item disabled w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 cursor-not-allowed">
-              <i data-lucide="bar-chart-3" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Auswertungen</span>
-              <span class="text-[10px] uppercase tracking-wider bg-white/15 px-1.5 py-0.5 rounded">v1.5</span>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="statistik-sales">
+              <i data-lucide="trending-up" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Sales</span>
+            </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="statistik-angebote">
+              <i data-lucide="file-text" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Angebote</span>
+            </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="statistik-umsatz">
+              <i data-lucide="euro" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Umsatz</span>
             </button>
           </div>
         </div>
@@ -568,7 +573,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.14';
+const APP_VERSION = 'v3.15';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1359,6 +1364,9 @@ function dispatchRoute(route) {
     case 'lieferscheine':   renderDeliveryNotes(); break;
     case 'rechnungen':      renderInvoices(); break;
     case 'bestellungen':    renderSupplierOrders(); break;
+    case 'statistik-sales':    renderStatsSales(); break;
+    case 'statistik-angebote': renderStatsQuotes(); break;
+    case 'statistik-umsatz':   renderStatsRevenue(); break;
     case 'admin-companies': renderAdminCompanies(); break;
     case 'admin-users':     renderAdminUsers(); break;
     case 'admin-templates': renderAdminTextemplates(); break;
@@ -15747,6 +15755,392 @@ async function launchInvoiceFromOrder(orderId) {
   } catch (err) {
     toast('Fehler beim Erzeugen: ' + err.message, 'error', 5000);
   }
+}
+
+/* ============================================================
+   STATISTIKEN — Sales / Angebote / Umsatz
+   Aggregiert clientseitig aus Quote / Order / Invoice / Customer / Article.
+   ============================================================ */
+
+function _statsKpiCard(label, value, sub, icon, color) {
+  const colors = {
+    emerald: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+    blue:    'text-blue-700 bg-blue-50 border-blue-200',
+    violet:  'text-violet-700 bg-violet-50 border-violet-200',
+    amber:   'text-amber-700 bg-amber-50 border-amber-200',
+    rose:    'text-rose-700 bg-rose-50 border-rose-200',
+    ink:     'text-ink-700 bg-ink-50 border-ink-200',
+  }[color] || 'text-ink-700 bg-ink-50 border-ink-200';
+  return `
+    <div class="rounded-2xl border ${colors} p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <i data-lucide="${icon}" class="w-4 h-4"></i>
+        <p class="text-xs uppercase tracking-wider font-semibold opacity-80">${escapeHtml(label)}</p>
+      </div>
+      <p class="text-2xl font-bold">${escapeHtml(value)}</p>
+      ${sub ? `<p class="text-xs opacity-70 mt-1">${escapeHtml(sub)}</p>` : ''}
+    </div>
+  `;
+}
+
+function _statsBar(label, value, max, valueLabel, color) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0;
+  const fillCls = {
+    emerald: 'bg-emerald-500',
+    blue:    'bg-blue-500',
+    violet:  'bg-violet-500',
+    amber:   'bg-amber-500',
+    rose:    'bg-rose-500',
+    brand:   'bg-brand-500',
+  }[color] || 'bg-brand-500';
+  return `
+    <div class="mb-3">
+      <div class="flex items-baseline justify-between gap-2 mb-1">
+        <span class="text-sm text-ink-700 truncate">${escapeHtml(label)}</span>
+        <span class="text-xs font-mono tabular-nums text-ink-500 shrink-0">${escapeHtml(valueLabel)}</span>
+      </div>
+      <div class="h-2 bg-ink-100 rounded-full overflow-hidden">
+        <div class="h-full ${fillCls} rounded-full transition-all" style="width:${pct}%"></div>
+      </div>
+    </div>
+  `;
+}
+
+function _statsTabs(active) {
+  const tabs = [
+    { id: 'sales',    label: 'Sales',    icon: 'trending-up' },
+    { id: 'angebote', label: 'Angebote', icon: 'file-text'   },
+    { id: 'umsatz',   label: 'Umsatz',   icon: 'euro'        },
+  ];
+  return `
+    <div class="flex gap-1 mb-6 bg-ink-100 p-1 rounded-xl w-fit">
+      ${tabs.map(t => `
+        <button type="button" onclick="dispatchRoute('statistik-${t.id}')" class="px-3 py-1.5 text-sm rounded-lg flex items-center gap-1.5 ${active===t.id ? 'bg-white shadow-sm text-ink-900 font-semibold' : 'text-ink-600 hover:text-ink-900'}">
+          <i data-lucide="${t.icon}" class="w-4 h-4"></i> ${t.label}
+        </button>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function _statsLoadCommonData() {
+  const cur = getCurrentCompany();
+  if (!cur) return null;
+  const [quotes, orders, invoices, customers, articles, orderItems, invoiceItems] = await Promise.all([
+    readData('Quote').catch(()=>[]),
+    readData('Order').catch(()=>[]),
+    readData('Invoice').catch(()=>[]),
+    readData('Customer').catch(()=>[]),
+    readData('Article').catch(()=>[]),
+    readData('OrderItem').catch(()=>[]),
+    readData('InvoiceItem').catch(()=>[]),
+  ]);
+  const inCo = arr => arr.filter(r => {
+    const cid = r.fields.company_id;
+    return Array.isArray(cid) ? cid.includes(cur.id) : cid === cur.id;
+  });
+  return {
+    cur,
+    quotes:    inCo(quotes).filter(q => (q.fields.status || 'Entwurf') !== 'archiviert'),
+    orders:    inCo(orders).filter(o => (o.fields.status || 'Entwurf') !== 'archiviert'),
+    invoices:  inCo(invoices).filter(i => (i.fields.status || 'Entwurf') !== 'archiviert'),
+    customers: inCo(customers),
+    articles:  inCo(articles),
+    orderItems, invoiceItems,
+  };
+}
+
+async function renderStatsSales() {
+  setPageTitle('Statistik · Sales');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = '<div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt.</div></div>';
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Daten…</p>';
+  const data = await _statsLoadCommonData();
+  if (!data) return;
+  const { quotes, orders, invoices, customers, articles, orderItems } = data;
+
+  // KPIs
+  const totalQuotes   = quotes.length;
+  const totalOrders   = orders.length;
+  const totalInvoices = invoices.length;
+  const totalRevenue  = invoices
+    .filter(i => (i.fields.status || 'Entwurf') !== 'Entwurf' && i.fields.status !== 'Storniert')
+    .reduce((sum, i) => sum + (+(i.fields.total_gross || 0)), 0);
+  const conversionRate = totalQuotes > 0 ? Math.round((totalOrders / totalQuotes) * 100) : 0;
+
+  // Top Kunden nach Auftrag-Volumen (Brutto)
+  const custMap = {}; customers.forEach(c => { custMap[c.id] = c.fields; });
+  const revenueByCustomer = {};
+  orders.forEach(o => {
+    const cid = _readIdValue(o.fields.customer_id);
+    if (!cid) return;
+    revenueByCustomer[cid] = (revenueByCustomer[cid] || 0) + (+(o.fields.total_gross || 0));
+  });
+  const topCustomers = Object.entries(revenueByCustomer)
+    .map(([id, sum]) => ({ id, sum, name: custMap[id]?.name1 || '–' }))
+    .sort((a,b) => b.sum - a.sum)
+    .slice(0, 8);
+  const maxCust = topCustomers[0]?.sum || 0;
+
+  // Top Artikel nach Position-Anzahl in Aufträgen
+  const articleMap = {}; articles.forEach(a => { articleMap[a.id] = a.fields; });
+  const articleStats = {};
+  orderItems.forEach(it => {
+    const aid = _readIdValue(it.fields.article_id);
+    if (!aid) return;
+    if (!articleStats[aid]) articleStats[aid] = { count: 0, qty: 0, revenue: 0 };
+    articleStats[aid].count++;
+    articleStats[aid].qty += +(it.fields.qty || 0);
+    articleStats[aid].revenue += +(it.fields.line_total_net || 0);
+  });
+  const topArticles = Object.entries(articleStats)
+    .map(([id, s]) => ({ id, ...s, name: articleMap[id]?.name1 || '–', no: articleMap[id]?.article_no || '' }))
+    .sort((a,b) => b.revenue - a.revenue)
+    .slice(0, 8);
+  const maxArt = topArticles[0]?.revenue || 0;
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-6xl mx-auto">
+      ${_statsTabs('sales')}
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        ${_statsKpiCard('Angebote', String(totalQuotes), 'gesamt', 'file-text', 'emerald')}
+        ${_statsKpiCard('Aufträge', String(totalOrders), `${conversionRate}% Conversion`, 'file-check-2', 'blue')}
+        ${_statsKpiCard('Rechnungen', String(totalInvoices), 'gesamt', 'euro', 'rose')}
+        ${_statsKpiCard('Umsatz (brutto)', formatPrice(totalRevenue) + ' €', 'aus festgeschriebenen Rechnungen', 'trending-up', 'violet')}
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="bg-white rounded-2xl shadow-card p-5">
+          <div class="flex items-baseline justify-between mb-4">
+            <h3 class="font-semibold text-ink-900">Top Kunden</h3>
+            <span class="text-xs text-ink-500">nach Auftrags-Volumen</span>
+          </div>
+          ${topCustomers.length === 0
+            ? '<p class="text-sm text-ink-500 italic">Noch keine Aufträge.</p>'
+            : topCustomers.map(c => _statsBar(c.name, c.sum, maxCust, formatPrice(c.sum) + ' €', 'blue')).join('')}
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-card p-5">
+          <div class="flex items-baseline justify-between mb-4">
+            <h3 class="font-semibold text-ink-900">Top Artikel</h3>
+            <span class="text-xs text-ink-500">nach Umsatz (netto)</span>
+          </div>
+          ${topArticles.length === 0
+            ? '<p class="text-sm text-ink-500 italic">Noch keine Auftrags-Positionen.</p>'
+            : topArticles.map(a => _statsBar(
+                a.name + (a.no ? ` <span class="text-ink-400 font-mono text-xs">${escapeHtml(a.no)}</span>` : ''),
+                a.revenue, maxArt,
+                formatPrice(a.revenue) + ' € · ' + a.qty.toFixed(0) + 'x', 'emerald'
+              )).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function renderStatsQuotes() {
+  setPageTitle('Statistik · Angebote');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = '<div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt.</div></div>';
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Daten…</p>';
+  const data = await _statsLoadCommonData();
+  if (!data) return;
+  const { quotes, orders } = data;
+
+  const totalQuotes = quotes.length;
+  const totalQuoteValue = quotes.reduce((s, q) => s + (+(q.fields.total_gross || 0)), 0);
+  const avgQuoteValue = totalQuotes > 0 ? totalQuoteValue / totalQuotes : 0;
+
+  // Status-Verteilung
+  const byStatus = {};
+  quotes.forEach(q => {
+    const s = q.fields.status || 'Entwurf';
+    byStatus[s] = (byStatus[s] || 0) + 1;
+  });
+  const statusOrder = ['Entwurf','versendet','angenommen','abgelehnt','abgelaufen'];
+  const statusList = statusOrder.map(s => ({ status: s, count: byStatus[s] || 0 })).filter(s => s.count > 0);
+  Object.keys(byStatus).forEach(s => {
+    if (!statusOrder.includes(s)) statusList.push({ status: s, count: byStatus[s] });
+  });
+  const maxStatus = Math.max(...statusList.map(s => s.count), 1);
+
+  // Conversion: Quotes mit verlinktem Auftrag
+  const quoteIdsWithOrder = new Set();
+  orders.forEach(o => {
+    const qid = _readIdValue(o.fields.quote_id);
+    if (qid) quoteIdsWithOrder.add(qid);
+  });
+  const convertedCount = quotes.filter(q => quoteIdsWithOrder.has(q.id)).length;
+  const conversionRate = totalQuotes > 0 ? Math.round((convertedCount / totalQuotes) * 100) : 0;
+
+  // Top: höchste Angebote
+  const topQuotes = [...quotes]
+    .filter(q => +(q.fields.total_gross || 0) > 0)
+    .sort((a,b) => (+(b.fields.total_gross || 0)) - (+(a.fields.total_gross || 0)))
+    .slice(0, 8);
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-6xl mx-auto">
+      ${_statsTabs('angebote')}
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        ${_statsKpiCard('Angebote gesamt', String(totalQuotes), '', 'file-text', 'emerald')}
+        ${_statsKpiCard('Volumen gesamt', formatPrice(totalQuoteValue) + ' €', 'brutto', 'euro', 'violet')}
+        ${_statsKpiCard('Ø Angebotswert', formatPrice(avgQuoteValue) + ' €', '', 'calculator', 'blue')}
+        ${_statsKpiCard('Conversion', conversionRate + '%', `${convertedCount} → Auftrag`, 'arrow-right-circle', 'amber')}
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div class="bg-white rounded-2xl shadow-card p-5">
+          <h3 class="font-semibold text-ink-900 mb-4">Status-Verteilung</h3>
+          ${statusList.length === 0
+            ? '<p class="text-sm text-ink-500 italic">Noch keine Angebote.</p>'
+            : statusList.map(s => _statsBar(s.status, s.count, maxStatus, s.count + (totalQuotes > 0 ? ` (${Math.round((s.count/totalQuotes)*100)}%)` : ''), 'emerald')).join('')}
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-card p-5">
+          <h3 class="font-semibold text-ink-900 mb-4">Top Angebote nach Wert</h3>
+          ${topQuotes.length === 0
+            ? '<p class="text-sm text-ink-500 italic">Noch keine Angebote mit Wert.</p>'
+            : '<div class="space-y-2">' + topQuotes.map(q => `
+                <button type="button" onclick="openQuoteModal('${q.id}')" class="w-full text-left p-3 bg-ink-50 hover:bg-ink-100 rounded-lg flex items-center gap-3">
+                  <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(q.fields.quote_no || '–')}</span>
+                  <span class="flex-1 truncate text-ink-900">${escapeHtml(q.fields.title || q.fields.quote_title || '–')}</span>
+                  <span class="font-mono text-sm tabular-nums text-ink-900 shrink-0">${formatPrice(q.fields.total_gross || 0)} €</span>
+                </button>
+              `).join('') + '</div>'}
+        </div>
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function renderStatsRevenue() {
+  setPageTitle('Statistik · Umsatz');
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = '<div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt.</div></div>';
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Daten…</p>';
+  const data = await _statsLoadCommonData();
+  if (!data) return;
+  const { invoices, customers } = data;
+
+  const lockedInvs = invoices.filter(i => (i.fields.status || 'Entwurf') !== 'Entwurf' && i.fields.status !== 'Storniert');
+  const totalRevenue = lockedInvs.reduce((s, i) => s + (+(i.fields.total_gross || 0)), 0);
+  const totalNet     = lockedInvs.reduce((s, i) => s + (+(i.fields.subtotal_net || 0)), 0);
+  const totalVat     = lockedInvs.reduce((s, i) => s + (+(i.fields.vat_total || 0)), 0);
+
+  const paidRevenue = lockedInvs
+    .filter(i => i.fields.status === 'Bezahlt')
+    .reduce((s, i) => s + (+(i.fields.total_gross || 0)), 0);
+  const openRevenue = totalRevenue - paidRevenue;
+
+  // Monatlicher Umsatz aktuelles Jahr
+  const now = new Date();
+  const year = now.getFullYear();
+  const monthly = new Array(12).fill(0);
+  lockedInvs.forEach(i => {
+    const d = i.fields.date;
+    if (!d) return;
+    const dt = new Date(d);
+    if (dt.getFullYear() !== year) return;
+    monthly[dt.getMonth()] += +(i.fields.total_gross || 0);
+  });
+  const maxMonth = Math.max(...monthly, 1);
+  const monthLabels = ['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
+
+  // Top Kunden nach Rechnungs-Brutto
+  const custMap = {}; customers.forEach(c => { custMap[c.id] = c.fields; });
+  const revByCust = {};
+  lockedInvs.forEach(i => {
+    const cid = _readIdValue(i.fields.customer_id);
+    if (!cid) return;
+    revByCust[cid] = (revByCust[cid] || 0) + (+(i.fields.total_gross || 0));
+  });
+  const topCust = Object.entries(revByCust)
+    .map(([id, sum]) => ({ id, sum, name: custMap[id]?.name1 || '–' }))
+    .sort((a,b) => b.sum - a.sum)
+    .slice(0, 8);
+  const maxCust = topCust[0]?.sum || 0;
+
+  // Offene Rechnungen
+  const openInvoices = lockedInvs.filter(i => i.fields.status !== 'Bezahlt')
+    .sort((a,b) => (a.fields.due_date || '').localeCompare(b.fields.due_date || ''));
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-6xl mx-auto">
+      ${_statsTabs('umsatz')}
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        ${_statsKpiCard('Umsatz brutto', formatPrice(totalRevenue) + ' €', 'aus festgeschriebenen Rechnungen', 'trending-up', 'violet')}
+        ${_statsKpiCard('Netto', formatPrice(totalNet) + ' €', '', 'sigma', 'emerald')}
+        ${_statsKpiCard('USt enthalten', formatPrice(totalVat) + ' €', '', 'percent', 'amber')}
+        ${_statsKpiCard('Bezahlt / Offen', formatPrice(paidRevenue) + ' € / ' + formatPrice(openRevenue) + ' €', `${lockedInvs.length} Rechnung${lockedInvs.length===1?'':'en'}`, 'wallet', 'blue')}
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <div class="bg-white rounded-2xl shadow-card p-5">
+          <div class="flex items-baseline justify-between mb-4">
+            <h3 class="font-semibold text-ink-900">Monatlicher Umsatz</h3>
+            <span class="text-xs text-ink-500">${year} · brutto</span>
+          </div>
+          <div class="flex items-end gap-1.5 h-40">
+            ${monthly.map((v, i) => {
+              const pct = maxMonth > 0 ? Math.round((v / maxMonth) * 100) : 0;
+              return `
+                <div class="flex-1 flex flex-col items-center gap-1 group" title="${monthLabels[i]}: ${formatPrice(v)} €">
+                  <div class="w-full bg-violet-100 rounded-t flex items-end" style="height:140px;">
+                    <div class="w-full bg-violet-500 rounded-t group-hover:bg-violet-600 transition-all" style="height:${pct}%;"></div>
+                  </div>
+                  <span class="text-[10px] text-ink-500 font-mono">${monthLabels[i]}</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-card p-5">
+          <div class="flex items-baseline justify-between mb-4">
+            <h3 class="font-semibold text-ink-900">Top Kunden nach Umsatz</h3>
+            <span class="text-xs text-ink-500">aus Rechnungen</span>
+          </div>
+          ${topCust.length === 0
+            ? '<p class="text-sm text-ink-500 italic">Noch keine Rechnungen.</p>'
+            : topCust.map(c => _statsBar(c.name, c.sum, maxCust, formatPrice(c.sum) + ' €', 'violet')).join('')}
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl shadow-card p-5">
+        <div class="flex items-baseline justify-between mb-3">
+          <h3 class="font-semibold text-ink-900 flex items-center gap-2"><i data-lucide="alert-circle" class="w-4 h-4 text-amber-600"></i> Offene Rechnungen</h3>
+          <span class="text-xs text-ink-500">${openInvoices.length} · ${formatPrice(openRevenue)} €</span>
+        </div>
+        ${openInvoices.length === 0
+          ? '<p class="text-sm text-ink-500 italic">Keine offenen Rechnungen.</p>'
+          : '<div class="divide-y divide-ink-100">' + openInvoices.slice(0, 15).map(i => {
+              const f = i.fields;
+              const cust = custMap[_readIdValue(f.customer_id)] || {};
+              const today = new Date().toISOString().slice(0,10);
+              const overdue = f.due_date && f.due_date < today;
+              return `<button type="button" onclick="openInvoiceModal('${i.id}')" class="w-full text-left py-2 px-2 hover:bg-ink-50 flex items-center gap-3 rounded">
+                <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.invoice_no || '–')}</span>
+                <span class="flex-1 truncate text-ink-900">${escapeHtml(cust.name1 || '–')}</span>
+                <span class="text-xs ${overdue ? 'text-red-600 font-semibold' : 'text-ink-500'} w-24 text-right">${escapeHtml(formatDeDate(f.due_date) || '–')}</span>
+                <span class="font-mono text-sm tabular-nums text-ink-900 w-24 text-right shrink-0">${formatPrice(f.total_gross || 0)} €</span>
+              </button>`;
+            }).join('') + '</div>'}
+      </div>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
 }
 
 /* ============================================================
