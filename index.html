@@ -568,7 +568,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.09';
+const APP_VERSION = 'v3.10';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10291,13 +10291,35 @@ async function renderOrders() {
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Aufträge…</p>';
   await ensureOrderSchema();
 
-  let all = [], allCustomers = [], allQuotes = [];
+  let all = [], allCustomers = [], allQuotes = [], allDeliveries = [], allInvoices = [];
   try {
-    [all, allCustomers, allQuotes] = await Promise.all([readData('Order'), readData('Customer'), readData('Quote')]);
+    [all, allCustomers, allQuotes, allDeliveries, allInvoices] = await Promise.all([
+      readData('Order'), readData('Customer'), readData('Quote'),
+      readData('DeliveryNote').catch(()=>[]), readData('Invoice').catch(()=>[])
+    ]);
   } catch (e) { toast(e.message, 'error'); return; }
 
   const custMap = {}; allCustomers.forEach(c => { custMap[c.id] = c.fields; });
   const quoteMap = {}; allQuotes.forEach(q => { quoteMap[q.id] = q.fields; });
+  // Maps: orderId → Liste verknüpfter Lieferscheine / Rechnungen
+  const deliveriesByOrder = {};
+  allDeliveries.forEach(d => {
+    const oid = _readIdValue(d.fields.order_id);
+    if (!oid) return;
+    if ((d.fields.status || '') === 'archiviert') return;
+    if (!deliveriesByOrder[oid]) deliveriesByOrder[oid] = [];
+    deliveriesByOrder[oid].push(d);
+  });
+  const invoicesByOrder = {};
+  allInvoices.forEach(i => {
+    const oid = _readIdValue(i.fields.order_id);
+    if (!oid) return;
+    if ((i.fields.status || '') === 'archiviert') return;
+    if (!invoicesByOrder[oid]) invoicesByOrder[oid] = [];
+    invoicesByOrder[oid].push(i);
+  });
+  window._linkedDeliveriesByOrder = deliveriesByOrder;
+  window._linkedInvoicesByOrder = invoicesByOrder;
 
   let list = all.filter(o => (o.fields.company_id || []).includes(cur.id) || o.fields.company_id === cur.id);
   if (!_orderListState.showArchived) list = list.filter(o => (o.fields.status || 'Entwurf') !== 'archiviert');
@@ -10371,14 +10393,14 @@ async function renderOrders() {
                       <th class="px-3 py-2"></th>
                     </tr>
                   </thead>
-                  <tbody class="divide-y divide-ink-100">${list.map(rec => orderRowTabelle(rec, custMap, quoteMap)).join('')}</tbody>
+                  <tbody class="divide-y divide-ink-100">${list.map(rec => orderRowTabelle(rec, custMap, quoteMap, deliveriesByOrder[rec.id] || [], invoicesByOrder[rec.id] || [])).join('')}</tbody>
                 </table>
               </div>`;
           }
           if (vm === 'kompakt') {
-            return '<div class="divide-y divide-ink-100">' + list.map(rec => orderRowKompakt(rec, custMap, quoteMap)).join('') + '</div>';
+            return '<div class="divide-y divide-ink-100">' + list.map(rec => orderRowKompakt(rec, custMap, quoteMap, deliveriesByOrder[rec.id] || [], invoicesByOrder[rec.id] || [])).join('') + '</div>';
           }
-          return '<div class="divide-y divide-ink-100">' + list.map(rec => orderRow(rec, custMap, quoteMap)).join('') + '</div>';
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => orderRow(rec, custMap, quoteMap, deliveriesByOrder[rec.id] || [], invoicesByOrder[rec.id] || [])).join('') + '</div>';
         })()}
       </div>
     </div>
@@ -10392,7 +10414,18 @@ function onOrderSearchInput(value) {
   _orderSearchTimer = setTimeout(() => _renderWithSearchFocus(renderOrders), 200);
 }
 
-function orderRowKompakt(rec, custMap, quoteMap) {
+// Helper: Badges für verknüpfte Lieferscheine + Rechnungen
+function _orderLinkedDocsBadges(deliveries, invoices) {
+  const dnBadges = (deliveries || []).map(d =>
+    `<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium font-mono" title="Lieferschein ${escapeHtml(d.fields.delivery_no || '')} · ${escapeHtml(d.fields.status || '')}">${escapeHtml(d.fields.delivery_no || 'L?')}</span>`
+  ).join('');
+  const invBadges = (invoices || []).map(i =>
+    `<span class="text-[10px] uppercase tracking-wider bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-medium font-mono" title="Rechnung ${escapeHtml(i.fields.invoice_no || '')} · ${escapeHtml(i.fields.status || '')}">${escapeHtml(i.fields.invoice_no || 'R?')}</span>`
+  ).join('');
+  return dnBadges + invBadges;
+}
+
+function orderRowKompakt(rec, custMap, quoteMap, deliveries, invoices) {
   const f = rec.fields;
   const cust = custMap[_readIdValue(f.customer_id)] || {};
   const quoteId = _readIdValue(f.quote_id);
@@ -10402,6 +10435,7 @@ function orderRowKompakt(rec, custMap, quoteMap) {
       <span class="text-xs font-mono text-ink-500 w-20 shrink-0">${escapeHtml(f.order_no || '–')}</span>
       <span class="text-xs text-ink-500 w-20 shrink-0">${escapeHtml(formatDeDate(f.date))}</span>
       <span class="font-medium text-ink-900 truncate flex-1">${escapeHtml(cust.name1 || '–')}</span>
+      ${_orderLinkedDocsBadges(deliveries, invoices)}
       ${quote.quote_no ? `<span class="text-[10px] text-ink-400 font-mono">aus ${escapeHtml(quote.quote_no)}</span>` : ''}
       <span class="font-mono text-xs tabular-nums text-ink-700 shrink-0">${formatPrice(f.total_gross || 0)} €</span>
       ${orderStatusBadge(f.status || 'Entwurf')}
@@ -10409,18 +10443,19 @@ function orderRowKompakt(rec, custMap, quoteMap) {
   `;
 }
 
-function orderRowTabelle(rec, custMap, quoteMap) {
+function orderRowTabelle(rec, custMap, quoteMap, deliveries, invoices) {
   const f = rec.fields;
   const cust = custMap[_readIdValue(f.customer_id)] || {};
   const quoteId = _readIdValue(f.quote_id);
   const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
+  const linkedBadges = _orderLinkedDocsBadges(deliveries, invoices);
   return `
     <tr onclick="openOrderModal('${rec.id}')" class="cursor-pointer hover:bg-ink-50">
       <td class="px-3 py-2 font-mono text-xs text-ink-500 whitespace-nowrap">${escapeHtml(f.order_no || '–')}</td>
       <td class="px-3 py-2 text-xs text-ink-500 whitespace-nowrap">${escapeHtml(formatDeDate(f.date))}</td>
       <td class="px-3 py-2 font-medium text-ink-900 truncate max-w-[200px]">${escapeHtml(cust.name1 || '–')}</td>
       <td class="px-3 py-2 text-xs text-ink-500 font-mono">${quote.quote_no ? escapeHtml(quote.quote_no) : '<span class="text-ink-300">—</span>'}</td>
-      <td class="px-3 py-2">${orderStatusBadge(f.status || 'Entwurf')}</td>
+      <td class="px-3 py-2">${orderStatusBadge(f.status || 'Entwurf')}${linkedBadges ? ' <span class="inline-flex gap-1">' + linkedBadges + '</span>' : ''}</td>
       <td class="px-3 py-2 text-right font-mono text-sm tabular-nums text-ink-900">${formatPrice(f.total_gross || 0)} €</td>
       <td class="px-3 py-2 text-right">
         <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 inline"></i>
@@ -10429,11 +10464,12 @@ function orderRowTabelle(rec, custMap, quoteMap) {
   `;
 }
 
-function orderRow(rec, custMap, quoteMap) {
+function orderRow(rec, custMap, quoteMap, deliveries, invoices) {
   const f = rec.fields;
   const cust = custMap[_readIdValue(f.customer_id)] || {};
   const quoteId = _readIdValue(f.quote_id);
   const quote   = quoteId ? (quoteMap[quoteId] || {}) : {};
+  const linkedBadges = _orderLinkedDocsBadges(deliveries, invoices);
   return `
     <button type="button" onclick="openOrderModal('${rec.id}')" class="w-full text-left px-4 py-3 hover:bg-ink-50">
       <div class="flex items-baseline justify-between gap-3 mb-0.5">
@@ -10441,6 +10477,7 @@ function orderRow(rec, custMap, quoteMap) {
           <span class="text-xs font-mono text-ink-500">${escapeHtml(f.order_no || '–')}</span>
           <span class="font-semibold text-ink-900 truncate">${escapeHtml(cust.name1 || '— ohne Kunde —')}</span>
           ${orderStatusBadge(f.status || 'Entwurf')}
+          ${linkedBadges}
         </div>
         <span class="font-mono text-sm tabular-nums text-ink-900 shrink-0">${formatPrice(f.total_gross || 0)} €</span>
       </div>
@@ -10491,6 +10528,12 @@ async function openOrderModal(id, opts = {}) {
       items = allItems.filter(it => (it.fields.order_id || []).includes(id) || it.fields.order_id === id)
         .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
     } catch (e) {}
+    // Verknüpfte Lieferscheine + Rechnungen laden
+    try {
+      const [allDel, allInv] = await Promise.all([readData('DeliveryNote').catch(()=>[]), readData('Invoice').catch(()=>[])]);
+      window._linkedDeliveriesForOrder = allDel.filter(d => _readIdValue(d.fields.order_id) === id);
+      window._linkedInvoicesForOrder   = allInv.filter(i => _readIdValue(i.fields.order_id) === id);
+    } catch (e) { window._linkedDeliveriesForOrder = []; window._linkedInvoicesForOrder = []; }
   } else {
     f.order_no = await nextOrderNo(cur.id);
     const today = new Date();
@@ -10691,6 +10734,50 @@ async function openOrderModal(id, opts = {}) {
         <label class="block text-sm font-medium text-ink-700 mb-1">Schlusstext</label>
         <div id="order_closing_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:140px;max-height:240px;"></div>
       </div>
+
+      ${id ? `
+        <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider flex items-center gap-1.5"><i data-lucide="link" class="w-3.5 h-3.5"></i> Verknüpfte Dokumente</h4>
+        <div id="orderLinkedDocsWrap" class="space-y-2">
+          ${(() => {
+            const dels = window._linkedDeliveriesForOrder || [];
+            const invs = window._linkedInvoicesForOrder || [];
+            if (dels.length === 0 && invs.length === 0) {
+              return '<p class="text-xs text-ink-500 italic px-3 py-2 bg-ink-50 rounded-lg">Noch keine Lieferscheine oder Rechnungen für diesen Auftrag erstellt.</p>';
+            }
+            const dRows = dels.map(d => {
+              const df = d.fields;
+              return `<button type="button" onclick="closeModal();setTimeout(()=>openDeliveryNoteModal('${d.id}'),100)" class="w-full text-left p-3 bg-amber-50/40 hover:bg-amber-50 rounded-lg border border-amber-100 flex items-center gap-3">
+                <i data-lucide="send" class="w-4 h-4 text-amber-700 shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-baseline gap-2 flex-wrap">
+                    <span class="text-xs font-mono text-amber-900 font-semibold">${escapeHtml(df.delivery_no || '–')}</span>
+                    <span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">Lieferschein · ${escapeHtml(df.status || 'Entwurf')}</span>
+                  </div>
+                  <p class="text-xs text-ink-600 mt-0.5">${escapeHtml(formatDeDate(df.date))}${df.delivery_date ? ' · Lieferdatum: ' + escapeHtml(formatDeDate(df.delivery_date)) : ''}</p>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 shrink-0"></i>
+              </button>`;
+            }).join('');
+            const iRows = invs.map(i => {
+              const inf = i.fields;
+              const lockedIcon = isInvoiceLocked(inf) ? '<i data-lucide="lock" class="w-3 h-3 text-rose-700" title="festgeschrieben"></i>' : '';
+              return `<button type="button" onclick="closeModal();setTimeout(()=>openInvoiceModal('${i.id}'),100)" class="w-full text-left p-3 bg-rose-50/40 hover:bg-rose-50 rounded-lg border border-rose-100 flex items-center gap-3">
+                <i data-lucide="euro" class="w-4 h-4 text-rose-700 shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-baseline gap-2 flex-wrap">
+                    <span class="text-xs font-mono text-rose-900 font-semibold">${escapeHtml(inf.invoice_no || '–')}</span>
+                    <span class="text-[10px] uppercase tracking-wider bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-medium">Rechnung · ${escapeHtml(inf.status || 'Entwurf')}</span>
+                    ${lockedIcon}
+                  </div>
+                  <p class="text-xs text-ink-600 mt-0.5">${escapeHtml(formatDeDate(inf.date))}${inf.due_date ? ' · Fällig: ' + escapeHtml(formatDeDate(inf.due_date)) : ''} · ${formatPrice(inf.total_gross || 0)} €</p>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400 shrink-0"></i>
+              </button>`;
+            }).join('');
+            return dRows + iRows;
+          })()}
+        </div>
+      ` : ''}
 
       <button type="button" onclick="exportOrderAsPdf()" class="lg:hidden w-full mt-4 px-3 py-3 text-sm rounded-lg bg-ink-900 text-white hover:bg-ink-800 flex items-center justify-center gap-2 font-semibold">
         <i data-lucide="file-down" class="w-4 h-4"></i> Vorschau / PDF erzeugen
@@ -11570,6 +11657,33 @@ async function exportOrderAsPdf() {
       window._quoteCanvases = null;
     }
   }
+}
+
+/* Setzt den Status eines Auftrags abhängig vom verknüpften Doku-Typ:
+   - 'delivery' → 'Geliefert' (wenn nicht schon 'Abgerechnet' oder 'Storniert')
+   - 'invoice'  → 'Abgerechnet' (überschreibt 'Geliefert')
+   Stille Aktualisierung ohne Toast (nur wenn sich der Status tatsächlich ändert). */
+async function _bumpOrderStatusFromLinkedDoc(orderId, kind) {
+  if (!orderId) return;
+  try {
+    const all = await readData('Order');
+    const order = all.find(o => o.id === orderId);
+    if (!order) return;
+    const current = order.fields.status || 'Entwurf';
+    // Nicht überschreiben wenn manuell auf Endstatus
+    if (current === 'Storniert' || current === 'archiviert') return;
+    let target = null;
+    if (kind === 'invoice') {
+      // Rechnung trumpft alles
+      target = 'Abgerechnet';
+    } else if (kind === 'delivery') {
+      // Geliefert nur wenn nicht schon abgerechnet
+      if (current === 'Abgerechnet') return;
+      target = 'Geliefert';
+    }
+    if (!target || target === current) return;
+    await updateData('Order', orderId, { status: target });
+  } catch (err) { console.warn('[orderStatusBump]', err); }
 }
 
 /* "Auftrag aus Angebot erstellen" — kopiert Quote-Daten + Items in eine neue Order */
@@ -13985,6 +14099,11 @@ async function saveDeliveryNote(e, id, keepOpen) {
     else { const created = await writeData('DeliveryNote', fields); savedId = created.id; }
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
     window._currentDeliveryIdInModal = savedId;
+    // Auto-Status: wenn Lieferschein nicht mehr Entwurf, Auftrag auf 'Geliefert' setzen
+    const orderId = (fields.order_id || '').trim();
+    if (orderId && (fields.status || 'Entwurf') !== 'Entwurf' && (fields.status || '') !== 'Storniert') {
+      await _bumpOrderStatusFromLinkedDoc(orderId, 'delivery');
+    }
     if (keepOpen) {
       toast('Gespeichert', 'success');
       await openDeliveryNoteModal(savedId);
@@ -14181,6 +14300,8 @@ async function launchDnFromOrder(orderId) {
       });
     }
     toast(`Lieferschein ${deliveryNo} erstellt mit ${items.length} Position${items.length===1?'':'en'}`, 'success', 3000);
+    // Auftrag bleibt auf seinem aktuellen Status — Geliefert wird erst gesetzt, wenn der Lieferschein
+    // versendet/geliefert ist (also nicht Entwurf). Das passiert in saveDeliveryNote.
     setTimeout(() => openDeliveryNoteModal(created.id), 100);
   } catch (err) {
     toast('Fehler beim Erzeugen: ' + err.message, 'error', 5000);
@@ -15317,6 +15438,12 @@ async function saveInvoice(e, id, keepOpen) {
     else { const created = await writeData('Invoice', fields); savedId = created.id; }
     if (_currentLock) { stopLockHeartbeat(); _currentLock = null; }
     window._currentInvoiceIdInModal = savedId;
+    // Auto-Status: bei Festschreibung (Wechsel von Entwurf → andere) Auftrag auf 'Abgerechnet'
+    if (becomesLocked) {
+      const fd2 = new FormData(form);
+      const orderId = (fd2.get('order_id') || '').trim();
+      if (orderId) await _bumpOrderStatusFromLinkedDoc(orderId, 'invoice');
+    }
     if (keepOpen) {
       toast('Gespeichert', 'success');
       await openInvoiceModal(savedId);
