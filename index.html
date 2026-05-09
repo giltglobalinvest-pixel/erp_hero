@@ -527,16 +527,9 @@
 <!-- ========================================================== -->
 <div id="toastWrap" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] space-y-2 w-[min(92vw,420px)] pointer-events-none pb-safe" style="bottom: calc(1rem + env(safe-area-inset-bottom));"></div>
 
-<!-- ========================================================== -->
-<!-- UPDATE BANNER                                               -->
-<!-- ========================================================== -->
-<div id="updateBanner" class="hidden fixed left-1/2 -translate-x-1/2 z-[55] bg-ink-900 text-white text-sm px-4 py-2.5 rounded-full shadow-lg flex items-center gap-3 slide-up" style="top: calc(1rem + env(safe-area-inset-top));">
-  <i data-lucide="rocket" class="w-4 h-4 text-brand-300"></i>
-  <span>Neue Version verfügbar (<span id="updateVersion">–</span>)</span>
-  <button onclick="forceAppUpdate()" class="ml-1 px-2 py-1 rounded-md bg-white text-ink-900 font-semibold text-xs">Aktualisieren</button>
-  <button onclick="document.getElementById('updateBanner').classList.add('hidden')" class="text-white/70 hover:text-white">
-    <i data-lucide="x" class="w-4 h-4"></i>
-  </button>
+<!-- App-eigenes Update-Banner entfernt — der Loader kümmert sich um Update-Hinweise -->
+<div id="updateBanner" class="hidden">
+  <span id="updateVersion" class="hidden"></span>
 </div>
 
 
@@ -557,7 +550,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.04';
+const APP_VERSION = 'v3.05';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10046,18 +10039,8 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
    UPDATE-CHECK (raw.githubusercontent.com — bypasst GitHub-Pages-CDN)
    ============================================================ */
 async function checkForUpdate() {
-  try {
-    const url = 'https://raw.githubusercontent.com/' + APP_CONFIG.GITHUB_REPO + '/main/index.html?t=' + Date.now();
-    const r = await fetch(url, { cache: 'no-store' });
-    if (!r.ok) return;
-    const text = await r.text();
-    const m = text.match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
-    if (m && m[1] !== APP_VERSION) {
-      document.getElementById('updateVersion').textContent = m[1];
-      document.getElementById('updateBanner').classList.remove('hidden');
-      if (window.lucide) lucide.createIcons();
-    }
-  } catch (e) { /* still */ }
+  // App-eigenes Update-Banner entfernt — der Loader übernimmt Update-Erkennung + UI.
+  // Funktion bleibt als No-Op für die Init-Aufrufe.
 }
 
 /* ============================================================
