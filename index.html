@@ -568,7 +568,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.07';
+const APP_VERSION = 'v3.08';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -868,6 +868,18 @@ async function readData(table, filter, opts = {}) {
   if (!res.ok) throw new Error('Lesen fehlgeschlagen: ' + res.status);
   const data = await res.json();
   return data.records || [];
+}
+
+// Entfernt leere Strings für Date-Felder bevor sie an Airtable geschickt werden.
+// Airtable lehnt "" für date-Felder mit INVALID_VALUE_FOR_COLUMN ab.
+function _stripEmptyDateFields(fields, dateKeys) {
+  if (!fields) return fields;
+  for (const k of dateKeys) {
+    if (fields[k] === '' || fields[k] === null || fields[k] === undefined) {
+      delete fields[k];
+    }
+  }
+  return fields;
 }
 
 async function writeData(table, fields) {
@@ -11349,6 +11361,7 @@ async function _silentSaveOrderHeader() {
   // Ggf. quote_id aus URL/State erhalten
   const linkedQuoteId = window._linkedQuoteIdForNewOrder || '';
   if (linkedQuoteId) fields.quote_id = linkedQuoteId;
+  _stripEmptyDateFields(fields, ['date','confirmation_date']);
   try {
     const created = await writeData('Order', fields);
     return created.id;
@@ -11374,6 +11387,7 @@ async function saveOrder(e, id, keepOpen) {
   fields.status = fields.status || 'Entwurf';
   if (!id) fields.company_id = cur.id;
   if (id)  { fields.lock_user_id = ''; fields.lock_until = ''; }
+  _stripEmptyDateFields(fields, ['date','confirmation_date']);
   // Sums aus Items
   if (id) {
     try {
@@ -12719,6 +12733,7 @@ async function _silentSavePurchaseHeader() {
   fields.contact_id  = (fd.get('contact_id')  || '').trim();
   fields.status = fields.status || 'Entwurf';
   fields.company_id = cur.id;
+  _stripEmptyDateFields(fields, ['date','expected_delivery']);
   try {
     const created = await writeData('SupplierOrder', fields);
     return created.id;
@@ -12742,6 +12757,7 @@ async function saveSupplierOrder(e, id, keepOpen) {
   fields.status = fields.status || 'Entwurf';
   if (!id) fields.company_id = cur.id;
   if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
+  _stripEmptyDateFields(fields, ['date','expected_delivery']);
   if (id) {
     try {
       const all = await readData('SupplierOrderItem');
@@ -13932,6 +13948,7 @@ async function _silentSaveDeliveryHeader() {
   fields.contact_id  = (fd.get('contact_id')  || '').trim();
   fields.status = fields.status || 'Entwurf';
   fields.company_id = cur.id;
+  _stripEmptyDateFields(fields, ['date','delivery_date']);
   try {
     const created = await writeData('DeliveryNote', fields);
     return created.id;
@@ -13955,6 +13972,7 @@ async function saveDeliveryNote(e, id, keepOpen) {
   fields.status = fields.status || 'Entwurf';
   if (!id) fields.company_id = cur.id;
   if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
+  _stripEmptyDateFields(fields, ['date','delivery_date']);
   try {
     let savedId = id;
     if (id) await updateData('DeliveryNote', id, fields);
@@ -15229,6 +15247,7 @@ async function _silentSaveInvoiceHeader() {
   fields.contact_id  = (fd.get('contact_id')  || '').trim();
   fields.status = fields.status || 'Entwurf';
   fields.company_id = cur.id;
+  _stripEmptyDateFields(fields, ['date','due_date','payment_date']);
   try {
     const created = await writeData('Invoice', fields);
     return created.id;
@@ -15261,6 +15280,7 @@ async function saveInvoice(e, id, keepOpen) {
   }
   if (!id) fields.company_id = cur.id;
   if (id) { fields.lock_user_id = ''; fields.lock_until = ''; }
+  _stripEmptyDateFields(fields, ['date','due_date','payment_date']);
 
   // Wenn Wechsel von Entwurf → festgeschrieben: locked_at setzen + Sums fixieren
   const becomesLocked = !wasLocked && fields.status && fields.status !== 'Entwurf' && fields.status !== 'archiviert';
