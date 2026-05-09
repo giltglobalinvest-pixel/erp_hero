@@ -557,7 +557,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.03';
+const APP_VERSION = 'v3.04';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5365,6 +5365,9 @@ const TEMPLATE_VARIABLES = {
     { name: 'lieferschein.datum',   label: 'Datum',             resolve: c => formatDeDate(c.quote?.date) },
     { name: 'lieferschein.lieferdatum', label: 'Lieferdatum',   resolve: c => formatDeDate(c.quote?.valid_until) },
     { name: 'lieferschein.lieferung', label: 'Lieferbedingungen', resolve: c => c.quote?.delivery_terms || '' },
+    { name: 'auftrag.nr',           label: 'Auftrags-Nr. (verknüpft)', resolve: c => c.linkedOrder?.order_no || '' },
+    { name: 'auftrag.datum',        label: 'Auftrags-Datum',    resolve: c => formatDeDate(c.linkedOrder?.date) },
+    { name: 'auftrag.titel',        label: 'Auftrags-Titel',    resolve: c => c.linkedOrder?.order_title || '' },
     { name: 'kunde.firma',          label: 'Kunde · Firma',     resolve: c => c.customer?.name1 || '' },
     { name: 'kunde.kundennr',       label: 'Kundennr.',         resolve: c => c.customer?.customer_no || '' },
     { name: 'kunde.adresse',        label: 'Kunde · Adresse',   resolve: c => [c.customer?.street, [c.customer?.zip, c.customer?.city].filter(Boolean).join(' ')].filter(Boolean).join(', ') },
@@ -13178,6 +13181,8 @@ async function openDeliveryNoteModal(id, opts = {}) {
   const linkedOrderId = _readIdValue(f.order_id);
   const linkedOrder = linkedOrderId ? allOrders.find(o => o.id === linkedOrderId) : null;
   window._currentDeliveryIdInModal = id || null;
+  // Cache für Variable-Substitution {{auftrag.nr}} etc.
+  window._deliveryLinkedOrder = linkedOrder;
 
   openModal(`
     <div class="lg:flex lg:items-stretch">
@@ -13282,6 +13287,7 @@ async function openDeliveryNoteModal(id, opts = {}) {
 
       <input type="hidden" name="description" value="${escapeHtml(f.description || '')}">
       <input type="hidden" name="notes" value="${escapeHtml(f.notes || '')}">
+      <input type="hidden" name="order_id" value="${escapeHtml(linkedOrderId || '')}">
 
       <div data-delivery-advanced style="display:none;" class="mt-3">
         <label class="block text-sm font-medium text-ink-700 mb-1">Titel / Tagline</label>
@@ -13564,6 +13570,16 @@ async function buildDeliveryVariableContext() {
   const invoiceAddrId  = (fd.get('invoice_address_id')  || '').trim();
   const deliveryAddress = resolveAddress({ customer: customerObj, addresses, addressId: deliveryAddrId, kind: 'delivery' });
   const invoiceAddress  = resolveAddress({ customer: customerObj, addresses, addressId: invoiceAddrId,  kind: 'billing'  });
+  // Verknüpften Auftrag für {{auftrag.*}}-Variablen mitliefern
+  const linkedOrderId = (fd.get('order_id') || '').trim();
+  let linkedOrder = window._deliveryLinkedOrder || null;
+  if (linkedOrderId && (!linkedOrder || linkedOrder.id !== linkedOrderId)) {
+    try {
+      const allOrd = await readData('Order');
+      linkedOrder = allOrd.find(o => o.id === linkedOrderId) || null;
+      window._deliveryLinkedOrder = linkedOrder;
+    } catch (e) {}
+  }
   return {
     quote: {
       quote_no:       (fd.get('delivery_no') || '').trim(),
@@ -13580,6 +13596,7 @@ async function buildDeliveryVariableContext() {
     },
     docType: 'delivery',
     customer, contact, company, deliveryAddress, invoiceAddress,
+    linkedOrder: linkedOrder ? linkedOrder.fields : null,
     user: APP_KEYS.user || {},
     customFields: {}
   };
@@ -13862,7 +13879,7 @@ async function _silentSaveDeliveryHeader() {
   if (!form) return null;
   const fd = new FormData(form);
   const fields = {};
-  ['delivery_no','description','date','delivery_date','status','delivery_terms','notes','delivery_title','delivery_address_id','invoice_address_id','bundle_id'].forEach(k => {
+  ['delivery_no','description','date','delivery_date','status','delivery_terms','notes','delivery_title','delivery_address_id','invoice_address_id','bundle_id','order_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   fields.customer_id = (fd.get('customer_id') || '').trim();
@@ -13884,7 +13901,7 @@ async function saveDeliveryNote(e, id, keepOpen) {
   if (!form) return;
   const fd = new FormData(form);
   const fields = {};
-  ['delivery_no','description','date','delivery_date','status','delivery_terms','notes','delivery_title','delivery_address_id','invoice_address_id','bundle_id'].forEach(k => {
+  ['delivery_no','description','date','delivery_date','status','delivery_terms','notes','delivery_title','delivery_address_id','invoice_address_id','bundle_id','order_id'].forEach(k => {
     fields[k] = (fd.get(k) || '').trim();
   });
   fields.customer_id = (fd.get('customer_id') || '').trim();
