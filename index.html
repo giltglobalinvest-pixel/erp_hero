@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.24';
+const APP_VERSION = 'v3.25';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -759,7 +759,18 @@ async function loginWithUserKey(userKey, longLived = false) {
   }
   if (!res.ok) {
     let msg = 'Login fehlgeschlagen (HTTP ' + res.status + ')';
-    try { const ej = await res.json(); if (ej.error) msg = ej.error; } catch (_) {}
+    try {
+      const ej = await res.json();
+      if (ej.error) {
+        msg = typeof ej.error === 'string' ? ej.error : JSON.stringify(ej.error);
+      }
+    } catch (_) {
+      // kein JSON → versuch als Text
+      try {
+        const txt = await res.clone().text();
+        if (txt) msg = 'HTTP ' + res.status + ': ' + txt.slice(0, 200);
+      } catch (_) {}
+    }
     throw new Error(msg);
   }
   const data = await res.json();
@@ -2856,7 +2867,7 @@ async function deleteQuoteBundle(id) {
 // Settings-UI angezeigt; User legt einen "HTTP val" in Val.town an
 // und fügt diesen Code ein. Alle Secrets kommen aus env vars oder
 // vom Airtable User-Record (per-User Freshdesk-Key).
-const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth (Sessions in Deno KV)
+const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth (Sessions in Val.town blob)
 // =====================================================================
 // HTTP-Val für Val.town. Routet:
 //   POST /auth                     →  Login: User-Key prüfen, Session-Token ausgeben
@@ -2869,10 +2880,11 @@ const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth (Sess
 //                                       env var FRESHDESK_API_KEY als Fallback)
 //   GET  /health                   →  Auth-Check (für "Verbindung testen")
 //
-// WICHTIG — Sessions in Deno KV:
+// WICHTIG — Sessions persistent:
 //   Val.town schläfert HTTP-Vals nach kurzer Inaktivität ein. Eine
 //   In-Memory-Map würde dann den State verlieren → 401 nach Worker-Wakeup.
-//   Daher liegen Sessions in Deno KV (persistent, übersteht Restarts).
+//   Daher liegen Sessions in Val.town's blob-Storage (übersteht Restarts).
+//   TTL wird manuell geprüft (blob hat kein natives expireIn).
 //
 // ENV VARS in Val.town setzen:
 //   AIRTABLE_READ_KEY   — Read-Token mit Scope auf App-Base
@@ -2882,44 +2894,46 @@ const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth (Sess
 //   FRESHDESK_API_KEY   — (optional) Fallback wenn User keinen eigenen Key hat
 // =====================================================================
 
+import { blob } from "https://esm.town/v/std/blob";
+
 const USER_CACHE    = new Map(); // in-memory user cache (60s TTL, ok wenn weg)
 const CACHE_TTL_MS  = 60_000;
 const SESSION_SHORT = 8 * 60 * 60 * 1000;        // 8 h
 const SESSION_LONG  = 30 * 24 * 60 * 60 * 1000;  // 30 d
+const SESSION_PREFIX = "erp_session_";
 
-// Lazy KV initialisieren
-let _kv: Deno.Kv | null = null;
-async function kv(): Promise<Deno.Kv> {
-  if (!_kv) _kv = await Deno.openKv();
-  return _kv;
-}
-
-async function setSession(token: string, data: any, ttlMs: number) {
-  const k = await kv();
-  await k.set(["sessions", token], data, { expireIn: ttlMs });
+async function setSession(token: string, data: any) {
+  await blob.setJSON(SESSION_PREFIX + token, data);
 }
 async function getSession(token: string) {
-  const k = await kv();
-  const r = await k.get<any>(["sessions", token]);
-  if (!r.value) return null;
-  // Belt-and-suspenders Ablauf-Check (KV-TTL macht's auch, aber clock-skew schadet nicht)
-  if (r.value.expires && r.value.expires < Date.now()) {
-    await k.delete(["sessions", token]);
+  let data: any;
+  try {
+    data = await blob.getJSON(SESSION_PREFIX + token);
+  } catch (_) {
+    return null; // blob nicht vorhanden
+  }
+  if (!data) return null;
+  if (data.expires && data.expires < Date.now()) {
+    try { await blob.delete(SESSION_PREFIX + token); } catch (_) {}
     return null;
   }
-  return r.value;
+  return data;
 }
 async function deleteSession(token: string) {
-  const k = await kv();
-  await k.delete(["sessions", token]);
+  try { await blob.delete(SESSION_PREFIX + token); } catch (_) {}
 }
 async function revokeAllSessionsForUser(userId: string): Promise<number> {
-  const k = await kv();
   let count = 0;
-  for await (const entry of k.list<any>({ prefix: ["sessions"] })) {
-    if (entry.value && entry.value.userId === userId) {
-      await k.delete(entry.key);
-      count++;
+  let items: any[] = [];
+  try {
+    items = await blob.list(SESSION_PREFIX) || [];
+  } catch (_) { return 0; }
+  for (const item of items) {
+    const key = item.key || item;
+    let val: any;
+    try { val = await blob.getJSON(key); } catch (_) { continue; }
+    if (val && val.userId === userId) {
+      try { await blob.delete(key); count++; } catch (_) {}
     }
   }
   return count;
@@ -3040,7 +3054,7 @@ export default async function (req: Request): Promise<Response> {
       freshdeskApiKey: user.freshdesk_api_key,
       expires: Date.now() + ttl,
       longLived
-    }, ttl);
+    });
     return jsonResponse({
       session_token: token,
       expires_in: Math.floor(ttl / 1000),
@@ -11139,7 +11153,9 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     toast('Willkommen zurück, ' + (APP_KEYS.user?.name || 'Kollege') + '!', 'success');
     showApp();
   } catch (err) {
-    showLoginError(err.message || 'Login fehlgeschlagen');
+    let m = err && err.message ? err.message : 'Login fehlgeschlagen';
+    if (typeof m !== 'string') { try { m = JSON.stringify(m); } catch (_) { m = 'Login fehlgeschlagen'; } }
+    showLoginError(m);
   } finally {
     setLoginLoading(false);
   }
