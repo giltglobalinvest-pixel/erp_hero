@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.25';
+const APP_VERSION = 'v3.26';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -755,9 +755,25 @@ async function loginWithUserKey(userKey, longLived = false) {
       body: JSON.stringify({ user_key: userKey, long_lived: !!longLived })
     });
   } catch (e) {
-    throw new Error('Proxy nicht erreichbar: ' + e.message);
+    // Proxy unerreichbar (Network-Fehler) → Bootstrap-Fallback,
+    // damit der Admin trotzdem reinkommt, um den Wizard zu fixen.
+    console.warn('Proxy unerreichbar, fallback to Bootstrap:', e.message);
+    const u = await _bootstrapLogin(userKey);
+    setTimeout(() => toast('Proxy nicht erreichbar — Setup-Modus aktiv. Bitte Admin → Einstellungen prüfen.', 'warn', 8000), 500);
+    return u;
+  }
+  // Bei 5xx (Proxy-Code kaputt / blob nicht da / env vars fehlen):
+  // Bootstrap-Fallback, damit Admin reinkommt und den Code fixen kann.
+  if (res.status >= 500) {
+    let detail = '';
+    try { const ej = await res.clone().json(); if (ej.error) detail = typeof ej.error === 'string' ? ej.error : JSON.stringify(ej.error); } catch (_) {}
+    console.warn('Proxy 5xx, fallback to Bootstrap:', detail);
+    const u = await _bootstrapLogin(userKey);
+    setTimeout(() => toast('Proxy-Fehler (' + res.status + ') — Setup-Modus aktiv. Bitte Admin → Einstellungen → Code in Val.town aktualisieren.', 'warn', 9000), 500);
+    return u;
   }
   if (!res.ok) {
+    // 4xx: legitime Auth-Probleme (ungültiger Key etc.) — KEIN Fallback
     let msg = 'Login fehlgeschlagen (HTTP ' + res.status + ')';
     try {
       const ej = await res.json();
@@ -765,7 +781,6 @@ async function loginWithUserKey(userKey, longLived = false) {
         msg = typeof ej.error === 'string' ? ej.error : JSON.stringify(ej.error);
       }
     } catch (_) {
-      // kein JSON → versuch als Text
       try {
         const txt = await res.clone().text();
         if (txt) msg = 'HTTP ' + res.status + ': ' + txt.slice(0, 200);
@@ -789,7 +804,9 @@ async function loginWithUserKey(userKey, longLived = false) {
 
 // Auto-Login beim App-Start: gespeichertes Session-Token via /me validieren.
 // Migriert zusätzlich legacy gespeicherte User-Keys: holt damit ein Session-Token.
+// Bei Proxy-Problemen: fallback auf Bootstrap-Login mit Legacy-Key.
 async function tryAutoLogin() {
+  let proxyBroken = false;
   // 1) Vorhandenes Session-Token validieren
   const token = _getStoredToken();
   if (token && APP_KEYS.apiProxyUrl) {
@@ -810,9 +827,9 @@ async function tryAutoLogin() {
         await Promise.all([loadCompanies(), loadUsersCache()]);
         return true;
       }
-      // Token abgelaufen oder ungültig
-      _clearStoredToken();
-    } catch (_) { /* Proxy nicht erreichbar — Legacy-Migration unten versuchen */ }
+      if (res.status >= 500) proxyBroken = true; // Proxy kaputt → Fallback unten
+      else _clearStoredToken();                  // 4xx: Token tot, sauber clearen
+    } catch (_) { proxyBroken = true; /* Network-Fehler */ }
   }
   // 2) Legacy: alter User-Key in localStorage → automatisch zu Session-Token migrieren
   const legacyKey = localStorage.getItem(LEGACY_USER_KEY);
@@ -822,6 +839,14 @@ async function tryAutoLogin() {
       await loginWithUserKey(legacyKey, true);
       return true;
     } catch (_) {
+      // Wenn Proxy kaputt ist, Bootstrap direkt versuchen
+      if (proxyBroken) {
+        try {
+          await _bootstrapLogin(legacyKey);
+          setTimeout(() => toast('Setup-Modus — Proxy nicht erreichbar. Admin → Einstellungen prüfen.', 'warn', 8000), 600);
+          return true;
+        } catch (_) {}
+      }
       localStorage.removeItem(LEGACY_USER_KEY);
     }
   }
