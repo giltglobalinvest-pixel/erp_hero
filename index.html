@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.64';
+const APP_VERSION = 'v3.65';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1745,18 +1745,30 @@ ${fullText}`;
         name: af.name1 || (it.name_spoken || '')
       };
     };
+    // ZUERST E-Mail-Match machen, damit editFields.customer_id/contact_id gleich richtig gesetzt werden.
+    // Email kommt vom Freshdesk-Requester, das ist zuverlässiger als die KI-Extraktion.
+    const requesterEmail = _fdTicketState.requester?.email || '';
+    if (requesterEmail) {
+      try {
+        _fdTicketState.match = await _findCustomerContactByEmail(requesterEmail);
+      } catch (mErr) {
+        console.warn('[AI] Email-Match fehlgeschlagen:', mErr.message);
+        _fdTicketState.match = null;
+      }
+    }
     if (parsed && typeof parsed === 'object') {
       _fdTicketState.summary = String(parsed.summary || raw || '').trim() || '(KI-Antwort war leer)';
       _fdTicketState.extracted = {
         company: parsed.company || {},
         contact: {
           ...(parsed.contact || {}),
-          email: _fdTicketState.requester?.email || ''
+          email: requesterEmail
         },
         items: Array.isArray(parsed.items) ? parsed.items : []
       };
+      // KI-Items mit article_id übernehmen (alle Confidence-Stufen — User kann low/guess später entfernen)
       const matchedItems = (Array.isArray(parsed.items) ? parsed.items : [])
-        .filter(i => i.article_id && i.match_confidence === 'high')
+        .filter(i => i.article_id)
         .map(buildItemEntry);
       _fdTicketState.editFields = {
         ticket_number:      String(parsed.ticket_number || '').trim() || ('FT-' + _fdTicketState.id),
@@ -1770,7 +1782,7 @@ ${fullText}`;
       _fdTicketState.summary = String(raw || '').trim() || '(KI-Antwort war leer)';
       _fdTicketState.extracted = {
         company: {},
-        contact: { email: _fdTicketState.requester?.email || '' },
+        contact: { email: requesterEmail },
         items: []
       };
       _fdTicketState.editFields = {
@@ -1780,16 +1792,6 @@ ${fullText}`;
         contact_id:  _fdTicketState.match?.contact?.id  || '',
         items: []
       };
-    }
-    // Im ERP nach Email matchen — parallel zur UI-Anzeige (best-effort)
-    const email = _fdTicketState.extracted.contact.email;
-    if (email) {
-      try {
-        _fdTicketState.match = await _findCustomerContactByEmail(email);
-      } catch (mErr) {
-        console.warn('[AI] Email-Match fehlgeschlagen:', mErr.message);
-        _fdTicketState.match = null;
-      }
     }
   } catch (e) {
     toast('KI-Fehler: ' + e.message, 'error', 6000);
