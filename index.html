@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.77';
+const APP_VERSION = 'v3.78';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -669,7 +669,13 @@ const APP_KEYS = {
   // Komma-getrennte Ticket-Typen-Liste, leer = alle Typen
   freshdeskTicketTypes: null,
   // Subdomain (z.B. "flpliftparts") für Direktlinks zum Ticket in Freshdesk-UI
-  freshdeskDomain: null
+  freshdeskDomain: null,
+  // Val.town-API-Token + gewählter Val (für automatisches Code-Deployment).
+  // Wird in Master-Base abgelegt und ist auch über die Airtable-API lesbar,
+  // damit Maintenance-Updates aus dem Chat heraus ohne Copy-Paste machbar sind.
+  valtownApiKey: null,
+  valtownValId: null,
+  valtownValName: null
 };
 
 // Liefert die direkte Freshdesk-UI-URL eines Tickets, oder null wenn Domain nicht konfiguriert.
@@ -748,6 +754,9 @@ async function loadProjectKeys() {
         if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
         if (f.key_name === 'freshdeskTicketTypes')   APP_KEYS.freshdeskTicketTypes   = f.key_value;
         if (f.key_name === 'freshdeskDomain')        APP_KEYS.freshdeskDomain        = f.key_value;
+        if (f.key_name === 'valtownApiKey')          APP_KEYS.valtownApiKey          = f.key_value;
+        if (f.key_name === 'valtownValId')           APP_KEYS.valtownValId           = f.key_value;
+        if (f.key_name === 'valtownValName')         APP_KEYS.valtownValName         = f.key_value;
       });
     }
   } catch (_) {}
@@ -3331,6 +3340,42 @@ async function freshdeskFetch(path) {
   let p = String(path).replace(/^\/+/, '');
   if (!p.startsWith('api/v2/')) p = 'api/v2/' + p;
   return proxyFetch('freshdesk/' + p);
+}
+
+/* ============================================================
+   VAL.TOWN MANAGEMENT API
+   ============================================================
+   Direkt-Zugriff auf api.val.town zur Auto-Deployment des Proxy-Code.
+   Nutzt einen API-Token, der in der Master-Base als "valtownApiKey"
+   abgelegt ist. Der Token wird genau einmal beim Setup eingegeben
+   und bleibt — auch über die Airtable-API lesbar — als Brücke
+   für künftige Updates (kein manuelles Copy-Paste mehr nötig).
+   ============================================================ */
+async function valtownApi(path, opts) {
+  opts = opts || {};
+  const key = (opts.apiKey || APP_KEYS.valtownApiKey || '').trim();
+  if (!key) throw new Error('Val.town API-Token fehlt — bitte erst im Wizard eintragen');
+  const url = 'https://api.val.town/v1' + (path.startsWith('/') ? path : '/' + path);
+  const headers = { 'Authorization': 'Bearer ' + key };
+  if (opts.body) headers['Content-Type'] = 'application/json';
+  let res;
+  try {
+    res = await fetch(url, {
+      method: opts.method || 'GET',
+      headers,
+      body: opts.body ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : undefined
+    });
+  } catch (e) {
+    throw new Error('Val.town API nicht erreichbar: ' + (e.message || e));
+  }
+  const txt = await res.text();
+  let data = null;
+  try { data = txt ? JSON.parse(txt) : null; } catch (_) {}
+  if (!res.ok) {
+    const msg = (data && (data.message || data.error)) || txt.slice(0, 200) || ('HTTP ' + res.status);
+    throw new Error('Val.town ' + res.status + ': ' + msg);
+  }
+  return data;
 }
 
 /* ============================================================
@@ -6754,7 +6799,16 @@ function _applyKeyToAppState(keyName, value) {
 }
 
 // State für Wizard (welcher Step expanded ist)
-let _settingsWizState = { proxyUrlInput: '', salesGroupInput: '', testResult: null };
+let _settingsWizState = {
+  proxyUrlInput: '', salesGroupInput: '', testResult: null,
+  // Val.town-Setup-Step:
+  valtownTokenInput: '',     // wird beim Tippen gespiegelt (nicht persistiert bis "Verbinden")
+  valtownConnecting: false,  // während GET /me + GET /vals läuft
+  valtownDeploying: false,   // während PATCH /vals/{id}/files/proxy.ts läuft
+  valtownAvailableVals: null,// [{id, name}] oder null
+  valtownMe: null,           // {id, username, ...}
+  valtownLastError: null
+};
 
 /* ============================================================
    ADMIN: API-KOSTEN (AiUsageLog Dashboard)
@@ -7306,6 +7360,96 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
+      <!-- ============ STEP 8 — Val.town Auto-Deploy ============ -->
+      ${(() => {
+        const hasToken = !!APP_KEYS.valtownApiKey;
+        const hasVal   = !!APP_KEYS.valtownValId;
+        const vals     = _settingsWizState.valtownAvailableVals;
+        const me       = _settingsWizState.valtownMe;
+        const connecting = _settingsWizState.valtownConnecting;
+        const deploying  = _settingsWizState.valtownDeploying;
+        let badge = statusBadge(false, 'optional');
+        if (hasToken && hasVal) badge = statusBadge(true, 'gesetzt');
+        else if (hasToken)      badge = statusBadge(false, 'Val wählen');
+        return `
+        <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+          ${stepHeader(8, 'Val.town Auto-Deploy (optional)', badge)}
+          <div class="pl-11 space-y-3">
+            <p class="text-sm text-ink-700">
+              Mit einem Val.town-API-Token kann die App den Proxy-Code <strong>direkt aus dem Wizard</strong> deployen — kein Copy-Paste mehr. Der Token bleibt anschließend in der Master-Base, sodass künftige Code-Updates (z.B. wenn ich neue Features adde) automatisch eingespielt werden können.
+            </p>
+
+            <!-- Sub-Step A: Token eingeben -->
+            <div class="bg-ink-50 border border-ink-200 rounded-lg p-3">
+              <p class="text-xs font-semibold text-ink-900 mb-2 flex items-center gap-1.5">
+                <i data-lucide="key-round" class="w-3.5 h-3.5"></i> 8.1 · API-Token
+                ${hasToken ? '<span class="text-emerald-600">✓</span>' : ''}
+              </p>
+              <p class="text-[11px] text-ink-600 mb-2">
+                Token erstellen auf <a href="https://www.val.town/settings/api" target="_blank" class="text-brand-600 hover:underline">val.town/settings/api</a> →
+                <strong>New Token</strong> → Scopes: <code class="bg-ink-100 px-1 rounded text-[10px]">vals:read</code> + <code class="bg-ink-100 px-1 rounded text-[10px]">vals:write</code>.
+              </p>
+              <div class="flex gap-2 flex-wrap items-center">
+                <input type="password" id="settingsValtownToken" value="${hasToken ? '••••••••••••' : ''}" placeholder="vt_…" class="flex-1 min-w-[200px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
+                <button type="button" onclick="connectValtown()" ${connecting ? 'disabled' : ''} class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 inline-flex items-center gap-1.5 disabled:opacity-50">
+                  ${connecting
+                    ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Verbinde…'
+                    : '<i data-lucide="plug" class="w-4 h-4"></i> Verbinden + Vals laden'}
+                </button>
+              </div>
+              ${me ? `<p class="text-[11px] text-emerald-700 mt-2 inline-flex items-center gap-1"><i data-lucide="check-circle-2" class="w-3 h-3"></i> Verbunden als <strong>${escapeHtml(me.username || me.handle || me.email || '(unbekannt)')}</strong></p>` : ''}
+              ${_settingsWizState.valtownLastError ? `<p class="text-[11px] text-red-700 mt-2">⚠ ${escapeHtml(_settingsWizState.valtownLastError)}</p>` : ''}
+            </div>
+
+            <!-- Sub-Step B: Val auswählen -->
+            ${vals !== null ? `
+              <div class="bg-ink-50 border border-ink-200 rounded-lg p-3">
+                <p class="text-xs font-semibold text-ink-900 mb-2 flex items-center gap-1.5">
+                  <i data-lucide="server" class="w-3.5 h-3.5"></i> 8.2 · Val auswählen
+                  ${hasVal ? '<span class="text-emerald-600">✓</span>' : ''}
+                </p>
+                ${vals.length === 0
+                  ? '<p class="text-[11px] text-ink-500 italic">Keine Vals in deinem Account gefunden. Erst in Val.town einen HTTP-Val erstellen (Step 1).</p>'
+                  : `
+                  <div class="flex gap-2 flex-wrap items-center">
+                    <select id="settingsValtownVal" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
+                      <option value="">— Val wählen —</option>
+                      ${vals.map(v => `<option value="${escapeHtml(v.id)}" ${APP_KEYS.valtownValId === v.id ? 'selected' : ''}>${escapeHtml(v.name)}${v.type ? ' · ' + escapeHtml(v.type) : ''}</option>`).join('')}
+                    </select>
+                    <button type="button" onclick="selectValtownVal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 inline-flex items-center gap-1.5">
+                      <i data-lucide="save" class="w-4 h-4"></i> Speichern
+                    </button>
+                  </div>
+                  ${APP_KEYS.valtownValName ? `<p class="text-[11px] text-ink-600 mt-2">Aktuell gewählt: <strong>${escapeHtml(APP_KEYS.valtownValName)}</strong></p>` : ''}
+                `}
+              </div>
+            ` : hasToken && hasVal ? `
+              <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-[11px] text-emerald-800">
+                ✓ Setup gespeichert · Val: <strong>${escapeHtml(APP_KEYS.valtownValName || APP_KEYS.valtownValId)}</strong>
+              </div>
+            ` : ''}
+
+            <!-- Sub-Step C: Code deployen -->
+            ${hasToken && hasVal ? `
+              <div class="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                <p class="text-xs font-semibold text-purple-900 mb-2 flex items-center gap-1.5">
+                  <i data-lucide="rocket" class="w-3.5 h-3.5"></i> 8.3 · Aktuellen Code direkt deployen
+                </p>
+                <p class="text-[11px] text-purple-800 mb-2">
+                  Drückt den aktuellen Proxy-Code (Version 2 mit per-Firma-Keys + PUT-Support) direkt in deinen Val.
+                  Versionshistorie bleibt erhalten — Rollback in Val.town jederzeit möglich.
+                </p>
+                <button type="button" onclick="deployValtownCode()" ${deploying ? 'disabled' : ''} class="bg-purple-600 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-purple-700 inline-flex items-center gap-2 disabled:opacity-50">
+                  ${deploying
+                    ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Deploye…'
+                    : '<i data-lucide="rocket" class="w-4 h-4"></i> Code jetzt deployen'}
+                </button>
+              </div>
+            ` : ''}
+          </div>
+        </div>`;
+      })()}
+
       <!-- Legacy Master-Base Keys (collapsed) -->
       <details class="bg-ink-50 border border-ink-200 rounded-2xl p-4 mb-4 group">
         <summary class="cursor-pointer text-sm font-medium text-ink-700 flex items-center gap-2"><i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition"></i> Erweitert: alle Master-Base Keys ansehen</summary>
@@ -7407,6 +7551,136 @@ async function saveFreshdeskDomain() {
     renderAdminSettings();
   } catch (e) {
     toast(e.message, 'error', 7000);
+  }
+}
+
+/* ============================================================
+   VAL.TOWN AUTO-DEPLOY: Setup-Step + Token + Val-Wahl + Deploy
+   ============================================================ */
+// Speichert den vom User eingegebenen Token in der Master-Base,
+// verifiziert ihn via GET /v1/me und lädt anschließend die Liste
+// der eigenen Vals (HTTP-Vals werden bevorzugt).
+async function connectValtown() {
+  const inp = document.getElementById('settingsValtownToken');
+  const token = (inp?.value || '').trim();
+  if (!token) return toast('Bitte Val.town-Token eingeben', 'warn');
+  _settingsWizState.valtownConnecting = true;
+  _settingsWizState.valtownLastError = null;
+  renderAdminSettings();
+  try {
+    // Verify-Call: GET /v1/me liefert das Profil zurück
+    const me = await valtownApi('/me', { apiKey: token });
+    _settingsWizState.valtownMe = me;
+    // Vals des Users laden — neue API: /v1/me/vals
+    let vals = [];
+    try {
+      const out = await valtownApi('/me/vals?limit=100', { apiKey: token });
+      vals = Array.isArray(out?.data) ? out.data : (Array.isArray(out) ? out : []);
+    } catch (_) {
+      // Legacy-Fallback: GET /v1/users/{id}/vals
+      if (me?.id) {
+        const out = await valtownApi('/users/' + me.id + '/vals?limit=100', { apiKey: token });
+        vals = Array.isArray(out?.data) ? out.data : (Array.isArray(out) ? out : []);
+      }
+    }
+    _settingsWizState.valtownAvailableVals = vals.map(v => ({
+      id: v.id || v.valId || '',
+      name: v.name || v.title || '(unbenannt)',
+      type: v.type || '',
+      privacy: v.privacy || ''
+    })).filter(v => v.id);
+    // Token in Master-Base ablegen — bleibt auch über Airtable-API lesbar
+    const keys = await _fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'valtownApiKey');
+    await _writeMasterBaseKey('valtownApiKey', token, existing?.id || null);
+    APP_KEYS.valtownApiKey = token;
+    toast('Token gespeichert · ' + _settingsWizState.valtownAvailableVals.length + ' Vals gefunden', 'success');
+  } catch (e) {
+    _settingsWizState.valtownLastError = e.message || String(e);
+    toast('Val.town-Verbindung fehlgeschlagen: ' + _settingsWizState.valtownLastError, 'error', 8000);
+  } finally {
+    _settingsWizState.valtownConnecting = false;
+    renderAdminSettings();
+  }
+}
+
+// Speichert die Val-Auswahl (id + name) in Master-Base.
+async function selectValtownVal() {
+  const sel = document.getElementById('settingsValtownVal');
+  const valId = sel?.value || '';
+  if (!valId) return toast('Bitte einen Val auswählen', 'warn');
+  const found = (_settingsWizState.valtownAvailableVals || []).find(v => v.id === valId);
+  const valName = found?.name || '';
+  try {
+    const keys = await _fetchMasterBaseKeys();
+    const existingId = keys.find(r => r.fields.key_name === 'valtownValId');
+    const existingNm = keys.find(r => r.fields.key_name === 'valtownValName');
+    await _writeMasterBaseKey('valtownValId',   valId,   existingId?.id || null);
+    if (valName) await _writeMasterBaseKey('valtownValName', valName, existingNm?.id || null);
+    APP_KEYS.valtownValId   = valId;
+    APP_KEYS.valtownValName = valName;
+    toast('Val ausgewählt: ' + valName, 'success');
+    renderAdminSettings();
+  } catch (e) {
+    toast(e.message || String(e), 'error', 7000);
+  }
+}
+
+// Direkt-Deploy: ersetzt im gewählten Val den Code mit VALTOWN_PROXY_CODE.
+// Endpoints (Stand 2025): POST /v1/vals/{id}/versions  → erzeugt neue Version.
+async function deployValtownCode() {
+  if (!APP_KEYS.valtownApiKey) return toast('Erst Val.town-Token verbinden', 'warn');
+  if (!APP_KEYS.valtownValId)  return toast('Erst Val auswählen', 'warn');
+  if (!confirm('Den aktuellen Proxy-Code in Val.town ' + (APP_KEYS.valtownValName || APP_KEYS.valtownValId) + ' deployen?\n\nDer bestehende Code wird durch die neue Version ersetzt (Val.town behält Versionshistorie).')) return;
+  _settingsWizState.valtownDeploying = true;
+  renderAdminSettings();
+  let success = false;
+  try {
+    // Variante A (preferred, neue API): POST /v1/vals/{id}/versions
+    try {
+      await valtownApi('/vals/' + APP_KEYS.valtownValId + '/versions', {
+        method: 'POST',
+        body: { code: VALTOWN_PROXY_CODE }
+      });
+      success = true;
+    } catch (e1) {
+      // Variante B (fallback, ältere API): PUT /v1/vals/{id} mit { code }
+      try {
+        await valtownApi('/vals/' + APP_KEYS.valtownValId, {
+          method: 'PUT',
+          body: { code: VALTOWN_PROXY_CODE }
+        });
+        success = true;
+      } catch (e2) {
+        // Variante C: PATCH /v1/vals/{id}
+        await valtownApi('/vals/' + APP_KEYS.valtownValId, {
+          method: 'PATCH',
+          body: { code: VALTOWN_PROXY_CODE }
+        });
+        success = true;
+      }
+    }
+    if (success) {
+      toast('✓ Code in Val.town aktualisiert · auto-detect v2 beim nächsten Login', 'success', 5000);
+      // proxyV2-Detection ist erst nach Re-Login aktiv. Direkt /health-Test:
+      try {
+        const hres = await fetch(_proxyBase().replace(/\/+$/, '') + '/health', {
+          headers: { 'Authorization': 'Bearer ' + _bearerForProxy() }
+        });
+        if (hres.ok) {
+          const hj = await hres.json();
+          if (Array.isArray(hj?.user?.freshdesk_company_keys)) {
+            APP_KEYS.proxyV2 = true;
+            toast('Proxy v2 ist live ✓', 'success', 3000);
+          }
+        }
+      } catch (_) {}
+    }
+  } catch (e) {
+    toast('Deploy fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  } finally {
+    _settingsWizState.valtownDeploying = false;
+    renderAdminSettings();
   }
 }
 
