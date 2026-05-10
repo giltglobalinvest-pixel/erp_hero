@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.63';
+const APP_VERSION = 'v3.64';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1332,7 +1332,15 @@ let _fdTicketState = {
   match: null,            // { customer, contact } | null wenn kein Match
   customerActionLoading: false,
   // editierbare Felder (von KI gefüllt, vom User anpassbar)
-  editFields: { ticket_number: '', customer_reference: '', lieferzeit: '' }
+  editFields: {
+    ticket_number: '', customer_reference: '', lieferzeit: '',
+    customer_id: '', contact_id: '',
+    items: []   // [{article_id, qty, sku, name}]
+  },
+  // Caches für Comboboxen + Picker
+  cache: { customers: [], contacts: [], articles: [] },
+  articlePickerOpen: false,
+  articleSearch: ''
 };
 
 function _fdStatusLabel(s) { return s === 2 ? 'Offen' : s === 3 ? 'Ausstehend' : s === 4 ? 'Gelöst' : s === 5 ? 'Geschlossen' : ('Status ' + s); }
@@ -1380,7 +1388,13 @@ async function openFreshdeskTicket(ticketId) {
     id: ticketId, ticket: null, requester: null, conversations: null, showHistory: false,
     summary: null, summaryLoading: false, summarySaving: false,
     extracted: null, match: null, customerActionLoading: false,
-    editFields: { ticket_number: 'FT-' + ticketId, customer_reference: '', lieferzeit: '' }
+    editFields: {
+      ticket_number: 'FT-' + ticketId, customer_reference: '', lieferzeit: '',
+      customer_id: '', contact_id: '', items: []
+    },
+    cache: { customers: [], contacts: [], articles: [] },
+    articlePickerOpen: false,
+    articleSearch: ''
   };
   // Modal mit Loading-Indicator zeigen
   openModal(`
@@ -1639,16 +1653,25 @@ async function generateFreshdeskTicketSummary() {
     }
     const fullText = parts.join('\n');
 
-    // Article-Liste vorladen (gefiltert auf aktuellen Mandanten) — als Kontext für die KI
+    // Caches laden (Customers + Contacts + Articles) für Comboboxen, Picker, KI-Kontext
     const cur = getCurrentCompany();
+    try {
+      const [allCustomers, allContacts, allArticles] = await Promise.all([
+        readData('Customer').catch(() => []),
+        readData('Contact').catch(() => []),
+        readData('Article').catch(() => [])
+      ]);
+      _fdTicketState.cache = {
+        customers: allCustomers.filter(c => (c.fields.company_id || []).includes(cur?.id) && c.fields.status !== 'archiviert')
+          .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de')),
+        contacts: allContacts,
+        articles: allArticles.filter(a => (a.fields.company_id || []).includes(cur?.id) && a.fields.status !== 'archiviert')
+          .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'))
+      };
+    } catch (_) {}
     let articleSummary = '';
     try {
-      const allArticles = await readData('Article');
-      const articles = allArticles.filter(a =>
-        (a.fields.company_id || []).includes(cur?.id) &&
-        a.fields.status !== 'archiviert'
-      ).slice(0, 300);
-      articleSummary = articles.map(a => {
+      articleSummary = (_fdTicketState.cache.articles || []).slice(0, 300).map(a => {
         const f = a.fields || {};
         return [a.id, f.article_no || '–', f.name1 || '', f.name2 || '', f.manufacturer_no || '', f.sales_price || ''].join(' | ');
       }).join('\n');
@@ -1710,6 +1733,18 @@ ${fullText}`;
     } catch (parseErr) {
       console.warn('[AI] JSON-Parse fehlgeschlagen, nehme Rohtext als Zusammenfassung:', parseErr.message);
     }
+    // Article-Lookup für Item-Anzeige (sku/name)
+    const articleByIdInit = new Map((_fdTicketState.cache.articles || []).map(a => [a.id, a]));
+    const buildItemEntry = (it) => {
+      const a = articleByIdInit.get(it.article_id);
+      const af = a?.fields || {};
+      return {
+        article_id: it.article_id,
+        qty: Math.max(1, Number(it.qty) || 1),
+        sku: af.article_no || '',
+        name: af.name1 || (it.name_spoken || '')
+      };
+    };
     if (parsed && typeof parsed === 'object') {
       _fdTicketState.summary = String(parsed.summary || raw || '').trim() || '(KI-Antwort war leer)';
       _fdTicketState.extracted = {
@@ -1720,11 +1755,16 @@ ${fullText}`;
         },
         items: Array.isArray(parsed.items) ? parsed.items : []
       };
-      // Editierbare Felder befüllen — Ticketnummer initial = FT-Nr, von KI evtl. überschrieben
+      const matchedItems = (Array.isArray(parsed.items) ? parsed.items : [])
+        .filter(i => i.article_id && i.match_confidence === 'high')
+        .map(buildItemEntry);
       _fdTicketState.editFields = {
         ticket_number:      String(parsed.ticket_number || '').trim() || ('FT-' + _fdTicketState.id),
         customer_reference: String(parsed.customer_reference || '').trim(),
-        lieferzeit:         String(parsed.lieferzeit || '').trim()
+        lieferzeit:         String(parsed.lieferzeit || '').trim(),
+        customer_id:        _fdTicketState.match?.customer?.id || '',
+        contact_id:         _fdTicketState.match?.contact?.id  || '',
+        items:              matchedItems
       };
     } else {
       _fdTicketState.summary = String(raw || '').trim() || '(KI-Antwort war leer)';
@@ -1735,8 +1775,10 @@ ${fullText}`;
       };
       _fdTicketState.editFields = {
         ticket_number: 'FT-' + _fdTicketState.id,
-        customer_reference: '',
-        lieferzeit: ''
+        customer_reference: '', lieferzeit: '',
+        customer_id: _fdTicketState.match?.customer?.id || '',
+        contact_id:  _fdTicketState.match?.contact?.id  || '',
+        items: []
       };
     }
     // Im ERP nach Email matchen — parallel zur UI-Anzeige (best-effort)
@@ -1968,18 +2010,48 @@ function discardFreshdeskTicketSummary() {
    Zeigt Match-Ergebnis (vorhandener Kunde im ERP) oder von der KI
    extrahierte Daten + Buttons zum Anlegen + Angebot erzeugen.
    ============================================================ */
-// Block mit editierbaren Feldern für Quote-Anlage (Ticketnummer, Kundenreferenz, Lieferzeit)
-// + erkannte Artikel als Vorschau
+// Zentraler Editier-Block: Customer + Contact + Felder + Items + Anlegen-Button.
+// Alle Werte vorausgefüllt vom KI-Match, vom User editierbar bevor Quote angelegt wird.
 function _renderAiEditableFieldsBlock() {
   const ext = _fdTicketState.extracted;
   if (!ext) return '';
   const ef = _fdTicketState.editFields || {};
-  const items = Array.isArray(ext.items) ? ext.items : [];
+  const cache = _fdTicketState.cache || { customers: [], contacts: [], articles: [] };
+  const customerItems = (cache.customers || []).map(c => ({
+    id: c.id,
+    label: c.fields.name1 || '–',
+    secondary: [c.fields.customer_no, c.fields.city].filter(Boolean).join(' · ')
+  }));
+  const contactItems = !ef.customer_id ? [] : (cache.contacts || [])
+    .filter(c => (c.fields.customer_id || []).includes(ef.customer_id))
+    .map(c => ({
+      id: c.id,
+      label: contactDisplayName(c.fields),
+      secondary: [c.fields.role, c.fields.email].filter(Boolean).join(' · ')
+    }));
+  const items = ef.items || [];
+  const loading = _fdTicketState.customerActionLoading;
+  const ready = !!(ef.customer_id && items.length > 0);
+
   return `
     <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 mt-3">
       <p class="text-xs font-semibold text-blue-900 mb-2 flex items-center gap-1.5">
-        <i data-lucide="edit-3" class="w-4 h-4"></i> Editierbare Angebot-Daten
+        <i data-lucide="edit-3" class="w-4 h-4"></i> Editierbare Angebot-Daten — vor Anlegen prüfen / korrigieren
       </p>
+
+      <!-- Customer + Contact -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Kunde</label>
+          ${renderCombobox({ id: 'fd_customer', name: '', items: customerItems, current: ef.customer_id, placeholder: 'Kunde suchen…', onChange: '_onFdCustomerChange' })}
+        </div>
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Ansprechpartner</label>
+          ${renderCombobox({ id: 'fd_contact', name: '', items: contactItems, current: ef.contact_id, placeholder: ef.customer_id ? 'Kontakt suchen…' : 'Erst Kunden wählen', onChange: '_onFdContactChange' })}
+        </div>
+      </div>
+
+      <!-- Edit-Felder -->
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
         <div>
           <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Ticketnummer</label>
@@ -1994,26 +2066,79 @@ function _renderAiEditableFieldsBlock() {
           <input type="text" value="${escapeHtml(ef.lieferzeit || '')}" oninput="_setFdEditField('lieferzeit', this.value)" placeholder="z.B. 2 Wochen / KW 24" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30">
         </div>
       </div>
-      ${items.length > 0 ? `
-        <div>
-          <p class="text-[11px] uppercase tracking-wider text-ink-500 mb-1.5 font-semibold flex items-center gap-1.5">
-            <i data-lucide="package" class="w-3 h-3"></i> KI-erkannte Artikel (${items.length})
+
+      <!-- Artikel -->
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1.5 flex-wrap gap-2">
+          <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold flex items-center gap-1.5">
+            <i data-lucide="package" class="w-3 h-3"></i> Artikel (${items.length})
           </p>
-          <div class="space-y-1">
-            ${items.map((it, idx) => {
-              const matched = !!it.article_id && it.match_confidence === 'high';
-              return `
-                <div class="flex items-center gap-2 bg-white rounded-lg px-2 py-1.5 border ${matched ? 'border-emerald-200' : 'border-amber-200'}">
-                  <span class="text-[10px] uppercase tracking-wider px-1 py-0.5 rounded font-semibold ${matched ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${matched ? 'erkannt' : (it.match_confidence || '?')}</span>
-                  <span class="text-xs text-ink-900 flex-1 truncate">${escapeHtml(it.name_spoken || '–')}</span>
-                  <input type="number" min="1" value="${Math.max(1, Number(it.qty) || 1)}" onchange="_setFdItemQty(${idx}, this.value)" class="w-12 px-1 py-0.5 border border-ink-200 rounded text-xs text-center">
-                  ${matched ? '' : '<span class="text-[10px] text-amber-700 italic">ggf. im Editor anpassen</span>'}
-                </div>
-              `;
-            }).join('')}
-          </div>
+          <button type="button" onclick="_toggleFdArticlePicker()" class="text-xs ${_fdTicketState.articlePickerOpen ? 'bg-blue-100 text-blue-700 border-blue-300' : 'bg-white text-ink-700 border-ink-200'} border rounded px-2 py-1 inline-flex items-center gap-1 hover:border-blue-300">
+            <i data-lucide="${_fdTicketState.articlePickerOpen ? 'x' : 'list-plus'}" class="w-3 h-3"></i>
+            ${_fdTicketState.articlePickerOpen ? 'Picker schließen' : '+ Artikel hinzufügen'}
+          </button>
         </div>
-      ` : ''}
+        ${items.length > 0 ? `
+          <div class="space-y-1 mb-2">
+            ${items.map((it, idx) => `
+              <div class="bg-white rounded-lg px-2 py-1.5 border border-emerald-100">
+                <div class="flex items-start gap-2">
+                  <div class="flex-1 min-w-0">
+                    <p class="text-[11px] font-mono text-ink-500">${escapeHtml(it.sku || '–')}</p>
+                    <p class="text-sm font-medium text-ink-900 break-words leading-snug">${escapeHtml(it.name || '')}</p>
+                  </div>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <input type="number" min="1" value="${it.qty}" onchange="_setFdItemEditQty(${idx}, this.value)" class="w-14 px-2 py-0.5 border border-ink-200 rounded text-xs text-center">
+                    <button type="button" onclick="_removeFdItem(${idx})" class="text-ink-400 hover:text-red-600 p-1"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
+                  </div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        ` : '<p class="text-xs text-ink-500 italic">Keine Artikel ausgewählt — bitte mindestens einen hinzufügen.</p>'}
+        ${_renderFdArticlePicker()}
+      </div>
+
+      <!-- Action-Buttons -->
+      <div class="flex items-center gap-2 flex-wrap pt-2 border-t border-blue-200">
+        <button type="button" onclick="aiCreateQuoteFromEdits()" ${(!ready || loading) ? 'disabled' : ''} class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-emerald-700 inline-flex items-center gap-2 disabled:opacity-50">
+          ${loading ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Erzeuge…' : '<i data-lucide="file-plus" class="w-4 h-4"></i> Angebot erzeugen'}
+        </button>
+        ${!ef.customer_id ? '<span class="text-[11px] text-amber-700 italic">⚠ Kunde fehlt</span>' : ''}
+        ${ef.customer_id && items.length === 0 ? '<span class="text-[11px] text-amber-700 italic">⚠ Mindestens 1 Artikel nötig</span>' : ''}
+      </div>
+    </div>
+  `;
+}
+
+function _renderFdArticlePicker() {
+  if (!_fdTicketState.articlePickerOpen) return '';
+  const articles = _fdTicketState.cache?.articles || [];
+  const q = (_fdTicketState.articleSearch || '').toLowerCase().trim();
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const filtered = !tokens.length ? articles.slice(0, 30) : articles.filter(a => {
+    const f = a.fields || {};
+    const haystack = [f.article_no, f.name1, f.name2, f.manufacturer_no, f.description].filter(Boolean).join(' ').toLowerCase();
+    return tokens.every(t => haystack.includes(t));
+  }).slice(0, 30);
+  return `
+    <div class="bg-ink-50 border border-ink-200 rounded-lg p-2 mb-2">
+      <input type="search" id="fdArticleSearch" oninput="_setFdArticleSearch(this.value)" value="${escapeHtml(_fdTicketState.articleSearch)}" placeholder="Art-Nr, Name, Hersteller-Nr…" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+      <div class="space-y-1 max-h-[35vh] overflow-y-auto">
+        ${filtered.length === 0 ? '<p class="text-xs text-ink-500 italic p-2">Keine Treffer</p>' : filtered.map(a => {
+          const f = a.fields || {};
+          return `
+            <div class="bg-white border border-ink-200 rounded px-2 py-1.5 flex items-center gap-2">
+              <div class="flex-1 min-w-0">
+                <p class="text-[11px] font-mono text-ink-500 truncate">${escapeHtml(f.article_no || '')}${f.manufacturer_no ? ' · ' + escapeHtml(f.manufacturer_no) : ''}</p>
+                <p class="text-xs font-medium text-ink-900 truncate">${escapeHtml(f.name1 || '')}</p>
+              </div>
+              <input type="number" id="fd-pick-qty-${a.id}" value="1" min="1" class="w-12 px-1 py-0.5 border border-ink-200 rounded text-xs text-center shrink-0">
+              <button type="button" onclick="_addFdArticle('${a.id}')" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-2 py-1 text-xs inline-flex items-center gap-1 shrink-0"><i data-lucide="plus" class="w-3 h-3"></i></button>
+            </div>
+          `;
+        }).join('')}
+      </div>
     </div>
   `;
 }
@@ -2022,10 +2147,152 @@ function _setFdEditField(name, value) {
   _fdTicketState.editFields = _fdTicketState.editFields || {};
   _fdTicketState.editFields[name] = value;
 }
-function _setFdItemQty(idx, value) {
-  if (!_fdTicketState.extracted || !Array.isArray(_fdTicketState.extracted.items)) return;
-  const it = _fdTicketState.extracted.items[idx];
+function _setFdItemEditQty(idx, value) {
+  if (!Array.isArray(_fdTicketState.editFields?.items)) return;
+  const it = _fdTicketState.editFields.items[idx];
   if (it) it.qty = Math.max(1, Number(value) || 1);
+}
+function _removeFdItem(idx) {
+  if (!Array.isArray(_fdTicketState.editFields?.items)) return;
+  _fdTicketState.editFields.items.splice(idx, 1);
+  _renderFreshdeskTicket();
+}
+function _onFdCustomerChange(value) {
+  _fdTicketState.editFields.customer_id = value || '';
+  // Wenn Customer wechselt: Contact zurücksetzen wenn er nicht zum neuen Customer gehört
+  const cache = _fdTicketState.cache || {};
+  const c = (cache.contacts || []).find(x => x.id === _fdTicketState.editFields.contact_id);
+  if (!c || !(c.fields.customer_id || []).includes(value)) {
+    _fdTicketState.editFields.contact_id = '';
+    // Auto-Pick primary Contact
+    if (value) {
+      const primaryId = findPrimaryContactId(cache.contacts || [], value, 'customer');
+      if (primaryId) _fdTicketState.editFields.contact_id = primaryId;
+    }
+  }
+  _renderFreshdeskTicket();
+}
+function _onFdContactChange(value) {
+  _fdTicketState.editFields.contact_id = value || '';
+}
+function _toggleFdArticlePicker() {
+  _fdTicketState.articlePickerOpen = !_fdTicketState.articlePickerOpen;
+  _fdTicketState.articleSearch = '';
+  _renderFreshdeskTicket();
+  if (_fdTicketState.articlePickerOpen) setTimeout(() => document.getElementById('fdArticleSearch')?.focus(), 50);
+}
+function _setFdArticleSearch(q) {
+  _fdTicketState.articleSearch = q;
+  _renderFreshdeskTicket();
+  setTimeout(() => {
+    const inp = document.getElementById('fdArticleSearch');
+    if (inp) { inp.focus(); inp.setSelectionRange(q.length, q.length); }
+  }, 0);
+}
+function _addFdArticle(articleId) {
+  const cache = _fdTicketState.cache || {};
+  const a = (cache.articles || []).find(x => x.id === articleId);
+  if (!a) return;
+  const f = a.fields || {};
+  const qtyInp = document.getElementById('fd-pick-qty-' + articleId);
+  const qty = Math.max(1, parseInt(qtyInp?.value || '1', 10) || 1);
+  _fdTicketState.editFields.items = _fdTicketState.editFields.items || [];
+  const existing = _fdTicketState.editFields.items.find(i => i.article_id === articleId);
+  if (existing) existing.qty += qty;
+  else _fdTicketState.editFields.items.push({
+    article_id: articleId, qty,
+    sku: f.article_no || '',
+    name: f.name1 || ''
+  });
+  toast(`Hinzugefügt: ${qty}× ${f.article_no || f.name1}`, 'success', 1500);
+  _renderFreshdeskTicket();
+}
+
+// Zentrale Anlage: nutzt EditFields (Customer + Contact + Items + Felder)
+async function aiCreateQuoteFromEdits() {
+  const ef = _fdTicketState.editFields || {};
+  if (!ef.customer_id) { toast('Bitte Kunde auswählen', 'error'); return; }
+  if (!Array.isArray(ef.items) || ef.items.length === 0) { toast('Bitte mindestens einen Artikel hinzufügen', 'error'); return; }
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Mandant fehlt', 'error'); return; }
+  _fdTicketState.customerActionLoading = true;
+  _renderFreshdeskTicket();
+  try {
+    // Schema-Sicherung
+    try {
+      await ensureFields('Quote', [
+        { name: 'freshdesk_ticket_id', type: 'singleLineText' },
+        { name: 'ai_summary',          type: 'multilineText' }
+      ]);
+    } catch (_) {}
+    const quoteNo = await nextQuoteNo(cur.id);
+    const today = new Date();
+    const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const fields = {
+      quote_no: quoteNo,
+      company_id: [cur.id],
+      customer_id: [ef.customer_id],
+      date: iso(today),
+      valid_until: iso(validUntil),
+      status: 'Entwurf'
+    };
+    if (ef.contact_id) fields.contact_id = [ef.contact_id];
+    // Customer-Stammdaten
+    const terms = await getCustomerTerms(ef.customer_id);
+    if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
+    if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
+    // Freshdesk-Verknüpfung + Zusammenfassung
+    if (_fdTicketState.id) {
+      fields.freshdesk_ticket_id = String(_fdTicketState.id);
+      fields.description = 'Quelle: Freshdesk-Ticket FT-' + _fdTicketState.id;
+    }
+    if (_fdTicketState.summary) fields.ai_summary = String(_fdTicketState.summary);
+    // Custom Values (ticketnummer, kundenreferenz, lieferzeit)
+    const cfClean = {};
+    if ((ef.ticket_number      || '').trim()) cfClean.ticketnummer    = ef.ticket_number.trim();
+    if ((ef.customer_reference || '').trim()) cfClean.kundenreferenz  = ef.customer_reference.trim();
+    if ((ef.lieferzeit         || '').trim()) cfClean.lieferzeit      = ef.lieferzeit.trim();
+    if (Object.keys(cfClean).length > 0) fields.custom_values = JSON.stringify(cfClean);
+    // Bundle aus Items ableiten
+    const itemsForBundle = ef.items.map(i => ({ article_id: i.article_id, qty: i.qty }));
+    const bundlePick = await pickBundleForItems(itemsForBundle, 'Angebot');
+    let chosenBundleId = bundlePick.bundleId;
+    if (bundlePick.conflict) {
+      chosenBundleId = await showBundleConflictPicker(bundlePick.candidates, 'Angebot');
+      if (chosenBundleId === null) {
+        _fdTicketState.customerActionLoading = false;
+        _renderFreshdeskTicket();
+        return;
+      }
+    }
+    if (chosenBundleId) fields.bundle_id = chosenBundleId;
+    // Quote anlegen
+    const created = await writeData('Quote', fields);
+    // Items als QuoteItem (vollständig via Helper)
+    const articleById = new Map((_fdTicketState.cache?.articles || []).map(a => [a.id, a]));
+    let pos = 1;
+    for (const it of ef.items) {
+      try {
+        const article = articleById.get(it.article_id);
+        if (article) {
+          await writeData('QuoteItem', _aiBuildQuoteItemFields(article, it.qty, pos, created.id));
+        } else {
+          await writeData('QuoteItem', { quote_id: [created.id], article_id: [it.article_id], qty: it.qty, pos });
+        }
+        pos++;
+      } catch (e) { console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message); }
+    }
+    closeModal();
+    toast('Angebot ' + quoteNo + ' angelegt — öffne Editor', 'success', 3000);
+    window.scrollTo({ top: 0 });
+    await new Promise(r => setTimeout(r, 150));
+    await openQuoteModal(created.id);
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error', 7000);
+    _fdTicketState.customerActionLoading = false;
+    _renderFreshdeskTicket();
+  }
 }
 
 function _renderAiCustomerBlock() {
@@ -2034,31 +2301,27 @@ function _renderAiCustomerBlock() {
   const requesterEmail = _fdTicketState.requester?.email || '';
   const loading = _fdTicketState.customerActionLoading;
 
-  // Fall 1: Match in ERP gefunden → Kunde existiert bereits
+  // Fall 1: Match in ERP gefunden → kompakter Status-Hinweis (Action-Buttons sind im Edit-Block)
   if (match && match.customer) {
     const c = match.customer.fields || {};
     const k = match.contact?.fields || null;
     return `
-      <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mt-3">
-        <p class="text-xs font-semibold text-emerald-900 flex items-center gap-1.5 mb-2">
-          <i data-lucide="check-circle-2" class="w-4 h-4"></i> Kunde im ERP gefunden (per E-Mail)
-        </p>
-        <div class="text-sm text-ink-900 mb-1"><strong>${escapeHtml(c.name1 || '–')}</strong>${c.name2 ? ' · ' + escapeHtml(c.name2) : ''}</div>
-        <p class="text-xs text-ink-600">${escapeHtml(c.street || '')}${c.street && (c.zip || c.city) ? ' · ' : ''}${escapeHtml(c.zip || '')} ${escapeHtml(c.city || '')}</p>
-        ${k ? `<p class="text-xs text-ink-600 mt-1">Kontakt: ${escapeHtml(((k.first_name || '') + ' ' + (k.last_name || '')).trim() || k.name || '–')} · ${escapeHtml(k.email || requesterEmail)}</p>` : ''}
-        <div class="flex gap-2 flex-wrap mt-3">
-          <button type="button" onclick="aiCreateQuoteFromMatch()" ${loading ? 'disabled' : ''} class="bg-emerald-600 text-white rounded-lg px-3 py-1.5 text-xs font-semibold hover:bg-emerald-700 inline-flex items-center gap-1.5 disabled:opacity-50">
-            ${loading ? '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Erzeuge…' : '<i data-lucide="file-plus" class="w-3.5 h-3.5"></i> Angebot erzeugen'}
-          </button>
-          <button type="button" onclick="closeModal();renderCustomers();setTimeout(()=>openCustomerModal('${match.customer.id}'),200)" class="border border-ink-200 text-ink-700 rounded-lg px-3 py-1.5 text-xs hover:bg-ink-50 inline-flex items-center gap-1.5">
-            <i data-lucide="external-link" class="w-3.5 h-3.5"></i> Kunde öffnen
-          </button>
+      <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mt-3 flex items-start gap-2">
+        <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-700 mt-0.5 shrink-0"></i>
+        <div class="flex-1 min-w-0">
+          <p class="text-xs font-semibold text-emerald-900">Kunde im ERP gefunden (per E-Mail)</p>
+          <div class="text-sm text-ink-900 mt-0.5"><strong>${escapeHtml(c.name1 || '–')}</strong></div>
+          <p class="text-xs text-ink-600">${escapeHtml(c.street || '')}${c.street && (c.zip || c.city) ? ' · ' : ''}${escapeHtml(c.zip || '')} ${escapeHtml(c.city || '')}</p>
+          ${k ? `<p class="text-xs text-ink-600 mt-0.5">Kontakt: ${escapeHtml(((k.first_name || '') + ' ' + (k.last_name || '')).trim() || k.name || '–')}</p>` : ''}
         </div>
+        <button type="button" onclick="closeModal();renderCustomers();setTimeout(()=>openCustomerModal('${match.customer.id}'),200)" class="text-xs text-ink-500 hover:text-ink-900 inline-flex items-center gap-1 shrink-0" title="Kunde im Stammdaten-Modal öffnen">
+          <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+        </button>
       </div>
     `;
   }
 
-  // Fall 2: Kein Match aber wir haben extrahierte Daten oder zumindest die Email
+  // Fall 2: Kein Match aber wir haben extrahierte Daten — biete an, Customer anzulegen
   if (ext && (ext.company?.name || ext.contact?.first_name || ext.contact?.last_name || requesterEmail)) {
     const co = ext.company || {};
     const ct = ext.contact || {};
@@ -2066,42 +2329,62 @@ function _renderAiCustomerBlock() {
     return `
       <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 mt-3">
         <p class="text-xs font-semibold text-amber-900 flex items-center gap-1.5 mb-2">
-          <i data-lucide="user-plus" class="w-4 h-4"></i> Kunde nicht im ERP — von KI extrahierte Daten:
+          <i data-lucide="user-plus" class="w-4 h-4"></i> Kunde nicht im ERP — KI hat Daten extrahiert
         </p>
-        <div class="grid sm:grid-cols-2 gap-3 text-xs text-ink-700 mb-3">
+        <div class="grid sm:grid-cols-2 gap-2 text-xs text-ink-700 mb-3">
           <div class="bg-white rounded-lg p-2 border border-amber-100">
             <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1 font-semibold">Firma</p>
             <p class="font-medium text-ink-900">${escapeHtml(co.name || '—')}</p>
             ${co.street ? `<p class="text-ink-600">${escapeHtml(co.street)}</p>` : ''}
             ${(co.zip || co.city) ? `<p class="text-ink-600">${escapeHtml(co.zip || '')} ${escapeHtml(co.city || '')}</p>` : ''}
-            ${co.country ? `<p class="text-ink-600">${escapeHtml(co.country)}</p>` : ''}
-            ${co.vat_id ? `<p class="text-ink-600">USt-ID: ${escapeHtml(co.vat_id)}</p>` : ''}
           </div>
           <div class="bg-white rounded-lg p-2 border border-amber-100">
             <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1 font-semibold">Kontakt</p>
             <p class="font-medium text-ink-900">${escapeHtml(fullName || '—')}</p>
-            ${ct.role ? `<p class="text-ink-600 italic">${escapeHtml(ct.role)}</p>` : ''}
             <p class="text-ink-600 break-all">${escapeHtml(ct.email || requesterEmail || '')}</p>
             ${ct.phone ? `<p class="text-ink-600">Tel: ${escapeHtml(ct.phone)}</p>` : ''}
-            ${ct.mobile ? `<p class="text-ink-600">Mobil: ${escapeHtml(ct.mobile)}</p>` : ''}
           </div>
         </div>
-        <div class="flex gap-2 flex-wrap">
-          <button type="button" onclick="aiCreateCustomerAndQuote()" ${loading ? 'disabled' : ''} class="bg-emerald-600 text-white rounded-lg px-3 py-1.5 text-xs font-semibold hover:bg-emerald-700 inline-flex items-center gap-1.5 disabled:opacity-50">
-            ${loading ? '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lege an…' : '<i data-lucide="check" class="w-3.5 h-3.5"></i> Anlegen + Angebot erzeugen'}
-          </button>
-          <button type="button" onclick="aiCreateCustomerOnly()" ${loading ? 'disabled' : ''} class="border border-ink-200 text-ink-700 bg-white rounded-lg px-3 py-1.5 text-xs hover:bg-ink-50 inline-flex items-center gap-1.5 disabled:opacity-50">
-            <i data-lucide="user-plus" class="w-3.5 h-3.5"></i> Nur Kunde anlegen
-          </button>
-          <button type="button" onclick="aiSkipCustomerAction()" ${loading ? 'disabled' : ''} class="text-ink-500 hover:text-ink-700 px-3 py-1.5 text-xs disabled:opacity-50">
-            Verwerfen
-          </button>
-        </div>
-        ${!co.name && !fullName ? '<p class="text-[11px] text-amber-700 italic mt-2">Hinweis: KI konnte keine Firma/Person eindeutig erkennen. Vor dem Anlegen eventuell Kunden-Modal manuell ergänzen.</p>' : ''}
+        <button type="button" onclick="aiCreateCustomerAndUseInEdits()" ${loading ? 'disabled' : ''} class="bg-amber-600 text-white rounded-lg px-3 py-1.5 text-xs font-semibold hover:bg-amber-700 inline-flex items-center gap-1.5 disabled:opacity-50">
+          ${loading ? '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lege an…' : '<i data-lucide="user-plus" class="w-3.5 h-3.5"></i> Diesen Kunden anlegen + im Edit-Block auswählen'}
+        </button>
       </div>
     `;
   }
   return ''; // weder Match noch extrahierte Daten
+}
+
+// Legt Customer + ggf. Contact aus extrahierten Daten an, fügt sie zum Cache hinzu
+// und setzt customer_id/contact_id im EditFields-Block (kein Quote-Erzeugen).
+async function aiCreateCustomerAndUseInEdits() {
+  _fdTicketState.customerActionLoading = true;
+  _renderFreshdeskTicket();
+  try {
+    const { customerId, contactId } = await _aiCreateCustomerAndContactFromExtracted();
+    // Cache aktualisieren — frisch laden ist sicher
+    const cur = getCurrentCompany();
+    const [allCustomers, allContacts] = await Promise.all([
+      readData('Customer').catch(() => []),
+      readData('Contact').catch(() => [])
+    ]);
+    _fdTicketState.cache.customers = allCustomers
+      .filter(c => (c.fields.company_id || []).includes(cur?.id) && c.fields.status !== 'archiviert')
+      .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+    _fdTicketState.cache.contacts = allContacts;
+    // EditFields setzen
+    _fdTicketState.editFields.customer_id = customerId;
+    if (contactId) _fdTicketState.editFields.contact_id = contactId;
+    // Match-Status auch updaten, damit der grüne Status-Block erscheint
+    const newCust = allCustomers.find(c => c.id === customerId);
+    const newCont = contactId ? allContacts.find(c => c.id === contactId) : null;
+    _fdTicketState.match = { customer: newCust, contact: newCont };
+    toast('Kunde angelegt + ausgewählt', 'success', 2500);
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error', 7000);
+  } finally {
+    _fdTicketState.customerActionLoading = false;
+    _renderFreshdeskTicket();
+  }
 }
 
 // Helper: liefert payment_terms + delivery_terms aus Customer-Stammdaten (async, einzelner DB-Call)
