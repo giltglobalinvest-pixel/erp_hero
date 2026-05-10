@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.57';
+const APP_VERSION = 'v3.58';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -9840,20 +9840,6 @@ async function openQuoteModal(id) {
   const attachments = allAttachments.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const paymentTerms = allPaymentTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const deliveryTerms = allDeliveryTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
-  // Default-Werte: erst aus Quote selbst, sonst aus Customer-Stammdaten,
-  // sonst (Fallback für ganz neue Anlagen ohne Customer) globaler Default aus PaymentTerm-Tabelle
-  let initialPayment  = f.payment_terms  || '';
-  let initialDelivery = f.delivery_terms || '';
-  if (!initialPayment && currentCustomerId) {
-    const t = customerTermsFromList(currentCustomerId, allCustomers);
-    if (t.payment_terms) initialPayment = t.payment_terms;
-  }
-  if (!initialDelivery && currentCustomerId) {
-    const t = customerTermsFromList(currentCustomerId, allCustomers);
-    if (t.delivery_terms) initialDelivery = t.delivery_terms;
-  }
-  if (!initialPayment  && !id) initialPayment  = paymentTerms.find(t => t.fields.is_default)?.fields.name || '';
-  if (!initialDelivery && !id) initialDelivery = deliveryTerms.find(t => t.fields.is_default)?.fields.name || '';
   const selectedAttachmentIds = f.attachment_ids || [];
   // Template-Cache für die Vorlagen-Picker
   window._quoteTemplates = allTemplates.filter(t =>
@@ -9912,6 +9898,17 @@ async function openQuoteModal(id) {
   if (!currentContactId && currentCustomerId) {
     currentContactId = findPrimaryContactId(allContacts, currentCustomerId, 'customer');
   }
+  // Default-Werte: erst aus Quote selbst, sonst aus Customer-Stammdaten,
+  // sonst (Fallback für ganz neue Anlagen ohne Customer) globaler Default aus PaymentTerm-Tabelle
+  let initialPayment  = f.payment_terms  || '';
+  let initialDelivery = f.delivery_terms || '';
+  if (currentCustomerId) {
+    const t = customerTermsFromList(currentCustomerId, allCustomers);
+    if (!initialPayment  && t.payment_terms)  initialPayment  = t.payment_terms;
+    if (!initialDelivery && t.delivery_terms) initialDelivery = t.delivery_terms;
+  }
+  if (!initialPayment  && !id) initialPayment  = paymentTerms.find(t => t.fields.is_default)?.fields.name || '';
+  if (!initialDelivery && !id) initialDelivery = deliveryTerms.find(t => t.fields.is_default)?.fields.name || '';
   const sums = calcQuoteSums(items);
 
   // Combobox-Items
