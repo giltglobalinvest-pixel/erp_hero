@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.51';
+const APP_VERSION = 'v3.52';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -13064,7 +13064,108 @@ function showApp() {
   initNavRouting();
   renderMandantenSwitcher();
   renderWelcome();
+  initPullToRefresh();
   if (window.lucide) lucide.createIcons();
+}
+
+/* ============================================================
+   PULL-TO-REFRESH (Mobile)
+   Am oberen Rand nach unten ziehen → location.reload().
+   Aktiviert sich nur auf Touch-Geräten und wenn:
+   - kein Modal offen
+   - window.scrollY === 0 (ganz oben)
+   - Login-Screen nicht aktiv
+   ============================================================ */
+let _ptrInitialized = false;
+function initPullToRefresh() {
+  if (_ptrInitialized) return;
+  if (!('ontouchstart' in window) && !navigator.maxTouchPoints) return;
+  _ptrInitialized = true;
+
+  // Visueller Indikator (fixed, nicht im DOM-Flow)
+  const ind = document.createElement('div');
+  ind.id = 'ptrIndicator';
+  ind.style.cssText = 'position:fixed;top:0;left:0;right:0;display:flex;justify-content:center;align-items:center;height:60px;pointer-events:none;z-index:99999;transform:translateY(-100%);transition:transform 250ms ease-out;';
+  ind.innerHTML = '<div id="ptrBubble" style="background:white;border:1px solid #e2e8f0;box-shadow:0 4px 16px rgba(0,0,0,.08);border-radius:9999px;width:42px;height:42px;display:grid;place-items:center;"><svg id="ptrIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#1FA8D6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 50ms linear;"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/></svg></div>';
+  document.body.appendChild(ind);
+
+  let startY = 0, lastDelta = 0, active = false;
+  const THRESHOLD = 80;
+
+  function shouldTrack() {
+    // Modal offen?
+    const backdrop = document.getElementById('modalBackdrop');
+    if (backdrop && !backdrop.classList.contains('hidden')) return false;
+    const backdrop2 = document.getElementById('modalBackdrop2');
+    if (backdrop2 && !backdrop2.classList.contains('hidden')) return false;
+    // Login-Screen aktiv?
+    const login = document.getElementById('loginScreen');
+    if (login && !login.classList.contains('hidden')) return false;
+    // Boot-Screen?
+    const boot = document.getElementById('bootScreen');
+    if (boot && !boot.classList.contains('hidden')) return false;
+    return true;
+  }
+
+  document.addEventListener('touchstart', (e) => {
+    if (!shouldTrack()) { active = false; return; }
+    if (window.scrollY > 0) { active = false; return; }
+    startY = e.touches[0].clientY;
+    active = true;
+    lastDelta = 0;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!active) return;
+    if (window.scrollY > 0) {
+      // User hat zwischendurch gescrollt → abbrechen
+      active = false;
+      ind.style.transform = 'translateY(-100%)';
+      return;
+    }
+    const delta = e.touches[0].clientY - startY;
+    if (delta <= 0) {
+      ind.style.transform = 'translateY(-100%)';
+      return;
+    }
+    lastDelta = delta;
+    // Resistance: je weiter, desto langsamer
+    const offset = Math.min(80, delta * 0.5);
+    ind.style.transition = 'none';
+    ind.style.transform = 'translateY(' + (offset - 10) + 'px)';
+    const icon = document.getElementById('ptrIcon');
+    if (icon) {
+      const progress = Math.min(1, delta / THRESHOLD);
+      icon.style.transform = 'rotate(' + (progress * 270) + 'deg)';
+      icon.setAttribute('stroke', progress >= 1 ? '#10b981' : '#1FA8D6');
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (!active) return;
+    active = false;
+    ind.style.transition = 'transform 250ms ease-out';
+    if (lastDelta >= THRESHOLD) {
+      // Trigger Refresh — Indikator als "lädt..." darstellen, dann reload
+      ind.style.transform = 'translateY(20px)';
+      const icon = document.getElementById('ptrIcon');
+      if (icon) {
+        icon.style.transition = 'transform 800ms linear';
+        icon.style.animation = 'ptrSpin 800ms linear infinite';
+      }
+      setTimeout(() => location.reload(), 250);
+    } else {
+      ind.style.transform = 'translateY(-100%)';
+    }
+  }, { passive: true });
+
+  // Animation-Keyframes injizieren
+  if (!document.getElementById('ptrStyles')) {
+    const s = document.createElement('style');
+    s.id = 'ptrStyles';
+    s.textContent = '@keyframes ptrSpin { to { transform: rotate(360deg); } }';
+    document.head.appendChild(s);
+  }
 }
 
 function forceAppUpdate() {
