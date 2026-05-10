@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.75';
+const APP_VERSION = 'v3.76';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3266,17 +3266,33 @@ async function proxyFetch(path, opts = {}) {
     'Authorization': 'Bearer ' + bearer,
     'Accept': 'application/json'
   }, opts.headers || {});
-  // Aktuelle Firma immer als Header mitsenden — der Proxy nutzt das, um
-  // pro User × Firma den richtigen Freshdesk-Key zu wählen.
-  if (!headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
+  // Aktuelle Firma als Header NUR für Freshdesk-Pfade mitsenden — der Proxy
+  // nutzt das, um pro User × Firma den richtigen Freshdesk-Key zu wählen.
+  // Wichtig: andere Endpoints (auth/me/anthropic/health) bleiben dadurch
+  // backwards-kompatibel zur alten Val.town-Version, wo X-Company-Id
+  // nicht in den erlaubten CORS-Headern steht.
+  const isFreshdeskPath = String(path).replace(/^\/+/, '').startsWith('freshdesk/');
+  if (isFreshdeskPath && !headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
     headers['X-Company-Id'] = APP_KEYS.currentCompanyId;
   }
   if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-  const res = await fetch(url, {
-    method: opts.method || 'GET',
-    headers,
-    body: opts.body ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : undefined
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: opts.method || 'GET',
+      headers,
+      body: opts.body ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : undefined
+    });
+  } catch (netErr) {
+    // Typischer CORS-/Netzwerkfehler ("Load failed" auf Safari/iOS, "Failed to fetch" auf Chrome).
+    // Häufige Ursache: Val.town-Proxy ist auf einer alten Code-Version und blockiert
+    // den X-Company-Id-Header oder die PUT/PATCH-Methode im CORS-Preflight.
+    const m = (netErr && netErr.message) || String(netErr);
+    if (/load failed|failed to fetch|network/i.test(m)) {
+      throw new Error('Netzwerk-/CORS-Fehler — vermutlich ist der Val.town-Proxy auf einer älteren Version. Bitte als Admin → Einstellungen → Val.town-Setup öffnen und den Code dort durch die aktuelle Version ersetzen (Update v2).');
+    }
+    throw netErr;
+  }
   if (!res.ok) {
     let msg = 'Proxy ' + res.status;
     try {
@@ -6448,7 +6464,7 @@ function jsonResponse(body: unknown, status = 200) {
       "content-type": "application/json",
       "access-control-allow-origin": "*",
       "access-control-allow-headers": "authorization, content-type, x-company-id",
-      "access-control-allow-methods": "GET, POST, OPTIONS"
+      "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     }
   });
 }
@@ -6461,7 +6477,7 @@ export default async function (req: Request): Promise<Response> {
       headers: {
         "access-control-allow-origin": "*",
         "access-control-allow-headers": "authorization, content-type, x-company-id",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         "access-control-max-age": "86400"
       }
     });
