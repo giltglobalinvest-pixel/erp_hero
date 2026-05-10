@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.36';
+const APP_VERSION = 'v3.37';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1637,14 +1637,25 @@ let _fdAiSummaryTicketIds = new Set();
 
 async function _refreshAiSummaryTicketIds(groupId) {
   if (!groupId) { _fdAiSummaryTicketIds = new Set(); return; }
-  try {
-    const query = `"(group_id:${groupId}) AND (tag:'${FD_AI_SUMMARY_TAG}')"`;
-    const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
-    const ids = (data && Array.isArray(data.results)) ? data.results.map(t => t.id) : [];
-    _fdAiSummaryTicketIds = new Set(ids);
-  } catch (e) {
-    // best-effort: bei Fehler nicht crashen, Badges fehlen einfach
-    console.warn('AI-Summary-Tag-Lookup failed:', e.message);
+  // Zwei Syntax-Varianten probieren, falls Freshdesk auf single/double quotes
+  // unterschiedlich reagiert. Erste, die ein Ergebnis liefert, gewinnt.
+  const queries = [
+    `"(group_id:${groupId}) AND (tag:'${FD_AI_SUMMARY_TAG}')"`,
+    `"(group_id:${groupId}) AND (tag:\\"${FD_AI_SUMMARY_TAG}\\")"`,
+  ];
+  for (const query of queries) {
+    try {
+      const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
+      const ids = (data && Array.isArray(data.results)) ? data.results.map(t => t.id) : [];
+      console.log('[AI-Summary-Lookup] query=' + query + ' → ' + ids.length + ' Treffer', ids);
+      // Bestehende manuelle Adds (z.B. nach Save) erhalten — wir mergen statt zu ersetzen.
+      const merged = new Set(_fdAiSummaryTicketIds);
+      ids.forEach(id => merged.add(id));
+      _fdAiSummaryTicketIds = merged;
+      if (ids.length > 0) return; // erste erfolgreiche Variante reicht
+    } catch (e) {
+      console.warn('[AI-Summary-Lookup] failed:', query, e.message);
+    }
   }
 }
 
@@ -1669,21 +1680,26 @@ async function saveFreshdeskTicketSummary() {
     });
     // 2) Tag setzen (wenn nicht schon vorhanden), damit die Übersicht es erkennt
     const currentTags = Array.isArray(t.tags) ? t.tags.slice() : [];
-    if (!currentTags.includes(FD_AI_SUMMARY_TAG)) {
-      currentTags.push(FD_AI_SUMMARY_TAG);
+    let tagSet = currentTags.includes(FD_AI_SUMMARY_TAG);
+    if (!tagSet) {
+      const newTags = currentTags.concat([FD_AI_SUMMARY_TAG]);
       try {
         await proxyFetch('freshdesk/api/v2/tickets/' + t.id, {
           method: 'PUT',
-          body: { tags: currentTags }
+          body: { tags: newTags }
         });
-        t.tags = currentTags;
+        t.tags = newTags;
+        tagSet = true;
       } catch (e) {
-        // Note-Save war erfolgreich, Tag nur best-effort. Kein Hard-Error.
+        // Note ist trotzdem da, aber Badge erscheint nicht — User darüber informieren.
         console.warn('Tag konnte nicht gesetzt werden:', e.message);
+        toast('Notiz gespeichert, aber Tag-Setzen fehlgeschlagen: ' + e.message, 'warn', 8000);
       }
+    } else {
+      tagSet = true;
     }
-    // In-memory Cache pflegen, damit Badge ohne Re-Search erscheint
-    _fdAiSummaryTicketIds.add(t.id);
+    // In-memory Cache nur pflegen, wenn Tag tatsächlich gesetzt ist
+    if (tagSet) _fdAiSummaryTicketIds.add(t.id);
     toast('Zusammenfassung als private Notiz gespeichert', 'success', 3500);
     // Conversations invalidieren + ggf. neu laden, damit die Notiz auftaucht
     _fdTicketState.summary = null;
