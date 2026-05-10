@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.86';
+const APP_VERSION = 'v3.87';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1656,15 +1656,12 @@ async function _loadLinkedQuotesAndCachedAi(ticketId) {
         _fdTicketState.summary    = aiData.summary || _fdTicketState.summary;
         _fdTicketState.extracted  = aiData.extracted || _fdTicketState.extracted;
         _fdTicketState.editFields = Object.assign({}, _fdTicketState.editFields, aiData.editFields || {});
-        // Match aus Customer/Contact-IDs ableiten falls möglich (Caches müssen geladen sein)
         _fdTicketState.cachedAiLoaded = true;
-        // Caches asynchron laden, dann Match auflösen + neu rendern
+        // Caches asynchron laden, dann Match auflösen
         await _loadFdCachesIfNeeded();
         _resolveFdMatchFromIds();
       } else {
         // Fallback: nur den Text-Inhalt als Summary übernehmen, ohne strukturierte Daten.
-        // extracted minimal befüllen, damit der Edit-Block trotzdem erscheint und der User
-        // Customer/Items manuell setzen kann.
         const fullText = _fdHtmlToText(aiNote.body || aiNote.body_text || '');
         const lines = fullText.split('\n');
         const headerIdx = lines.findIndex(l => l.includes('KI-Zusammenfassung') || l.includes('🤖'));
@@ -1676,6 +1673,33 @@ async function _loadLinkedQuotesAndCachedAi(ticketId) {
         _fdTicketState.cachedAiLoaded = true;
         _fdTicketState.cachedAiNoStructure = true;
         await _loadFdCachesIfNeeded();
+      }
+      // E-Mail-Match ergänzen — auch wenn struktur. Daten vorhanden sind, könnte
+      // das alte customer_id leer/veraltet sein. Greift nur, wenn editFields.customer_id
+      // noch nicht gesetzt ist (User-/KI-Wahl hat Vorrang).
+      const ef = _fdTicketState.editFields || (_fdTicketState.editFields = {
+        ticket_number: 'FT-' + ticketId, customer_reference: '', lieferzeit: '',
+        customer_id: '', contact_id: '', items: []
+      });
+      if (!ef.customer_id) {
+        const requesterEmail = _fdTicketState.requester?.email || '';
+        if (requesterEmail) {
+          try {
+            const match = await _findCustomerContactByEmail(requesterEmail);
+            if (match?.customer) {
+              ef.customer_id = match.customer.id;
+              if (match.contact) ef.contact_id = match.contact.id;
+              _fdTicketState.match = match;
+              // Wenn extracted "Kunde nicht im ERP"-Block aktiv hatte, jetzt aufräumen
+              if (_fdTicketState.extracted && !_fdTicketState.extracted.company?.name) {
+                // extracted bleibt für KI-Daten-Anzeige, aber der Customer-Block
+                // versteckt sich automatisch dank customer_id-Check in _renderAiCustomerBlock
+              }
+            }
+          } catch (mErr) {
+            console.warn('[FD-Cache] Email-Match fehlgeschlagen:', mErr.message);
+          }
+        }
       }
     }
   } catch (e) {
