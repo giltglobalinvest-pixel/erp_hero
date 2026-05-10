@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.69';
+const APP_VERSION = 'v3.70';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -663,8 +663,27 @@ const APP_KEYS = {
   freshdeskProxyToken: null,
   freshdeskSalesGroupId: null,
   // Komma-getrennte Ticket-Typen-Liste, leer = alle Typen
-  freshdeskTicketTypes: null
+  freshdeskTicketTypes: null,
+  // Subdomain (z.B. "flpliftparts") für Direktlinks zum Ticket in Freshdesk-UI
+  freshdeskDomain: null
 };
+
+// Liefert die direkte Freshdesk-UI-URL eines Tickets, oder null wenn Domain nicht konfiguriert.
+function freshdeskTicketUrl(ticketId) {
+  const dom = (APP_KEYS.freshdeskDomain || '').toString().trim();
+  if (!dom || !ticketId) return null;
+  const clean = dom
+    .replace(/^https?:\/\//i, '')
+    .replace(/\.freshdesk\.com\/?$/i, '')
+    .replace(/\/+$/, '');
+  return 'https://' + clean + '.freshdesk.com/a/tickets/' + ticketId;
+}
+
+// Liefert die Deep-Link-URL der App, die ein Quote direkt öffnet
+function appQuoteDeepLink(quoteId) {
+  if (!quoteId) return '';
+  return window.location.origin + window.location.pathname + '#quote/' + quoteId;
+}
 
 /* ============================================================
    AUTH: Session-Token-basiert via Val.town-Proxy
@@ -724,6 +743,7 @@ async function loadProjectKeys() {
         if (f.key_name === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken    = f.key_value;
         if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
         if (f.key_name === 'freshdeskTicketTypes')   APP_KEYS.freshdeskTicketTypes   = f.key_value;
+        if (f.key_name === 'freshdeskDomain')        APP_KEYS.freshdeskDomain        = f.key_value;
       });
     }
   } catch (_) {}
@@ -1348,11 +1368,13 @@ async function loadFreshdeskTicketsPreview() {
             const qStatus = qf.status || 'Entwurf';
             return `<button type="button" onclick="event.stopPropagation();openQuoteModal('${q.id}')" class="text-[10px] uppercase tracking-wider ${quoteStatusBadgeColor(qStatus)} hover:opacity-80 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="${escapeHtml(qStatus)} — Klick öffnet Angebot"><i data-lucide="file-text" class="w-2.5 h-2.5"></i> ${escapeHtml(qf.quote_no || '–')}</button>`;
           }).join('');
+          const fdUrl = freshdeskTicketUrl(t.id);
           return `
             <div data-ticket-id="${t.id}" onclick="openFreshdeskTicket(${t.id})" class="border border-ink-200 rounded-xl px-3 py-3 bg-white hover:bg-ink-50 hover:border-brand-300 hover:shadow-sm cursor-pointer transition group">
               <div class="flex items-baseline justify-between gap-2 mb-1">
                 <div class="flex items-baseline gap-2 flex-wrap min-w-0">
                   <span class="text-xs font-mono text-ink-500">${escapeHtml(ticketNo)}</span>
+                  ${fdUrl ? `<a href="${escapeHtml(fdUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="text-ink-400 hover:text-brand-700 inline-flex items-center" title="In Freshdesk öffnen"><i data-lucide="external-link" class="w-3 h-3"></i></a>` : ''}
                   <span class="font-semibold text-ink-900 truncate group-hover:text-brand-700">${escapeHtml(subject)}</span>
                   ${tType ? `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-medium">${tType}</span>` : ''}
                   <span class="ai-badge-slot inline-flex">${initialAi ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>` : ''}</span>
@@ -2059,6 +2081,42 @@ async function _findCustomerContactByEmail(email) {
 // Marker im Notiz-Body, an dem wir die KI-Note in den Conversations erkennen.
 const FD_AI_SUMMARY_MARKER = '🤖 KI-Zusammenfassung';
 
+// Postet eine private Notiz im Freshdesk-Ticket mit Quote-Details + Deep-Link zur App.
+// Wird nach Quote-Anlage aus dem Ticket-Workflow aufgerufen. Best-effort, schluckt Fehler.
+async function _postFreshdeskQuoteCreatedNote(ticketId, quote, items, customerName, contactName) {
+  if (!ticketId || !quote) return;
+  const qf = quote.fields || {};
+  const deepLink = appQuoteDeepLink(quote.id);
+  const itemRows = (items || []).map(it =>
+    '<li>' + escapeHtml(String(it.qty || 1)) + '× ' + escapeHtml(it.sku || '') + (it.name ? ' · ' + escapeHtml(it.name) : '') + '</li>'
+  ).join('');
+  const lines = [];
+  lines.push('<p><strong>📄 Angebot aus diesem Ticket erzeugt</strong> · ' + escapeHtml(new Date().toLocaleString('de-DE')) +
+    (APP_KEYS.user?.name ? ' von ' + escapeHtml(APP_KEYS.user.name) : '') + '</p>');
+  lines.push('<p>');
+  lines.push('<strong>Angebots-Nr:</strong> ' + escapeHtml(qf.quote_no || '–') + '<br>');
+  lines.push('<strong>Status:</strong> ' + escapeHtml(qf.status || 'Entwurf') + '<br>');
+  if (qf.date)        lines.push('<strong>Datum:</strong> ' + escapeHtml(qf.date) + '<br>');
+  if (qf.valid_until) lines.push('<strong>Gültig bis:</strong> ' + escapeHtml(qf.valid_until) + '<br>');
+  if (customerName)   lines.push('<strong>Kunde:</strong> ' + escapeHtml(customerName) + '<br>');
+  if (contactName)    lines.push('<strong>Kontakt:</strong> ' + escapeHtml(contactName) + '<br>');
+  lines.push('</p>');
+  if (itemRows) {
+    lines.push('<p><strong>Positionen:</strong></p><ul>' + itemRows + '</ul>');
+  }
+  if (deepLink) {
+    lines.push('<p>📂 <a href="' + escapeHtml(deepLink) + '" target="_blank">Angebot in ERP Hero öffnen</a></p>');
+  }
+  try {
+    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', {
+      method: 'POST',
+      body: { body: lines.join(''), private: true }
+    });
+  } catch (e) {
+    console.warn('FD-Quote-Note konnte nicht gepostet werden:', e.message);
+  }
+}
+
 // Cache: ticket_id → { updated_at, aiNote: <Conversation-Object>|null }
 //   - aiNote != null  : letzte private Notiz IST eine KI-Zusammenfassung
 //   - aiNote === null : letzte Notiz ist keine (oder gar keine Notizen vorhanden)
@@ -2548,6 +2606,14 @@ async function aiCreateQuoteFromEdits() {
         pos++;
       } catch (e) { console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message); }
     }
+    // Private Notiz im Freshdesk-Ticket mit Quote-Details + Deep-Link erstellen
+    const customerObj = (_fdTicketState.cache?.customers || []).find(c => c.id === ef.customer_id);
+    const contactObj  = ef.contact_id ? (_fdTicketState.cache?.contacts || []).find(c => c.id === ef.contact_id) : null;
+    const customerName = customerObj?.fields?.name1 || '';
+    const contactName = contactObj
+      ? ((contactObj.fields.first_name || '') + ' ' + (contactObj.fields.last_name || '')).trim() || contactObj.fields.name || ''
+      : '';
+    _postFreshdeskQuoteCreatedNote(_fdTicketState.id, created, ef.items, customerName, contactName);
     closeModal();
     toast('Angebot ' + quoteNo + ' angelegt — öffne Editor', 'success', 3000);
     window.scrollTo({ top: 0 });
@@ -6060,6 +6126,8 @@ async function renderAdminSettings() {
   const salesGroupId = salesRec?.fields?.key_value || '';
   const typesRec     = byName['freshdeskTicketTypes'];
   const ticketTypes  = typesRec?.fields?.key_value || '';
+  const domainRec    = byName['freshdeskDomain'];
+  const fdDomain     = domainRec?.fields?.key_value || '';
 
   const isProxySet = !!proxyUrl;
   const envVars = _valtownEnvVars();
@@ -6238,6 +6306,21 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
+      <!-- ============ STEP 7 ============ -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+        ${stepHeader(7, 'Freshdesk-Subdomain (für Direktlinks)', fdDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">Damit die App Tickets direkt in Freshdesk öffnen kann (Klick aufs Link-Icon in der Anfragen-Liste), brauche ich deine Freshdesk-Subdomain.</p>
+          <div class="flex gap-2 flex-wrap">
+            <input type="text" id="settingsFdDomain" value="${escapeHtml(fdDomain)}" placeholder="z.B. flpliftparts (ohne .freshdesk.com)" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
+            <button type="button" onclick="saveFreshdeskDomain()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+              <i data-lucide="save" class="w-4 h-4"></i> Speichern
+            </button>
+          </div>
+          <p class="text-[11px] text-ink-500 mt-1">Beispiel: wenn deine Freshdesk-URL <code>https://flpliftparts.freshdesk.com</code> ist → eintragen: <code>flpliftparts</code></p>
+        </div>
+      </div>
+
       <!-- Legacy Master-Base Keys (collapsed) -->
       <details class="bg-ink-50 border border-ink-200 rounded-2xl p-4 mb-4 group">
         <summary class="cursor-pointer text-sm font-medium text-ink-700 flex items-center gap-2"><i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition"></i> Erweitert: alle Master-Base Keys ansehen</summary>
@@ -6310,6 +6393,32 @@ async function saveSalesGroupId() {
     await _writeMasterBaseKey('freshdeskSalesGroupId', val, existing?.id || null);
     APP_KEYS.freshdeskSalesGroupId = val;
     toast('Sales-Group-ID gespeichert', 'success');
+    renderAdminSettings();
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+  }
+}
+
+async function saveFreshdeskDomain() {
+  const inp = document.getElementById('settingsFdDomain');
+  if (!inp) return;
+  // Bereinige: https://, .freshdesk.com, trailing slash entfernen
+  const val = (inp.value || '').trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\.freshdesk\.com\/?$/i, '')
+    .replace(/\/+$/, '');
+  try {
+    const keys = await _fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'freshdeskDomain');
+    if (val) {
+      await _writeMasterBaseKey('freshdeskDomain', val, existing?.id || null);
+      APP_KEYS.freshdeskDomain = val;
+      toast('Freshdesk-Domain gespeichert', 'success');
+    } else if (existing) {
+      await _deleteMasterBaseKey(existing.id);
+      APP_KEYS.freshdeskDomain = null;
+      toast('Domain entfernt', 'success');
+    }
     renderAdminSettings();
   } catch (e) {
     toast(e.message, 'error', 7000);
@@ -14289,6 +14398,23 @@ function showApp() {
   renderWelcome();
   initPullToRefresh();
   if (window.lucide) lucide.createIcons();
+  // Deep-Link prüfen: #quote/recXXXXXX → Quote-Modal öffnen
+  _handleDeepLink();
+}
+
+// Verarbeitet URL-Hash für Deep-Links (z.B. #quote/recXYZ aus Freshdesk-Notizen).
+// Wird nach dem App-Start aufgerufen. Hash wird nach Verarbeitung gecleared.
+function _handleDeepLink() {
+  const hash = window.location.hash || '';
+  const m = hash.match(/^#quote\/(rec\w+)/i);
+  if (!m) return;
+  const quoteId = m[1];
+  // Hash entfernen, damit Reload nicht erneut öffnet
+  try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) {}
+  // Quote-Modal mit kleinem Delay öffnen (warten bis Welcome gerendert)
+  setTimeout(() => {
+    if (typeof openQuoteModal === 'function') openQuoteModal(quoteId);
+  }, 600);
 }
 
 /* ============================================================
