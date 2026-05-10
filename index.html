@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.68';
+const APP_VERSION = 'v3.69';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1214,6 +1214,44 @@ async function uploadFileToRecord(recordId, attachmentField, file) {
    Wirft Fehler wenn Proxy nicht konfiguriert oder Antwort != 2xx. Liefert geparstes JSON. */
 /* Lädt Tickets der Sales-Gruppe (Status: 2=offen oder 3=ausstehend) und rendert sie
    als Read-only-Vorschau in #freshdeskTicketsWrap. */
+// Status-Dropdown im Tickets-Listing toggeln (schließt vorher andere offene Menüs)
+function _toggleTicketStatusMenu(ticketId) {
+  // Andere Menüs schließen
+  document.querySelectorAll('[id^="ticketStatusMenu_"]').forEach(el => {
+    if (el.id !== 'ticketStatusMenu_' + ticketId) el.classList.add('hidden');
+  });
+  const menu = document.getElementById('ticketStatusMenu_' + ticketId);
+  if (menu) menu.classList.toggle('hidden');
+}
+
+// Schließt alle Status-Menüs bei Click außerhalb. Wird nur einmal global registriert.
+if (!window._ticketStatusMenuOutsideHandler) {
+  window._ticketStatusMenuOutsideHandler = (e) => {
+    if (!e.target.closest('[id^="ticketStatusMenu_"]') &&
+        !e.target.closest('button[onclick*="_toggleTicketStatusMenu"]')) {
+      document.querySelectorAll('[id^="ticketStatusMenu_"]').forEach(el => el.classList.add('hidden'));
+    }
+  };
+  document.addEventListener('click', window._ticketStatusMenuOutsideHandler);
+}
+
+// Ticket-Status in Freshdesk via Proxy ändern + Liste neu laden
+async function updateTicketStatus(ticketId, statusCode) {
+  // Menü sofort schließen
+  document.getElementById('ticketStatusMenu_' + ticketId)?.classList.add('hidden');
+  try {
+    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: { status: statusCode }
+    });
+    toast('Status geändert', 'success', 2000);
+    // Liste neu laden — wenn Ticket nicht mehr offen/ausstehend ist, fliegt es raus
+    loadFreshdeskTicketsPreview();
+  } catch (e) {
+    toast('Fehler beim Status-Wechsel: ' + e.message, 'error', 6000);
+  }
+}
+
 async function loadFreshdeskTicketsPreview() {
   const wrap = document.getElementById('freshdeskTicketsWrap');
   if (!wrap) return;
@@ -1257,8 +1295,20 @@ async function loadFreshdeskTicketsPreview() {
       wrap.innerHTML = '<p class="text-xs text-ink-500 italic">Keine offenen / ausstehenden Tickets der Sales-Gruppe.</p>';
       return;
     }
-    const statusLabel = (s) => s === 2 ? 'Offen' : s === 3 ? 'Ausstehend' : ('Status ' + s);
-    const statusColor = (s) => s === 2 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700';
+    const statusLabel = (s) =>
+        s === 2 ? 'Offen'
+      : s === 3 ? 'Ausstehend'
+      : s === 4 ? 'Gelöst'
+      : s === 5 ? 'Geschlossen'
+      : s === 6 ? 'Wartet Kunde'
+      : s === 7 ? 'Wartet Drittpartei'
+      : ('Status ' + s);
+    const statusColor = (s) =>
+        s === 2 ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+      : s === 3 ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+      : s === 4 ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+      : s === 5 ? 'bg-ink-200 text-ink-700 hover:bg-ink-300'
+      :           'bg-ink-100 text-ink-600 hover:bg-ink-200';
     // Sortieren nach updated_at desc
     tickets.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
     // Verknüpfte Quotes pro Ticket-ID gruppieren — alle Quotes des Mandanten einmalig laden
@@ -1308,7 +1358,25 @@ async function loadFreshdeskTicketsPreview() {
                   <span class="ai-badge-slot inline-flex">${initialAi ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>` : ''}</span>
                   ${quoteBadges}
                 </div>
-                <span class="text-[10px] uppercase tracking-wider ${statusColor(t.status)} px-1.5 py-0.5 rounded font-medium shrink-0">${escapeHtml(statusLabel(t.status))}</span>
+                <div class="relative shrink-0" onclick="event.stopPropagation()">
+                  <button type="button" onclick="_toggleTicketStatusMenu(${t.id})" class="text-[10px] uppercase tracking-wider ${statusColor(t.status)} px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition cursor-pointer" title="Status ändern">
+                    ${escapeHtml(statusLabel(t.status))}
+                    <i data-lucide="chevron-down" class="w-2.5 h-2.5"></i>
+                  </button>
+                  <div id="ticketStatusMenu_${t.id}" class="hidden absolute right-0 top-full mt-1 z-30 bg-white border border-ink-200 rounded-lg shadow-lg overflow-hidden min-w-[160px]">
+                    ${[2,3,4,5].map(code => `
+                      <button type="button" onclick="updateTicketStatus(${t.id}, ${code})" class="w-full text-left px-3 py-2 text-xs hover:bg-ink-50 flex items-center gap-2 ${t.status === code ? 'bg-ink-50 font-semibold' : ''}">
+                        <span class="w-2 h-2 rounded-full ${
+                          code === 2 ? 'bg-emerald-500' :
+                          code === 3 ? 'bg-amber-500' :
+                          code === 4 ? 'bg-blue-500' :
+                          'bg-ink-400'
+                        }"></span>
+                        ${statusLabel(code)}${t.status === code ? ' · aktuell' : ''}
+                      </button>
+                    `).join('')}
+                  </div>
+                </div>
               </div>
               <p class="text-xs text-ink-500">${escapeHtml(dt)}${t.priority ? ' · Prio ' + t.priority : ''}</p>
             </div>
