@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.34';
+const APP_VERSION = 'v3.35';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1258,6 +1258,7 @@ async function loadFreshdeskTicketsPreview() {
           const ticketNo = 'FT-' + t.id;
           const dt = t.updated_at ? new Date(t.updated_at).toLocaleString('de-DE') : '';
           const tType = t.type ? escapeHtml(t.type) : '';
+          const hasAiSummary = Array.isArray(t.tags) && t.tags.includes(FD_AI_SUMMARY_TAG);
           return `
             <div onclick="openFreshdeskTicket(${t.id})" class="px-2 py-2.5 hover:bg-ink-50 rounded cursor-pointer transition group">
               <div class="flex items-baseline justify-between gap-2 mb-0.5">
@@ -1265,6 +1266,9 @@ async function loadFreshdeskTicketsPreview() {
                   <span class="text-xs font-mono text-ink-500">${escapeHtml(ticketNo)}</span>
                   <span class="font-medium text-ink-900 truncate group-hover:text-brand-700">${escapeHtml(subject)}</span>
                   ${tType ? `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-medium">${tType}</span>` : ''}
+                  ${hasAiSummary ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen">
+                    <i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI
+                  </button>` : ''}
                 </div>
                 <span class="text-[10px] uppercase tracking-wider ${statusColor(t.status)} px-1.5 py-0.5 rounded font-medium shrink-0">${escapeHtml(statusLabel(t.status))}</span>
               </div>
@@ -1618,7 +1622,13 @@ ${fullText}`;
   }
 }
 
+// Tag-Name, an dem die Übersicht erkennt, dass es eine KI-Zusammenfassung gibt
+const FD_AI_SUMMARY_TAG = 'ki-zusammenfassung';
+// Marker im Notiz-Body, an dem wir die KI-Note in den Conversations finden
+const FD_AI_SUMMARY_MARKER = '🤖 KI-Zusammenfassung';
+
 // Speichert die aktuelle Zusammenfassung als private Notiz im Ticket (Freshdesk).
+// Setzt zusätzlich ein Tag aufs Ticket, damit die Übersicht es schnell erkennt.
 // Lädt anschließend den Verlauf neu, damit die Notiz angezeigt wird.
 async function saveFreshdeskTicketSummary() {
   const t = _fdTicketState.ticket;
@@ -1627,15 +1637,30 @@ async function saveFreshdeskTicketSummary() {
   _fdTicketState.summarySaving = true;
   _renderFreshdeskTicket();
   try {
-    // Body als HTML mit Header-Tag, damit es in Freshdesk gut sichtbar ist
+    // 1) Note posten
     const noteHtml =
-      '<p><strong>🤖 KI-Zusammenfassung</strong> · erstellt am ' + escapeHtml(new Date().toLocaleString('de-DE')) +
+      '<p><strong>' + FD_AI_SUMMARY_MARKER + '</strong> · erstellt am ' + escapeHtml(new Date().toLocaleString('de-DE')) +
       (APP_KEYS.user?.name ? ' von ' + escapeHtml(APP_KEYS.user.name) : '') + '</p>' +
       '<p>' + escapeHtml(s).replace(/\n/g, '<br>') + '</p>';
     await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
       method: 'POST',
       body: { body: noteHtml, private: true }
     });
+    // 2) Tag setzen (wenn nicht schon vorhanden), damit die Übersicht es erkennt
+    const currentTags = Array.isArray(t.tags) ? t.tags.slice() : [];
+    if (!currentTags.includes(FD_AI_SUMMARY_TAG)) {
+      currentTags.push(FD_AI_SUMMARY_TAG);
+      try {
+        await proxyFetch('freshdesk/api/v2/tickets/' + t.id, {
+          method: 'PUT',
+          body: { tags: currentTags }
+        });
+        t.tags = currentTags;
+      } catch (e) {
+        // Note-Save war erfolgreich, Tag nur best-effort. Kein Hard-Error.
+        console.warn('Tag konnte nicht gesetzt werden:', e.message);
+      }
+    }
     toast('Zusammenfassung als private Notiz gespeichert', 'success', 3500);
     // Conversations invalidieren + ggf. neu laden, damit die Notiz auftaucht
     _fdTicketState.summary = null;
@@ -1648,6 +1673,68 @@ async function saveFreshdeskTicketSummary() {
   } finally {
     _fdTicketState.summarySaving = false;
     _renderFreshdeskTicket();
+  }
+}
+
+// Quick-View: zeigt nur die letzte KI-Zusammenfassung des Tickets in einem
+// kleinen Modal, ohne das volle Detail-Modal zu öffnen. Aufruf vom KI-Badge
+// in der Tickets-Übersicht.
+async function showAiSummaryQuickView(ticketId) {
+  if (!ticketId) return;
+  openModal(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-bold text-purple-900 flex items-center gap-2">
+          <i data-lucide="sparkles" class="w-5 h-5"></i>
+          KI-Zusammenfassung · FT-${ticketId}
+        </h3>
+        <button type="button" onclick="closeModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div id="aiSummaryQuickContent">
+        <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade…</p>
+      </div>
+      <div class="mt-4 flex justify-between gap-2 flex-wrap">
+        <button type="button" onclick="closeModal();openFreshdeskTicket(${ticketId})" class="text-sm text-brand-600 hover:text-brand-700 inline-flex items-center gap-1.5">
+          <i data-lucide="external-link" class="w-4 h-4"></i> Vollständiges Ticket öffnen
+        </button>
+        <button type="button" onclick="closeModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-1.5 hover:bg-ink-50">Schließen</button>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-2xl' });
+  try {
+    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    // Neueste zuerst, damit wir die letzte KI-Notiz finden
+    const list = (Array.isArray(conv) ? conv : []).slice()
+      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    // Suche letzte private Notiz mit dem KI-Marker (im rohen body, nicht body_text)
+    const aiNote = list.find(c => {
+      if (!c.private) return false;
+      const raw = (c.body || c.body_text || '');
+      return raw.includes(FD_AI_SUMMARY_MARKER);
+    });
+    const wrap = document.getElementById('aiSummaryQuickContent');
+    if (!wrap) return;
+    if (!aiNote) {
+      wrap.innerHTML = '<p class="text-sm text-amber-700 italic">Keine KI-Zusammenfassung in diesem Ticket gefunden.</p>';
+      return;
+    }
+    // Text extrahieren + Header-Zeile (mit Marker) abschneiden
+    const fullText = _fdHtmlToText(aiNote.body || aiNote.body_text || '');
+    const lines = fullText.split('\n');
+    const headerIdx = lines.findIndex(l => l.includes(FD_AI_SUMMARY_MARKER));
+    const cleanText = headerIdx >= 0
+      ? lines.slice(headerIdx + 1).join('\n').replace(/^\n+/, '').trim()
+      : fullText;
+    const headerLine = headerIdx >= 0 ? lines[headerIdx] : '';
+    wrap.innerHTML = `
+      <div class="bg-purple-50 border border-purple-200 rounded-xl p-4 text-sm text-ink-800 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto">${escapeHtml(cleanText || '(leer)')}</div>
+      <p class="text-[11px] text-ink-500 italic mt-2">${escapeHtml(headerLine || ('Erstellt: ' + _fdFmtDate(aiNote.created_at)))}</p>
+    `;
+  } catch (e) {
+    const wrap = document.getElementById('aiSummaryQuickContent');
+    if (wrap) wrap.innerHTML = '<p class="text-sm text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
   }
 }
 
