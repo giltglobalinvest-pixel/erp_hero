@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.32';
+const APP_VERSION = 'v3.33';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1623,11 +1623,12 @@ function openDrawer()  { document.getElementById('sidebar').classList.remove('-t
 function closeDrawer() { document.getElementById('sidebar').classList.add('-translate-x-full');    document.getElementById('drawerBackdrop').classList.add('hidden'); }
 
 function initNavSections() {
+  // Sektionen, die beim Start standardmäßig ausgeklappt sind
+  const OPEN_BY_DEFAULT = new Set(['stammdaten', 'verkauf']);
   document.querySelectorAll('.nav-section').forEach(btn => {
     const items = btn.parentElement.querySelector('.nav-items');
     const chev = btn.querySelector('.nav-chevron');
-    // Default: Stammdaten offen (analog zum Design)
-    if (btn.dataset.section !== 'stammdaten') items?.classList.add('hidden');
+    if (!OPEN_BY_DEFAULT.has(btn.dataset.section)) items?.classList.add('hidden');
     if (items?.classList.contains('hidden') && chev) chev.style.transform = 'rotate(-90deg)';
     btn.addEventListener('click', () => {
       const open = !items.classList.contains('hidden');
