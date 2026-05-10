@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.99';
+const APP_VERSION = 'v4.00';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -8607,13 +8607,21 @@ async function testFreshsalesConnection(btnEl) {
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Teste…'; if (window.lucide) lucide.createIcons(); }
   try {
-    // Selectors-Endpoint ist leichtgewichtig + benötigt nur Read-Permission
-    const res = await proxyFetch('freshsales/api/selector/sales_accounts');
-    // Bei Erfolg liefert Freshsales ein Objekt mit "sales_accounts" o.ä.
-    if (res) toast('✓ Freshsales erreichbar — Auth + Subdomain OK', 'success', 4000);
-    else toast('Antwort war leer — Token-Permissions prüfen', 'warn', 5000);
+    // /lookup ist der schlankste Endpoint und liefert sauberes 200/401/404
+    // (im Gegensatz zu /selector/* der 302 Redirects ausspuckt).
+    const res = await proxyFetch('freshsales/api/lookup?q=test&f=sales_account');
+    toast('✓ Freshsales-API erreichbar · Auth + Subdomain OK', 'success', 4500);
   } catch (e) {
-    toast('Verbindung fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+    const m = e.message || String(e);
+    let msg = 'Verbindung fehlgeschlagen: ' + m;
+    if (/FRESHSALES_SUBDOMAIN|FRESHSALES_API_KEY/i.test(m)) {
+      msg = 'Env-Vars in Val.town fehlen — Subdomain + Token im Step 9 unten neu eintragen und „Speichern".';
+    } else if (/401|403|Incorrect or expired/i.test(m)) {
+      msg = 'Token ungültig oder abgelaufen — neuen Token aus Freshsales (Profil → API-Einstellungen) holen und in Step 9 eintragen.';
+    } else if (/404/.test(m)) {
+      msg = 'Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht. Prüfe deine Freshworks-CRM-URL.';
+    }
+    toast(msg, 'error', 10000);
   } finally {
     if (btnEl) { btnEl.disabled = false; if (origHtml) btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
@@ -9829,8 +9837,17 @@ async function syncCustomerToFreshdesk(customerId, btnEl, opts) {
     }
     return true;
   } catch (e) {
-    if (!silent) toast('Sync fehlgeschlagen: ' + (e.message || e), 'error', 9000);
-    else console.warn('[Lazy-Push FD] customer=' + customerId + ': ' + (e.message || e));
+    const m = (e.message || String(e));
+    let userMsg = 'Sync fehlgeschlagen: ' + m;
+    if (/FRESHDESK_DOMAIN|FRESHDESK_API_KEY/i.test(m)) {
+      userMsg = 'Freshdesk-Setup unvollständig — Admin → Einstellungen → Step 7 (Subdomain) prüfen + Freshdesk-API-Key im User-Profil.';
+    } else if (/401|403/.test(m)) {
+      userMsg = 'Freshdesk-Token ungültig — bitte unter Admin → Benutzer einen aktuellen Freshdesk-API-Key beim eigenen Profil eintragen.';
+    } else if (/404/.test(m)) {
+      userMsg = 'Freshdesk 404 — bitte prüfe ob die Freshdesk-Subdomain in Step 7 stimmt. Volle Antwort: ' + m;
+    }
+    if (!silent) toast(userMsg, 'error', 12000);
+    else console.warn('[Lazy-Push FD] customer=' + customerId + ': ' + m);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
     return false;
   }
