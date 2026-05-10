@@ -523,6 +523,10 @@
               <i data-lucide="package" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Vorlagenpakete</span>
             </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-ai-costs">
+              <i data-lucide="bar-chart-3" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">API-Kosten</span>
+            </button>
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-settings">
               <i data-lucide="key-round" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Einstellungen</span>
@@ -609,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.72';
+const APP_VERSION = 'v3.73';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1973,7 +1977,7 @@ Hinweise:
 --- Ticket-Inhalt ---
 ${fullText}`;
 
-    const raw = await askAI(prompt, { maxTokens: 1500 });
+    const raw = await askAI(prompt, { maxTokens: 1500, purpose: 'freshdesk_ticket_summary' });
     // JSON aus der Antwort robust extrahieren (Claude packt manchmal Erklärung drumherum)
     let parsed = null;
     try {
@@ -3188,6 +3192,104 @@ async function freshdeskFetch(path) {
   return proxyFetch('freshdesk/' + p);
 }
 
+/* ============================================================
+   AI USAGE LOGGING & COST TRACKING
+   ============================================================ */
+// Anthropic-Preise in USD pro 1.000.000 Tokens (Stand 2025).
+// Cache-Read = 10% des Input-Preises, Cache-Write (5m) = 125% des Input-Preises.
+// Unbekanntes Modell → Fallback auf Sonnet-Tier.
+const AI_PRICING_USD_PER_1M = {
+  // Sonnet-Familie
+  'claude-sonnet-4-5':                { input: 3.00, output: 15.00 },
+  'claude-sonnet-4-5-20250929':       { input: 3.00, output: 15.00 },
+  'claude-sonnet-4-20250514':         { input: 3.00, output: 15.00 },
+  'claude-3-7-sonnet-20250219':       { input: 3.00, output: 15.00 },
+  'claude-3-5-sonnet-20241022':       { input: 3.00, output: 15.00 },
+  'claude-3-5-sonnet-20240620':       { input: 3.00, output: 15.00 },
+  // Opus
+  'claude-opus-4-1-20250805':         { input: 15.00, output: 75.00 },
+  'claude-opus-4-20250514':           { input: 15.00, output: 75.00 },
+  'claude-3-opus-20240229':           { input: 15.00, output: 75.00 },
+  // Haiku
+  'claude-3-5-haiku-20241022':        { input: 0.80, output: 4.00 },
+  'claude-3-haiku-20240307':          { input: 0.25, output: 1.25 },
+  'claude-haiku-4-5-20251001':        { input: 1.00, output: 5.00 }
+};
+const AI_PRICING_FALLBACK = { input: 3.00, output: 15.00 }; // Sonnet-Tier
+
+function _aiPricingFor(model) {
+  if (!model) return AI_PRICING_FALLBACK;
+  if (AI_PRICING_USD_PER_1M[model]) return AI_PRICING_USD_PER_1M[model];
+  // Heuristik anhand Modell-Familie
+  const m = model.toLowerCase();
+  if (m.includes('opus'))   return { input: 15.00, output: 75.00 };
+  if (m.includes('haiku'))  return { input: 0.80,  output: 4.00 };
+  if (m.includes('sonnet')) return { input: 3.00,  output: 15.00 };
+  return AI_PRICING_FALLBACK;
+}
+
+// Berechnet die geschätzten Kosten in USD.
+function _aiCalcCost(usage, model) {
+  if (!usage) return 0;
+  const p = _aiPricingFor(model);
+  const inTok    = (usage.input_tokens || 0)
+                 + (usage.cache_creation_input_tokens || 0) * 1.25  // Cache-Write +25%
+                 + (usage.cache_read_input_tokens || 0)     * 0.10; // Cache-Read 10%
+  const outTok   = usage.output_tokens || 0;
+  return (inTok * p.input + outTok * p.output) / 1_000_000;
+}
+
+// Schreibt einen Eintrag in die AiUsageLog-Tabelle in Airtable.
+// Fire-and-forget: Fehler werden geschluckt, damit der eigentliche AI-Call
+// nicht durch Logging-Probleme blockiert wird.
+async function _logAiUsage(data, opts) {
+  try {
+    if (!data || !data.usage) return;
+    const cur = getCurrentCompany();
+    const userId = APP_KEYS.user?.id || '';
+    const userName = APP_KEYS.user?.name || '';
+    const model = data.model || opts?.model || '';
+    const purpose = (opts?.purpose || '').toString();
+    const usage = data.usage || {};
+    const cost = _aiCalcCost(usage, model);
+    const now = new Date();
+    // Tabelle lazy anlegen (idempotent)
+    await ensureTable('AiUsageLog', [
+      { name: 'created_at',                 type: 'dateTime' },
+      { name: 'user_id',                    type: 'singleLineText' },
+      { name: 'user_name',                  type: 'singleLineText' },
+      { name: 'company_id',                 type: 'singleLineText' },
+      { name: 'company_name',               type: 'singleLineText' },
+      { name: 'model',                      type: 'singleLineText' },
+      { name: 'purpose',                    type: 'singleLineText' },
+      { name: 'input_tokens',               type: 'number' },
+      { name: 'output_tokens',              type: 'number' },
+      { name: 'cache_creation_input_tokens',type: 'number' },
+      { name: 'cache_read_input_tokens',    type: 'number' },
+      { name: 'cost_usd',                   type: 'number' },
+      { name: 'request_id',                 type: 'singleLineText' }
+    ]).catch(()=>{});
+    await writeData('AiUsageLog', {
+      created_at: now.toISOString(),
+      user_id: userId,
+      user_name: userName,
+      company_id: cur?.id || '',
+      company_name: cur?.fields?.name || '',
+      model,
+      purpose,
+      input_tokens: usage.input_tokens || 0,
+      output_tokens: usage.output_tokens || 0,
+      cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+      cache_read_input_tokens: usage.cache_read_input_tokens || 0,
+      cost_usd: Math.round(cost * 1_000_000) / 1_000_000, // 6 Nachkommastellen
+      request_id: data.id || ''
+    });
+  } catch (e) {
+    // Bewusst still: Logging darf den Hauptflow nicht stören.
+    console.warn('[AI Usage Log]', e?.message || e);
+  }
+}
+
 async function askAI(prompt, opts = {}) {
   if (!_proxyBase()) throw new Error('KI nicht verfügbar — API-Proxy nicht konfiguriert (Admin → Einstellungen)');
   const content = [];
@@ -3216,6 +3318,8 @@ async function askAI(prompt, opts = {}) {
   } catch (e) {
     throw new Error('AI-Anfrage fehlgeschlagen: ' + e.message);
   }
+  // Usage-Logging (fire-and-forget, blockiert nicht)
+  _logAiUsage(data, { purpose: opts.purpose || 'askAI', model: opts.model });
   return (data && data.content && data.content[0]) ? data.content[0].text : '';
 }
 
@@ -4137,7 +4241,7 @@ REGELN:
 
 async function _voiceCallAi(userText) {
   const prompt = _voiceBuildPrompt(userText);
-  const raw = await askAI(prompt, { maxTokens: 2000 });
+  const raw = await askAI(prompt, { maxTokens: 2000, purpose: 'voice_quote_extract' });
   let parsed = null;
   try {
     const m = String(raw || '').match(/\{[\s\S]*\}/);
@@ -4518,6 +4622,7 @@ function dispatchRoute(route) {
     case 'admin-users':     renderAdminUsers(); break;
     case 'admin-templates': renderAdminTextemplates(); break;
     case 'admin-bundles':   renderAdminQuoteBundles(); break;
+    case 'admin-ai-costs':  renderAdminAiCosts(); break;
     case 'admin-settings':  renderAdminSettings(); break;
     default:                renderWelcome();
   }
@@ -6258,6 +6363,333 @@ function _applyKeyToAppState(keyName, value) {
 // State für Wizard (welcher Step expanded ist)
 let _settingsWizState = { proxyUrlInput: '', salesGroupInput: '', testResult: null };
 
+/* ============================================================
+   ADMIN: API-KOSTEN (AiUsageLog Dashboard)
+   ============================================================ */
+let _aiCostsState = {
+  rows: [],
+  loaded: false,
+  range: '30d',           // 'today' | '7d' | '30d' | 'month' | 'year' | 'all'
+  userId: '',             // '' = alle
+  companyId: '',          // '' = alle
+  model: '',              // '' = alle
+  purpose: ''             // '' = alle
+};
+
+function _aiCostsRangeStart(range) {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  switch (range) {
+    case 'today': return d;
+    case '7d':    return new Date(d.getTime() - 6 * 86400000);
+    case '30d':   return new Date(d.getTime() - 29 * 86400000);
+    case 'month': return new Date(now.getFullYear(), now.getMonth(), 1);
+    case 'year':  return new Date(now.getFullYear(), 0, 1);
+    case 'all':
+    default:      return null;
+  }
+}
+
+function _aiCostsFilteredRows() {
+  const rangeStart = _aiCostsRangeStart(_aiCostsState.range);
+  return _aiCostsState.rows.filter(r => {
+    const ts = r.created_at ? new Date(r.created_at) : null;
+    if (rangeStart && (!ts || ts < rangeStart)) return false;
+    if (_aiCostsState.userId    && r.user_id    !== _aiCostsState.userId)    return false;
+    if (_aiCostsState.companyId && r.company_id !== _aiCostsState.companyId) return false;
+    if (_aiCostsState.model     && r.model      !== _aiCostsState.model)     return false;
+    if (_aiCostsState.purpose   && r.purpose    !== _aiCostsState.purpose)   return false;
+    return true;
+  });
+}
+
+function _aiCostsAggregateBy(rows, key) {
+  const map = new Map();
+  for (const r of rows) {
+    const k = r[key] || '(unbekannt)';
+    if (!map.has(k)) map.set(k, { key: k, count: 0, in_tok: 0, out_tok: 0, cost: 0 });
+    const e = map.get(k);
+    e.count++;
+    e.in_tok  += (r.input_tokens || 0) + (r.cache_creation_input_tokens || 0) + (r.cache_read_input_tokens || 0);
+    e.out_tok += r.output_tokens || 0;
+    e.cost    += r.cost_usd || 0;
+  }
+  return [...map.values()].sort((a, b) => b.cost - a.cost);
+}
+
+function _aiCostsAggregateByDay(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const d = r.created_at ? new Date(r.created_at) : null;
+    if (!d) continue;
+    const key = d.toISOString().slice(0, 10);
+    if (!map.has(key)) map.set(key, { key, count: 0, cost: 0 });
+    const e = map.get(key);
+    e.count++;
+    e.cost += r.cost_usd || 0;
+  }
+  return [...map.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+function _formatUsd(v) {
+  if (!v && v !== 0) return '$0.00';
+  if (v < 0.01) return '$' + v.toFixed(6);
+  if (v < 1)    return '$' + v.toFixed(4);
+  return '$' + v.toFixed(2);
+}
+
+function _formatTok(v) {
+  if (!v) return '0';
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
+  if (v >= 1_000)     return (v / 1_000).toFixed(1) + 'k';
+  return String(v);
+}
+
+async function renderAdminAiCosts() {
+  setPageTitle('API-Kosten');
+  if (!APP_KEYS.user?.is_admin) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Nur für Admins.</div></div>`;
+    return;
+  }
+
+  document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Logs…</p>';
+  // Tabelle anlegen falls noch nicht da, dann einlesen
+  await ensureTable('AiUsageLog', [
+    { name: 'created_at',                 type: 'dateTime' },
+    { name: 'user_id',                    type: 'singleLineText' },
+    { name: 'user_name',                  type: 'singleLineText' },
+    { name: 'company_id',                 type: 'singleLineText' },
+    { name: 'company_name',               type: 'singleLineText' },
+    { name: 'model',                      type: 'singleLineText' },
+    { name: 'purpose',                    type: 'singleLineText' },
+    { name: 'input_tokens',               type: 'number' },
+    { name: 'output_tokens',              type: 'number' },
+    { name: 'cache_creation_input_tokens',type: 'number' },
+    { name: 'cache_read_input_tokens',    type: 'number' },
+    { name: 'cost_usd',                   type: 'number' },
+    { name: 'request_id',                 type: 'singleLineText' }
+  ]).catch(()=>{});
+
+  let logs = [];
+  try {
+    logs = await readData('AiUsageLog', null, { sort: [{ field: 'created_at', direction: 'desc' }] });
+  } catch (e) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Fehler beim Laden: ${escapeHtml(e.message)}</div></div>`;
+    return;
+  }
+  _aiCostsState.rows = logs.map(r => r.fields || {});
+  _aiCostsState.loaded = true;
+  _renderAdminAiCosts();
+}
+
+function _renderAdminAiCosts() {
+  const rows = _aiCostsFilteredRows();
+  const totalCost = rows.reduce((s, r) => s + (r.cost_usd || 0), 0);
+  const totalIn   = rows.reduce((s, r) => s + (r.input_tokens || 0) + (r.cache_creation_input_tokens || 0) + (r.cache_read_input_tokens || 0), 0);
+  const totalOut  = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
+  const totalCalls = rows.length;
+
+  // Aggregationen
+  const byUser    = _aiCostsAggregateBy(rows, 'user_name').slice(0, 8);
+  const byCompany = _aiCostsAggregateBy(rows, 'company_name').slice(0, 8);
+  const byModel   = _aiCostsAggregateBy(rows, 'model').slice(0, 8);
+  const byPurpose = _aiCostsAggregateBy(rows, 'purpose').slice(0, 8);
+  const byDay     = _aiCostsAggregateByDay(rows);
+  const maxDayCost = byDay.reduce((m, d) => Math.max(m, d.cost), 0) || 1;
+
+  // Filter-Optionen aus den Rohdaten ziehen
+  const allUsers     = [...new Set(_aiCostsState.rows.map(r => r.user_id).filter(Boolean))]
+    .map(id => ({ id, name: _aiCostsState.rows.find(r => r.user_id === id)?.user_name || '(unbekannt)' }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const allCompanies = [...new Set(_aiCostsState.rows.map(r => r.company_id).filter(Boolean))]
+    .map(id => ({ id, name: _aiCostsState.rows.find(r => r.company_id === id)?.company_name || '(unbekannt)' }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const allModels    = [...new Set(_aiCostsState.rows.map(r => r.model).filter(Boolean))].sort();
+  const allPurposes  = [...new Set(_aiCostsState.rows.map(r => r.purpose).filter(Boolean))].sort();
+
+  const rangeOptions = [
+    ['today', 'Heute'],
+    ['7d', 'Letzte 7 Tage'],
+    ['30d', 'Letzte 30 Tage'],
+    ['month', 'Dieser Monat'],
+    ['year', 'Dieses Jahr'],
+    ['all', 'Alle']
+  ];
+
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-7xl mx-auto space-y-4">
+      <!-- Header + Filter -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5">
+        <div class="flex items-start justify-between flex-wrap gap-3 mb-4">
+          <div>
+            <h2 class="text-xl font-bold text-ink-900 flex items-center gap-2">
+              <i data-lucide="bar-chart-3" class="w-5 h-5 text-brand-600"></i>
+              API-Kosten <span class="text-sm font-normal text-ink-500">(Anthropic)</span>
+            </h2>
+            <p class="text-xs text-ink-500 mt-0.5">Token-Verbrauch und geschätzte Kosten — Werte in USD basierend auf Anthropic-Listenpreisen.</p>
+          </div>
+          <button type="button" onclick="renderAdminAiCosts()" class="text-xs px-3 py-1.5 border border-ink-200 text-ink-700 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu laden
+          </button>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          <div>
+            <label class="block text-[11px] font-medium text-ink-500 mb-0.5">Zeitraum</label>
+            <select onchange="_aiCostsState.range=this.value;_renderAdminAiCosts()" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm">
+              ${rangeOptions.map(([v, l]) => `<option value="${v}" ${_aiCostsState.range === v ? 'selected' : ''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] font-medium text-ink-500 mb-0.5">Benutzer</label>
+            <select onchange="_aiCostsState.userId=this.value;_renderAdminAiCosts()" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm">
+              <option value="">Alle</option>
+              ${allUsers.map(u => `<option value="${escapeHtml(u.id)}" ${_aiCostsState.userId === u.id ? 'selected' : ''}>${escapeHtml(u.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] font-medium text-ink-500 mb-0.5">Firma</label>
+            <select onchange="_aiCostsState.companyId=this.value;_renderAdminAiCosts()" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm">
+              <option value="">Alle</option>
+              ${allCompanies.map(c => `<option value="${escapeHtml(c.id)}" ${_aiCostsState.companyId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] font-medium text-ink-500 mb-0.5">Modell</label>
+            <select onchange="_aiCostsState.model=this.value;_renderAdminAiCosts()" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm">
+              <option value="">Alle</option>
+              ${allModels.map(m => `<option value="${escapeHtml(m)}" ${_aiCostsState.model === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] font-medium text-ink-500 mb-0.5">Zweck</label>
+            <select onchange="_aiCostsState.purpose=this.value;_renderAdminAiCosts()" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm">
+              <option value="">Alle</option>
+              ${allPurposes.map(p => `<option value="${escapeHtml(p)}" ${_aiCostsState.purpose === p ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- KPI-Karten -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div class="bg-white rounded-2xl border border-ink-200 p-4">
+          <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold">Kosten gesamt</p>
+          <p class="text-2xl font-bold text-ink-900 mt-1">${_formatUsd(totalCost)}</p>
+          <p class="text-[11px] text-ink-500 mt-0.5">${totalCalls.toLocaleString('de-DE')} Calls</p>
+        </div>
+        <div class="bg-white rounded-2xl border border-ink-200 p-4">
+          <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold">Input Tokens</p>
+          <p class="text-2xl font-bold text-ink-900 mt-1">${_formatTok(totalIn)}</p>
+          <p class="text-[11px] text-ink-500 mt-0.5">inkl. Cache</p>
+        </div>
+        <div class="bg-white rounded-2xl border border-ink-200 p-4">
+          <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold">Output Tokens</p>
+          <p class="text-2xl font-bold text-ink-900 mt-1">${_formatTok(totalOut)}</p>
+          <p class="text-[11px] text-ink-500 mt-0.5">generiert</p>
+        </div>
+        <div class="bg-white rounded-2xl border border-ink-200 p-4">
+          <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold">Ø pro Call</p>
+          <p class="text-2xl font-bold text-ink-900 mt-1">${_formatUsd(totalCalls > 0 ? totalCost / totalCalls : 0)}</p>
+          <p class="text-[11px] text-ink-500 mt-0.5">${totalCalls > 0 ? Math.round((totalIn + totalOut) / totalCalls).toLocaleString('de-DE') : 0} Tokens</p>
+        </div>
+      </div>
+
+      <!-- Tagesverlauf -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5">
+        <p class="text-sm font-semibold text-ink-900 mb-3 flex items-center gap-2"><i data-lucide="trending-up" class="w-4 h-4 text-brand-600"></i> Tagesverlauf</p>
+        ${byDay.length === 0 ? '<p class="text-xs text-ink-500 italic">Keine Daten im gewählten Zeitraum.</p>' : `
+          <div class="flex items-end gap-1 h-32 overflow-x-auto pb-1">
+            ${byDay.map(d => `
+              <div class="flex flex-col items-center gap-1 min-w-[28px] flex-shrink-0" title="${d.key} · ${d.count} Calls · ${_formatUsd(d.cost)}">
+                <div class="w-full bg-brand-500 rounded-t" style="height:${Math.max(2, Math.round((d.cost / maxDayCost) * 100))}%"></div>
+                <span class="text-[9px] text-ink-500 whitespace-nowrap rotate-45 origin-top-left translate-y-1.5">${d.key.slice(5)}</span>
+              </div>
+            `).join('')}
+          </div>
+        `}
+      </div>
+
+      <!-- Aggregationen -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        ${_renderAiCostsAggCard('Top Benutzer', 'users', byUser)}
+        ${_renderAiCostsAggCard('Top Firmen', 'building-2', byCompany)}
+        ${_renderAiCostsAggCard('Top Modelle', 'cpu', byModel)}
+        ${_renderAiCostsAggCard('Top Zwecke', 'tag', byPurpose)}
+      </div>
+
+      <!-- Detail-Tabelle -->
+      <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-ink-100 flex items-center justify-between flex-wrap gap-2">
+          <p class="text-sm font-semibold text-ink-900 flex items-center gap-2"><i data-lucide="list" class="w-4 h-4 text-brand-600"></i> Letzte ${Math.min(rows.length, 200)} Calls</p>
+          <span class="text-[11px] text-ink-500">Sortiert nach Datum (neueste zuerst)</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead class="bg-ink-50 text-ink-600">
+              <tr>
+                <th class="text-left px-3 py-2 font-semibold">Datum</th>
+                <th class="text-left px-3 py-2 font-semibold">Benutzer</th>
+                <th class="text-left px-3 py-2 font-semibold">Firma</th>
+                <th class="text-left px-3 py-2 font-semibold">Modell</th>
+                <th class="text-left px-3 py-2 font-semibold">Zweck</th>
+                <th class="text-right px-3 py-2 font-semibold">In</th>
+                <th class="text-right px-3 py-2 font-semibold">Out</th>
+                <th class="text-right px-3 py-2 font-semibold">Kosten</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.length === 0 ? `<tr><td colspan="8" class="text-center text-ink-500 italic py-6">Keine Logs im gewählten Zeitraum.</td></tr>` : rows.slice(0, 200).map(r => `
+                <tr class="border-t border-ink-100 hover:bg-ink-50/50">
+                  <td class="px-3 py-2 whitespace-nowrap text-ink-700">${escapeHtml(r.created_at ? new Date(r.created_at).toLocaleString('de-DE', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' }) : '–')}</td>
+                  <td class="px-3 py-2 truncate max-w-[140px]" title="${escapeHtml(r.user_name || '')}">${escapeHtml(r.user_name || '–')}</td>
+                  <td class="px-3 py-2 truncate max-w-[120px]" title="${escapeHtml(r.company_name || '')}">${escapeHtml(r.company_name || '–')}</td>
+                  <td class="px-3 py-2 truncate max-w-[180px] font-mono text-[10px]" title="${escapeHtml(r.model || '')}">${escapeHtml(r.model || '–')}</td>
+                  <td class="px-3 py-2 truncate max-w-[160px]" title="${escapeHtml(r.purpose || '')}">${escapeHtml(r.purpose || '–')}</td>
+                  <td class="px-3 py-2 text-right font-mono">${_formatTok((r.input_tokens || 0) + (r.cache_creation_input_tokens || 0) + (r.cache_read_input_tokens || 0))}</td>
+                  <td class="px-3 py-2 text-right font-mono">${_formatTok(r.output_tokens || 0)}</td>
+                  <td class="px-3 py-2 text-right font-mono font-semibold text-ink-900">${_formatUsd(r.cost_usd || 0)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${rows.length > 200 ? `<div class="px-4 py-2 text-[11px] text-ink-500 text-center border-t border-ink-100">…${(rows.length - 200).toLocaleString('de-DE')} weitere Calls (Filter setzen für gezielte Ansicht)</div>` : ''}
+      </div>
+
+      <p class="text-[11px] text-ink-500 italic text-center">
+        Hinweis: Beträge sind geschätzt anhand der Anthropic-Listenpreise pro 1M Tokens und können von der tatsächlichen Anthropic-Rechnung leicht abweichen (z.B. wegen Volumen-Rabatten).
+      </p>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
+function _renderAiCostsAggCard(title, icon, entries) {
+  const maxCost = entries.reduce((m, e) => Math.max(m, e.cost), 0) || 1;
+  return `
+    <div class="bg-white rounded-2xl border border-ink-200 p-4">
+      <p class="text-sm font-semibold text-ink-900 mb-3 flex items-center gap-2"><i data-lucide="${icon}" class="w-4 h-4 text-brand-600"></i> ${title}</p>
+      ${entries.length === 0 ? '<p class="text-xs text-ink-500 italic">Keine Daten.</p>' : `
+        <div class="space-y-1.5">
+          ${entries.map(e => `
+            <div>
+              <div class="flex items-center justify-between text-xs mb-0.5">
+                <span class="truncate text-ink-800 mr-2" title="${escapeHtml(e.key)}">${escapeHtml(e.key)}</span>
+                <span class="font-mono font-semibold text-ink-900 shrink-0">${_formatUsd(e.cost)}</span>
+              </div>
+              <div class="h-1.5 bg-ink-100 rounded-full overflow-hidden">
+                <div class="h-full bg-brand-500 rounded-full" style="width:${Math.round((e.cost / maxCost) * 100)}%"></div>
+              </div>
+              <p class="text-[10px] text-ink-500 mt-0.5">${e.count} Calls · ${_formatTok(e.in_tok)} in · ${_formatTok(e.out_tok)} out</p>
+            </div>
+          `).join('')}
+        </div>
+      `}
+    </div>`;
+}
+
 async function renderAdminSettings() {
   setPageTitle('Einstellungen');
   if (!APP_KEYS.user?.is_admin) {
@@ -7088,7 +7520,7 @@ WICHTIG:
   if (btn) btn.disabled = true;
   if (lbl) lbl.textContent = 'generiert…';
   try {
-    const result = await askAI(prompt, { maxTokens: 1500 });
+    const result = await askAI(prompt, { maxTokens: 1500, purpose: 'template_generate' });
     // Falls die KI doch Code-Block-Markdown drum macht, abstreifen
     let cleaned = result.trim();
     cleaned = cleaned.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/, '').trim();
@@ -8936,7 +9368,8 @@ async function analyzeInquiry() {
   try {
     const summary = await askAI(prompt, {
       images: _inquiryImages.map(i => ({ mediaType: i.mediaType, data: i.base64 })),
-      maxTokens: 2048
+      maxTokens: 2048,
+      purpose: 'inquiry_image_summary'
     });
     const ta = document.getElementById('inq_ai_summary');
     if (ta) ta.value = summary;
@@ -9471,7 +9904,8 @@ async function analyzeInquiryWizard() {
     const cur = getCurrentCompany();
     const raw = await askAI(_inquiryAiPrompt(w.data), {
       images: _inquiryImages.map(i => ({ mediaType: i.mediaType, data: i.base64 })),
-      maxTokens: 2048
+      maxTokens: 2048,
+      purpose: 'inquiry_analyze'
     });
     const parsed = _parseInquiryAiResponse(raw);
     // Wizard-State aktualisieren
@@ -10648,7 +11082,7 @@ Antworte NUR mit dem aktualisierten JSON-Objekt — gleiche Keys wie im aktuelle
 Nur die Keys, kein Text drumherum, keine Code-Blöcke.`;
 
   try {
-    const result = await askAI(prompt, { maxTokens: 1200 });
+    const result = await askAI(prompt, { maxTokens: 1200, purpose: 'theme_generate' });
     let cleaned = result.trim().replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/, '').trim();
     const parsed = JSON.parse(cleaned);
     console.log('[Layout-AI] Vor:', { ..._liveLayoutState.config });
