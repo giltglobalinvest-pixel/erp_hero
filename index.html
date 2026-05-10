@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.90';
+const APP_VERSION = 'v3.91';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3802,8 +3802,11 @@ async function _aiCreateCustomerAndContactFromExtracted() {
   const zip     = (co.zip     || '').trim();
   const city    = (co.city    || '').trim();
   const country = (co.country || '').trim() || 'Deutschland';
+  // Kundennummer fortlaufend vergeben — gleiche Logik wie beim manuellen Anlegen
+  const customerNo = await nextCustomerNo(cur.id).catch(() => '');
   // Customer anlegen mit Standard-Defaults
   const customerFields = {
+    customer_no:    customerNo,
     name1:          customerName,
     street, zip, city, country,
     email:          (ct.email || requesterEmail || '').trim(),
@@ -4977,7 +4980,10 @@ async function _voiceCreateAndSelectExtractedCustomer() {
   _voiceState.customerActionLoading = true;
   _renderVoiceAssistant();
   try {
+    // Kundennummer fortlaufend vergeben — gleiche Logik wie beim manuellen Anlegen
+    const customerNo = await nextCustomerNo(cur.id).catch(() => '');
     const customerFields = {
+      customer_no: customerNo,
       name1: ext.company_name,
       company_id: [cur.id],
       status: 'aktiv'
