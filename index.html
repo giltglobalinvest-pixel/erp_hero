@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.31';
+const APP_VERSION = 'v3.32';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1304,6 +1304,34 @@ function _fdStatusColor(s) {
 function _fdPriorityLabel(p) { return p === 1 ? 'Niedrig' : p === 2 ? 'Mittel' : p === 3 ? 'Hoch' : p === 4 ? 'Dringend' : ('Prio ' + p); }
 function _fdFmtDate(s) { try { return s ? new Date(s).toLocaleString('de-DE') : ''; } catch { return s || ''; } }
 
+// Wandelt Freshdesk-HTML in lesbaren Text um.
+// - Strippt Tags, dekodiert Entities, behält Block-Struktur als Zeilenumbrüche.
+// - Mehrere Leerzeilen werden auf max. zwei zusammengefasst.
+function _fdHtmlToText(html) {
+  if (!html) return '';
+  const tmp = document.createElement('div');
+  tmp.innerHTML = String(html);
+  // <br> → Zeilenumbruch
+  tmp.querySelectorAll('br').forEach(el => el.replaceWith('\n'));
+  // Block-Tags: nach jedem ein Newline
+  tmp.querySelectorAll('p, div, li, tr, h1, h2, h3, h4, h5, h6, blockquote').forEach(el => {
+    el.appendChild(document.createTextNode('\n'));
+  });
+  // Listen-Items mit Bullet-Präfix
+  tmp.querySelectorAll('li').forEach(el => {
+    el.insertBefore(document.createTextNode('• '), el.firstChild);
+  });
+  let text = tmp.textContent || '';
+  // Whitespace normalisieren: mehrfache Leerzeichen → eines, max 2 Newlines hintereinander
+  text = text
+    .replace(/ /g, ' ')          // &nbsp;
+    .replace(/[ \t]+/g, ' ')
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return text;
+}
+
 async function openFreshdeskTicket(ticketId) {
   if (!ticketId) return;
   _fdTicketState = { id: ticketId, ticket: null, requester: null, conversations: null, showHistory: false };
@@ -1387,31 +1415,19 @@ function _renderFreshdeskTicket() {
         <div class="flex items-start gap-2">
           <i data-lucide="calendar" class="w-3.5 h-3.5 text-ink-500 mt-0.5"></i>
           <div class="min-w-0">
-            <p class="text-[10px] uppercase tracking-wider text-ink-500">Zeitstempel</p>
-            <p class="text-ink-900">Erstellt: ${escapeHtml(_fdFmtDate(t.created_at))}</p>
-            <p class="text-ink-600">Geändert: ${escapeHtml(_fdFmtDate(t.updated_at))}</p>
-            ${t.due_by ? `<p class="text-ink-600">Fällig: ${escapeHtml(_fdFmtDate(t.due_by))}</p>` : ''}
+            <p class="text-[10px] uppercase tracking-wider text-ink-500">Erstellt</p>
+            <p class="text-ink-900">${escapeHtml(_fdFmtDate(t.created_at))}</p>
           </div>
         </div>
-        ${cfEntries.length > 0 ? `
-          <div class="flex items-start gap-2 sm:col-span-2">
-            <i data-lucide="tag" class="w-3.5 h-3.5 text-ink-500 mt-0.5"></i>
-            <div class="min-w-0 flex-1">
-              <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1">Felder</p>
-              <div class="flex flex-wrap gap-x-3 gap-y-0.5">
-                ${cfEntries.map(([k,v]) => `<span class="text-ink-700"><span class="text-ink-500">${escapeHtml(k)}:</span> ${escapeHtml(String(v))}</span>`).join('')}
-              </div>
-            </div>
-          </div>
-        ` : ''}
       </div>
 
-      <!-- Description -->
+      <!-- Description (als lesbarer Text) -->
       <div>
         <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1.5 font-semibold">Erste Nachricht</p>
-        <div class="bg-white border border-ink-200 rounded-xl p-3 text-sm text-ink-800 max-h-[40vh] overflow-y-auto fd-prose">
-          ${t.description_html || (t.description ? '<p>' + escapeHtml(t.description).replace(/\\n/g,'<br>') + '</p>' : '<p class="text-ink-500 italic">Keine Beschreibung</p>')}
-        </div>
+        <div class="bg-white border border-ink-200 rounded-xl p-3 text-sm text-ink-800 max-h-[40vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">${(() => {
+          const txt = _fdHtmlToText(t.description_html || t.description || '');
+          return txt ? escapeHtml(txt) : '<span class="text-ink-500 italic">Keine Beschreibung</span>';
+        })()}</div>
       </div>
 
       <!-- Verlauf-Toggle + Liste -->
@@ -1446,9 +1462,10 @@ function _renderFreshdeskTicket() {
                           </div>
                           <span class="text-[11px] text-ink-500 shrink-0">${escapeHtml(_fdFmtDate(c.created_at))}</span>
                         </div>
-                        <div class="text-sm text-ink-800 fd-prose max-h-[35vh] overflow-y-auto">
-                          ${c.body || (c.body_text ? '<p>' + escapeHtml(c.body_text).replace(/\\n/g,'<br>') + '</p>' : '')}
-                        </div>
+                        <div class="text-sm text-ink-800 max-h-[35vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">${(() => {
+                          const txt = _fdHtmlToText(c.body || c.body_text || '');
+                          return txt ? escapeHtml(txt) : '<span class="text-ink-500 italic">(leer)</span>';
+                        })()}</div>
                       </div>
                     `;
                   }).join('')}
