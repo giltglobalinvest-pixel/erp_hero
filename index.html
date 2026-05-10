@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.93';
+const APP_VERSION = 'v3.94';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -9510,25 +9510,51 @@ async function toggleCustomerArchive(id, archive) {
    Die jeweilige Remote-ID wird zurück in den Customer-Record geschrieben,
    damit nachfolgende Updates statt einer doppelten Anlage einen Update-Call machen.
 */
-function _buildCustomerSyncPayload(f) {
-  // Gemeinsame Felder, die wir in beide CRMs schicken
-  const out = {
-    name: (f.name1 || '').trim(),
-    website: (f.website || '').trim() || null,
-    phone: (f.phone || '').trim() || null
-  };
-  const addressParts = [f.street, [f.zip, f.city].filter(Boolean).join(' '), f.country].filter(Boolean);
-  if (addressParts.length) out.address = addressParts.join('\n');
+// Freshdesk Companies API kennt NUR diese Felder:
+//   name (required), description, note, domains[], industry, custom_fields{}
+// Adresse, Telefon, Website müssen wir daher in note konsolidieren.
+function _buildFdCompanyPayload(f) {
+  const out = { name: (f.name1 || '').trim() };
+  // Note = Sammelblock mit allen Stammdaten, die Freshdesk nicht nativ kennt
   const noteParts = [];
   if (f.customer_no) noteParts.push('Kunden-Nr: ' + f.customer_no);
   if (f.vat_id)      noteParts.push('USt-IdNr: ' + f.vat_id);
-  if (f.notes)       noteParts.push(f.notes);
+  const addressLine = [f.street, [f.zip, f.city].filter(Boolean).join(' '), f.country].filter(Boolean).join(' · ');
+  if (addressLine) noteParts.push('Adresse: ' + addressLine);
+  if (f.phone)   noteParts.push('Telefon: ' + f.phone);
+  if (f.website) noteParts.push('Website: ' + f.website);
+  if (f.email)   noteParts.push('E-Mail: ' + f.email);
+  if (f.payment_terms)  noteParts.push('Zahlungsziel: ' + f.payment_terms);
+  if (f.delivery_terms) noteParts.push('Lieferbed.: ' + f.delivery_terms);
+  if (f.notes) noteParts.push('—', f.notes);
   if (noteParts.length) out.note = noteParts.join('\n');
-  // E-Mail-Domain für Freshdesk-Domain-Match (auto-Zuordnung künftiger Tickets)
+  // Description: kompakte Variante (max 255 Zeichen sollte safe sein)
+  const desc = (f.notes || '').trim().slice(0, 250);
+  if (desc) out.description = desc;
+  // E-Mail-Domain → Domain-Match für künftige Ticket-Auto-Zuordnung
   if (f.email) {
     const dom = (String(f.email).match(/@([^@\s]+)$/) || [])[1];
-    if (dom) out.domains = [dom.toLowerCase()];
+    if (dom) {
+      // Free-Mail-Domains nicht auf Firmen mappen (z.B. info@gmail.com)
+      if (!_FREE_MAIL_DOMAINS.has(dom.toLowerCase())) {
+        out.domains = [dom.toLowerCase()];
+      }
+    }
   }
+  return out;
+}
+
+// Freshsales Sales Accounts API: name, website, phone, address, city, zipcode, country, ...
+function _buildFsAccountPayload(f) {
+  const out = {
+    name: (f.name1 || '').trim()
+  };
+  if ((f.website || '').trim()) out.website = f.website.trim();
+  if ((f.phone   || '').trim()) out.phone   = f.phone.trim();
+  if ((f.street  || '').trim()) out.address = f.street.trim();
+  if ((f.city    || '').trim()) out.city    = f.city.trim();
+  if ((f.zip     || '').trim()) out.zipcode = f.zip.trim();
+  if ((f.country || '').trim()) out.country = f.country.trim();
   return out;
 }
 
@@ -9544,7 +9570,7 @@ async function syncCustomerToFreshdesk(customerId, btnEl, opts) {
     if (!rec) throw new Error('Kunde nicht gefunden');
     const f = rec.fields || {};
     if (!(f.name1 || '').trim()) throw new Error('Name (Zeile 1) ist leer');
-    const payload = _buildCustomerSyncPayload(f);
+    const payload = _buildFdCompanyPayload(f);
     const existingFdId = (f.freshdesk_company_id || '').trim();
     let result;
     if (existingFdId) {
@@ -9604,17 +9630,7 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
     if (!rec) throw new Error('Kunde nicht gefunden');
     const f = rec.fields || {};
     if (!(f.name1 || '').trim()) throw new Error('Name (Zeile 1) ist leer');
-    const base = _buildCustomerSyncPayload(f);
-    const fs = {
-      name: base.name,
-      website: base.website,
-      phone: base.phone,
-      address: (f.street || '').trim() || undefined,
-      city: (f.city || '').trim() || undefined,
-      zipcode: (f.zip || '').trim() || undefined,
-      country: (f.country || '').trim() || undefined
-    };
-    Object.keys(fs).forEach(k => fs[k] === undefined && delete fs[k]);
+    const fs = _buildFsAccountPayload(f);
     const existingFsId = (f.freshsales_account_id || '').trim();
     let result;
     if (existingFsId) {
