@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.40';
+const APP_VERSION = 'v3.41';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1771,26 +1771,27 @@ async function showAiSummaryQuickView(ticketId) {
     </div>
   `, { maxWidth: 'max-w-2xl' });
   try {
-    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
-    // Neueste zuerst, damit wir die letzte KI-Notiz finden
-    const list = (Array.isArray(conv) ? conv : []).slice()
-      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-    // Suche letzte private Notiz mit dem KI-Marker (im rohen body, nicht body_text)
-    const aiNote = list.find(c => {
-      if (!c.private) return false;
-      const raw = (c.body || c.body_text || '');
-      return raw.includes(FD_AI_SUMMARY_MARKER);
-    });
+    // Erst Cache prüfen (vom Badge-Check oft schon gefüllt), sonst frisch fetchen.
+    // Nutzt _fetchLastAiSummaryNote — gleiche Logik wie das Badge, damit beide
+    // konsistent dieselbe Notiz finden (drei Marker-Varianten + body/body_text).
+    const cached = _fdAiSummaryCache.get(ticketId);
+    let aiNote = cached?.aiNote || null;
+    if (!aiNote) aiNote = await _fetchLastAiSummaryNote(ticketId);
     const wrap = document.getElementById('aiSummaryQuickContent');
     if (!wrap) return;
     if (!aiNote) {
       wrap.innerHTML = '<p class="text-sm text-amber-700 italic">Keine KI-Zusammenfassung in diesem Ticket gefunden.</p>';
       return;
     }
-    // Text extrahieren + Header-Zeile (mit Marker) abschneiden
+    // Text extrahieren + Header-Zeile (Marker) abschneiden — mit allen drei Varianten
     const fullText = _fdHtmlToText(aiNote.body || aiNote.body_text || '');
     const lines = fullText.split('\n');
-    const headerIdx = lines.findIndex(l => l.includes(FD_AI_SUMMARY_MARKER));
+    const isHeader = (l) => l && (
+      l.includes(FD_AI_SUMMARY_MARKER) ||
+      l.includes('KI-Zusammenfassung') ||
+      l.includes('🤖')
+    );
+    const headerIdx = lines.findIndex(isHeader);
     const cleanText = headerIdx >= 0
       ? lines.slice(headerIdx + 1).join('\n').replace(/^\n+/, '').trim()
       : fullText;
