@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.52';
+const APP_VERSION = 'v3.53';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2336,7 +2336,7 @@ function renderWelcome() {
         <div class="mt-6 bg-white border border-purple-200 rounded-2xl overflow-hidden shadow-sm">
           <div class="bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 text-white px-4 sm:px-5 py-3 flex items-center gap-3">
             <i data-lucide="sparkles" class="w-5 h-5 shrink-0"></i>
-            <h3 class="font-bold flex-1 text-base">KI-Sprachassistent</h3>
+            <h3 class="font-bold flex-1 text-base">KI-Assistent · Angebote vorbereiten</h3>
             <span class="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded font-semibold">Beta</span>
           </div>
           <div id="voiceAssistantWrap" class="p-4 sm:p-5"></div>
@@ -2425,6 +2425,7 @@ function escapeHtml(s) {
    ============================================================ */
 
 let _voiceState = {
+  mode: (typeof localStorage !== 'undefined' && localStorage.getItem('voice_mode')) || 'voice', // 'voice' | 'text'
   recognition: null,
   recording: false,
   interim: '',
@@ -2439,6 +2440,46 @@ let _voiceState = {
   articlePickerOpen: false,
   articleSearch: ''
 };
+
+function setVoiceMode(mode) {
+  if (mode !== 'voice' && mode !== 'text') return;
+  _voiceState.mode = mode;
+  try { localStorage.setItem('voice_mode', mode); } catch (_) {}
+  // Beim Wechsel auf Text alles abschalten was nur für Voice sinnvoll ist
+  if (mode === 'text') {
+    if (_voiceState.recognition) try { _voiceState.recognition.abort(); } catch (_) {}
+    if ('speechSynthesis' in window) try { window.speechSynthesis.cancel(); } catch (_) {}
+    _voiceState.recording = false;
+    _voiceState.ttsSpeaking = false;
+  }
+  _renderVoiceAssistant();
+  if (mode === 'text') setTimeout(() => document.getElementById('assistantTextarea')?.focus(), 80);
+}
+
+// Auto-Add: KI hat Artikel mit hoher Sicherheit erkannt → direkt in manualItems übernehmen.
+// Dedupliziert per article_id, ignoriert bereits vorhandene (Multi-Turn).
+function _autoAddHighConfidenceItems(response) {
+  if (!response || !response.matched || !Array.isArray(response.matched.items)) return;
+  const ctx = _voiceState.context || { articles: [] };
+  const articleById = new Map(ctx.articles.map(a => [a.id, a]));
+  let added = 0;
+  for (const it of response.matched.items) {
+    if (!it.article_id) continue;
+    if (it.match_confidence !== 'high') continue;
+    if ((_voiceState.manualItems || []).some(m => m.article_id === it.article_id)) continue;
+    const article = articleById.get(it.article_id);
+    if (!article) continue;
+    const f = article.fields || {};
+    (_voiceState.manualItems = _voiceState.manualItems || []).push({
+      article_id: it.article_id,
+      qty: Math.max(1, Number(it.qty) || 1),
+      sku: f.article_no || '',
+      name: f.name1 || ''
+    });
+    added++;
+  }
+  if (added > 0) toast(`${added} Artikel automatisch hinzugefügt`, 'success', 2000);
+}
 
 // TTS-State (außerhalb von _voiceState, damit nicht resetet wird)
 let _ttsWarmedUp = false;
@@ -2523,7 +2564,18 @@ function _renderVoiceAssistant() {
     ? `${ctx.customers.length} Kunden · ${ctx.articles.length} Artikel im Kontext`
     : 'lade Kontext…';
 
+  const mode = _voiceState.mode || 'voice';
+
   wrap.innerHTML = `
+    <!-- Mode-Tabs: Sprache | Text -->
+    <div class="flex gap-1 p-1 bg-ink-100 rounded-lg mb-3">
+      <button type="button" onclick="setVoiceMode('voice')" class="${mode==='voice'?'bg-white shadow-sm text-purple-700':'text-ink-600 hover:text-ink-900'} flex-1 px-3 py-1.5 rounded-md text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition">
+        <i data-lucide="mic" class="w-3.5 h-3.5"></i> Sprache
+      </button>
+      <button type="button" onclick="setVoiceMode('text')" class="${mode==='text'?'bg-white shadow-sm text-purple-700':'text-ink-600 hover:text-ink-900'} flex-1 px-3 py-1.5 rounded-md text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition">
+        <i data-lucide="keyboard" class="w-3.5 h-3.5"></i> Text
+      </button>
+    </div>
     <p class="text-[11px] text-ink-500 mb-3">${escapeHtml(ctxStatus)} · Sprache: Deutsch</p>
 
     ${_voiceState.history.length > 0 ? `
@@ -2536,7 +2588,7 @@ function _renderVoiceAssistant() {
       </div>
     ` : ''}
 
-    ${_voiceState.ttsSpeaking ? `
+    ${_voiceState.ttsSpeaking && mode === 'voice' ? `
       <div class="bg-purple-100 border border-purple-300 rounded-xl px-3 py-2 mb-3 flex items-center justify-between gap-2">
         <p class="text-xs text-purple-900 flex items-center gap-2">
           <span class="inline-flex gap-0.5">
@@ -2553,37 +2605,54 @@ function _renderVoiceAssistant() {
       </div>
     ` : ''}
 
-    <div class="bg-ink-50 border border-ink-200 rounded-xl p-4 mb-4 text-center">
-      <button type="button" onclick="${_voiceState.recording ? 'stopVoiceRecording()' : 'startVoiceRecording()'}"
-              ${_voiceState.processing ? 'disabled' : ''}
-              class="${_voiceState.recording ? 'bg-red-500 hover:bg-red-600 animate-pulse' : 'bg-purple-600 hover:bg-purple-700'} text-white rounded-full w-20 h-20 grid place-items-center shadow-lg disabled:opacity-50 transition mx-auto">
-        <i data-lucide="${_voiceState.recording ? 'square' : 'mic'}" class="w-9 h-9"></i>
-      </button>
-      <p class="mt-3 text-sm text-ink-600">
-        ${_voiceState.processing
-          ? '<span class="inline-flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> KI denkt nach…</span>'
-          : _voiceState.recording
-            ? 'Sprich jetzt — Tipp auf Stop wenn fertig'
-            : (_voiceState.history.length === 0 ? 'Klick zum Sprechen' : 'Antworten oder Info ergänzen')}
-      </p>
-      ${_voiceState.interim ? `<p class="text-xs text-ink-500 italic mt-2 px-2">„${escapeHtml(_voiceState.interim)}"</p>` : ''}
-    </div>
-
-    <!-- Texteingabe-Fallback für Codes, die schlecht erkannt werden -->
-    <div class="mb-3">
-      <div class="flex gap-2">
-        <input type="text" id="voiceTextInput" onkeydown="_voiceTextInputKey(event)"
-               placeholder="…oder eintippen (z.B. Artikel-Code V3F16L)"
-               class="flex-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 font-mono"
-               ${_voiceState.processing ? 'disabled' : ''}>
-        <button type="button" onclick="submitVoiceTextInput()" ${_voiceState.processing ? 'disabled' : ''} class="bg-ink-700 hover:bg-ink-900 text-white rounded-lg px-3 py-2 text-sm disabled:opacity-50 inline-flex items-center gap-1.5">
-          <i data-lucide="send" class="w-4 h-4"></i> Senden
+    ${mode === 'voice' ? `
+      <div class="bg-ink-50 border border-ink-200 rounded-xl p-4 mb-4 text-center">
+        <button type="button" onclick="${_voiceState.recording ? 'stopVoiceRecording()' : 'startVoiceRecording()'}"
+                ${_voiceState.processing ? 'disabled' : ''}
+                class="${_voiceState.recording ? 'bg-red-500 hover:bg-red-600 animate-pulse' : 'bg-purple-600 hover:bg-purple-700'} text-white rounded-full w-20 h-20 grid place-items-center shadow-lg disabled:opacity-50 transition mx-auto">
+          <i data-lucide="${_voiceState.recording ? 'square' : 'mic'}" class="w-9 h-9"></i>
         </button>
+        <p class="mt-3 text-sm text-ink-600">
+          ${_voiceState.processing
+            ? '<span class="inline-flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> KI denkt nach…</span>'
+            : _voiceState.recording
+              ? 'Sprich jetzt — Tipp auf Stop wenn fertig'
+              : (_voiceState.history.length === 0 ? 'Klick zum Sprechen' : 'Antworten oder Info ergänzen')}
+        </p>
+        ${_voiceState.interim ? `<p class="text-xs text-ink-500 italic mt-2 px-2">„${escapeHtml(_voiceState.interim)}"</p>` : ''}
       </div>
-      <p class="text-[11px] text-ink-500 mt-1.5">
-        💡 Tipp: Bei alphanumerischen Codes funktioniert <strong>Buchstabieralphabet</strong> per Sprache am besten — z.B. „V wie Viktor, drei, F wie Friedrich, sechzehn, L wie Ludwig". Oder einfach hier eintippen.
-      </p>
-    </div>
+
+      <!-- Texteingabe-Fallback für Codes, die schlecht erkannt werden -->
+      <div class="mb-3">
+        <div class="flex gap-2">
+          <input type="text" id="voiceTextInput" onkeydown="_voiceTextInputKey(event)"
+                 placeholder="…oder eintippen (z.B. Artikel-Code V3F16L)"
+                 class="flex-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 font-mono"
+                 ${_voiceState.processing ? 'disabled' : ''}>
+          <button type="button" onclick="submitVoiceTextInput()" ${_voiceState.processing ? 'disabled' : ''} class="bg-ink-700 hover:bg-ink-900 text-white rounded-lg px-3 py-2 text-sm disabled:opacity-50 inline-flex items-center gap-1.5">
+            <i data-lucide="send" class="w-4 h-4"></i> Senden
+          </button>
+        </div>
+        <p class="text-[11px] text-ink-500 mt-1.5">
+          💡 Tipp: Bei alphanumerischen Codes funktioniert <strong>Buchstabieralphabet</strong> per Sprache am besten — z.B. „V wie Viktor, drei, F wie Friedrich, sechzehn, L wie Ludwig".
+        </p>
+      </div>
+    ` : `
+      <!-- Text-Modus: prominente Textarea -->
+      <div class="bg-ink-50 border border-ink-200 rounded-xl p-3 mb-4">
+        <textarea id="assistantTextarea" rows="3" onkeydown="_assistantTextareaKey(event)" placeholder="Schreib, was du brauchst… z.B. „Erstelle ein Angebot für Mustermann GmbH mit 2× V3F16L und einem Notausschalter"" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 resize-y" ${_voiceState.processing ? 'disabled' : ''}></textarea>
+        <div class="flex items-center justify-between mt-2 gap-2 flex-wrap">
+          <p class="text-[11px] text-ink-500">
+            ${_voiceState.processing
+              ? '<span class="inline-flex items-center gap-1.5"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> KI denkt nach…</span>'
+              : 'Cmd/Ctrl + Enter zum Senden'}
+          </p>
+          <button type="button" onclick="submitAssistantText()" ${_voiceState.processing ? 'disabled' : ''} class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-4 py-2 text-sm font-medium inline-flex items-center gap-1.5 disabled:opacity-50">
+            <i data-lucide="send" class="w-4 h-4"></i> Senden
+          </button>
+        </div>
+      </div>
+    `}
 
     ${_renderManualItemsBlock()}
 
@@ -2592,18 +2661,20 @@ function _renderVoiceAssistant() {
     ${_renderReadyBlock()}
 
     <div class="flex items-center justify-between text-xs text-ink-700 pt-2 border-t border-ink-100 flex-wrap gap-2">
-      <div class="flex items-center gap-3 flex-wrap">
-        <label class="flex items-center gap-1.5 cursor-pointer select-none ${_voiceState.ttsEnabled ? 'text-purple-700' : 'text-ink-500'}">
-          <input type="checkbox" ${_voiceState.ttsEnabled ? 'checked' : ''} onchange="_voiceState.ttsEnabled = this.checked; if (!this.checked) stopVoiceTts();" class="w-4 h-4 rounded accent-purple-600">
-          <i data-lucide="${_voiceState.ttsEnabled ? 'volume-2' : 'volume-x'}" class="w-3.5 h-3.5"></i>
-          <span class="font-medium">Sprachausgabe</span>
-        </label>
-        <label class="flex items-center gap-1.5 cursor-pointer select-none ${_voiceState.handsFree ? 'text-purple-700' : 'text-ink-500'}">
-          <input type="checkbox" ${_voiceState.handsFree ? 'checked' : ''} onchange="_voiceState.handsFree = this.checked; _renderVoiceAssistant();" class="w-4 h-4 rounded accent-purple-600">
-          <i data-lucide="${_voiceState.handsFree ? 'infinity' : 'hand'}" class="w-3.5 h-3.5"></i>
-          <span class="font-medium">Hands-free</span>
-        </label>
-      </div>
+      ${mode === 'voice' ? `
+        <div class="flex items-center gap-3 flex-wrap">
+          <label class="flex items-center gap-1.5 cursor-pointer select-none ${_voiceState.ttsEnabled ? 'text-purple-700' : 'text-ink-500'}">
+            <input type="checkbox" ${_voiceState.ttsEnabled ? 'checked' : ''} onchange="_voiceState.ttsEnabled = this.checked; if (!this.checked) stopVoiceTts();" class="w-4 h-4 rounded accent-purple-600">
+            <i data-lucide="${_voiceState.ttsEnabled ? 'volume-2' : 'volume-x'}" class="w-3.5 h-3.5"></i>
+            <span class="font-medium">Sprachausgabe</span>
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer select-none ${_voiceState.handsFree ? 'text-purple-700' : 'text-ink-500'}">
+            <input type="checkbox" ${_voiceState.handsFree ? 'checked' : ''} onchange="_voiceState.handsFree = this.checked; _renderVoiceAssistant();" class="w-4 h-4 rounded accent-purple-600">
+            <i data-lucide="${_voiceState.handsFree ? 'infinity' : 'hand'}" class="w-3.5 h-3.5"></i>
+            <span class="font-medium">Hands-free</span>
+          </label>
+        </div>
+      ` : '<span class="text-ink-500">Texteingabe-Modus</span>'}
       ${_voiceState.history.length > 0 ? `
         <button type="button" onclick="resetVoiceConversation()" class="text-ink-500 hover:text-ink-900 inline-flex items-center gap-1">
           <i data-lucide="rotate-ccw" class="w-3 h-3"></i> Neu starten
@@ -2843,20 +2914,36 @@ function startVoiceRecording() {
   _renderVoiceAssistant();
 }
 
-// Texteingabe-Fallback: User tippt statt zu sprechen (für Codes, die schlecht erkannt werden)
+// Texteingabe-Fallback im Voice-Modus (kleines Inputfeld unten)
 function submitVoiceTextInput() {
   const inp = document.getElementById('voiceTextInput');
   if (!inp) return;
   const text = (inp.value || '').trim();
   if (!text) return;
   inp.value = '';
-  // Im History anzeigen wie eine Voice-Eingabe
   processVoiceInput(text);
 }
 function _voiceTextInputKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     submitVoiceTextInput();
+  }
+}
+
+// Text-Modus: große Textarea als primäre Eingabe
+function submitAssistantText() {
+  const ta = document.getElementById('assistantTextarea');
+  if (!ta) return;
+  const text = (ta.value || '').trim();
+  if (!text) return;
+  ta.value = '';
+  processVoiceInput(text);
+}
+function _assistantTextareaKey(e) {
+  // Cmd+Enter (Mac) oder Ctrl+Enter (Windows/Linux) sendet — Enter alleine ist newline
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    submitAssistantText();
   }
 }
 
@@ -2880,13 +2967,20 @@ async function processVoiceInput(userText) {
   try {
     const response = await _voiceCallAi(userText.trim());
     _voiceState.lastResponse = response;
+    // Eindeutig erkannte Artikel automatisch in manualItems übernehmen
+    _autoAddHighConfidenceItems(response);
     const speech = (response.speech || '').trim() || '(keine Antwort)';
     _voiceState.history.push({ role: 'assistant', content: speech });
-    if (_voiceState.ttsEnabled && speech !== '(keine Antwort)') {
-      _speakText(speech); // löst _autoListenIfNeeded via onend/onerror aus
+    // TTS + Auto-Listen nur im Voice-Modus
+    if (_voiceState.mode === 'voice') {
+      if (_voiceState.ttsEnabled && speech !== '(keine Antwort)') {
+        _speakText(speech); // löst _autoListenIfNeeded via onend/onerror aus
+      } else {
+        setTimeout(_autoListenIfNeeded, 800);
+      }
     } else {
-      // Kein TTS: trotzdem Auto-Listen triggern (mit kleiner Pause, damit User die Antwort lesen kann)
-      setTimeout(_autoListenIfNeeded, 800);
+      // Text-Modus: Eingabefeld wieder fokussieren für nächste Eingabe
+      setTimeout(() => document.getElementById('assistantTextarea')?.focus(), 100);
     }
   } catch (e) {
     toast('KI-Fehler: ' + e.message, 'error', 6000);
