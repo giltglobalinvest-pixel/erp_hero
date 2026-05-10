@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.82';
+const APP_VERSION = 'v3.83';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2379,6 +2379,58 @@ async function _runWithLimit(taskFns, limit) {
      - Firma:        Edit-Block → Match → Extracted → Requester (Fallback)
      - Worum-geht's: KI extrahiert knapp aus Subject + erster Nachricht
    ============================================================ */
+// Free-Mail-Domains, aus denen sich KEIN Firmenname ableiten lässt.
+const _FREE_MAIL_DOMAINS = new Set([
+  'gmail.com','googlemail.com','yahoo.com','yahoo.de','web.de',
+  'gmx.de','gmx.net','gmx.com','gmx.at','gmx.ch',
+  'hotmail.com','hotmail.de','outlook.com','outlook.de','live.com','live.de',
+  't-online.de','freenet.de','aol.com','aol.de',
+  'icloud.com','me.com','mac.com',
+  'arcor.de','kabelmail.de','mail.de','posteo.de','protonmail.com','pm.me','tutanota.com'
+]);
+
+// Generische Mailbox-Namen, die KEIN Firmenname/Personenname sind.
+const _GENERIC_REQUESTER_NAMES = new Set([
+  'info','service','sales','vertrieb','office','kontakt','anfragen',
+  'buchhaltung','verkauf','reception','support','admin','mail','mailbox',
+  'noreply','no-reply','team','kundenservice','customer','help','hello'
+]);
+
+function _isGenericRequesterName(name) {
+  if (!name) return true;
+  const n = String(name).toLowerCase().trim().replace(/[\s.\-_]/g, '');
+  return _GENERIC_REQUESTER_NAMES.has(n);
+}
+
+// Heuristik: Firmenname aus Email-Domain ableiten.
+//   info@tp-lift.com  → "TP-Lift"
+//   sales@acme.co.uk  → "Acme"
+//   foo@example.com.au → "Example"
+//   noreply@gmail.com → ""    (free mail)
+function _extractCompanyFromEmail(email) {
+  if (!email) return '';
+  const m = String(email).match(/@([^@\s]+)$/);
+  if (!m) return '';
+  const domain = m[1].toLowerCase().trim();
+  if (_FREE_MAIL_DOMAINS.has(domain)) return '';
+  const parts = domain.split('.');
+  if (parts.length < 2) return '';
+  const SECOND_LEVEL = new Set(['co','com','org','net','gov','ac','edu']);
+  let main = '';
+  if (parts.length >= 3 && SECOND_LEVEL.has(parts[parts.length - 2])) {
+    main = parts[parts.length - 3];
+  } else {
+    main = parts[parts.length - 2];
+  }
+  if (!main) return '';
+  // "tp-lift" → "TP-Lift" (Akronyme bis 3 Buchstaben → ALL CAPS)
+  return main.split(/[-_]/).map(part => {
+    if (!part) return '';
+    if (part.length <= 3) return part.toUpperCase();
+    return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+  }).join('-');
+}
+
 async function rewriteFreshdeskTicketTitle() {
   const t = _fdTicketState.ticket;
   if (!t) return;
@@ -2391,10 +2443,17 @@ async function rewriteFreshdeskTicketTitle() {
     return toast('Diese Funktion benötigt Val.town-Proxy v2. Bitte als Admin → Einstellungen → Val.town-Setup öffnen und den Code aktualisieren.', 'error', 8000);
   }
 
-  // Firma bestimmen — best verfügbare Quelle
+  // Firma bestimmen — Prioritäten (beste Quelle zuerst):
+  //   1. Edit-Block (User hat explizit Kunde gewählt)
+  //   2. ERP-Match aus Email-Lookup
+  //   3. KI-extrahierter Firmenname (aus Signatur / Body)
+  //   4. Email-Domain-Heuristik (z.B. info@tp-lift.com → "TP-Lift")
+  //   5. Requester-Name, wenn NICHT generisch (kein "Info"/"Service"/…)
+  //   6. Fallback "–"
   const ef = _fdTicketState.editFields || {};
   const cache = _fdTicketState.cache || { customers: [] };
   const ext = _fdTicketState.extracted;
+  const requester = _fdTicketState.requester || {};
   let firma = '';
   if (ef.customer_id) {
     const c = (cache.customers || []).find(x => x.id === ef.customer_id);
@@ -2403,8 +2462,21 @@ async function rewriteFreshdeskTicketTitle() {
   if (!firma && _fdTicketState.match?.customer?.fields?.name1) {
     firma = _fdTicketState.match.customer.fields.name1.trim();
   }
-  if (!firma && ext?.company_name) firma = ext.company_name.trim();
-  if (!firma && _fdTicketState.requester?.name) firma = _fdTicketState.requester.name.trim();
+  // KI-Extraktion: extracted.company ist ein Objekt mit {name, street, ...}
+  if (!firma && ext?.company?.name) firma = String(ext.company.name).trim();
+  // Email-Domain als Heuristik — BEVOR Requester-Name, weil Requester
+  // bei info@…-Adressen sonst zu "Info" auflöst.
+  if (!firma && requester.email) firma = _extractCompanyFromEmail(requester.email);
+  // Requester-Name nur als Fallback, wenn nicht generisch
+  if (!firma && requester.name && !_isGenericRequesterName(requester.name)) {
+    firma = String(requester.name).trim();
+  }
+  // Letzter Fallback: Email-Domain auch wenn Free-Mail, oder Requester-Name auch wenn generisch
+  if (!firma && requester.email) {
+    const dom = (String(requester.email).match(/@([^@\s]+)$/) || [])[1] || '';
+    if (dom) firma = dom.replace(/\.(com|de|net|org|at|ch|co\.uk).*$/i, '');
+  }
+  if (!firma && requester.name) firma = String(requester.name).trim();
   if (!firma) firma = '–';
 
   _fdTicketState.titleRewriting = true;
