@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.54';
+const APP_VERSION = 'v3.55';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1990,6 +1990,47 @@ function _renderAiCustomerBlock() {
   return ''; // weder Match noch extrahierte Daten
 }
 
+// Helper: liefert payment_terms + delivery_terms aus Customer-Stammdaten (async, einzelner DB-Call)
+async function getCustomerTerms(customerId) {
+  if (!customerId) return { payment_terms: '', delivery_terms: '' };
+  try {
+    const all = await readData('Customer');
+    const c = all.find(x => x.id === customerId);
+    if (!c) return { payment_terms: '', delivery_terms: '' };
+    return {
+      payment_terms:  c.fields.payment_terms  || '',
+      delivery_terms: c.fields.delivery_terms || ''
+    };
+  } catch (_) {
+    return { payment_terms: '', delivery_terms: '' };
+  }
+}
+
+// Helper: synchrone Variante über vorgeladene Customer-Liste (für UI, wo Cache schon da ist)
+function customerTermsFromList(customerId, customersList) {
+  if (!customerId || !Array.isArray(customersList)) return { payment_terms: '', delivery_terms: '' };
+  const c = customersList.find(x => x.id === customerId);
+  if (!c) return { payment_terms: '', delivery_terms: '' };
+  return {
+    payment_terms:  c.fields.payment_terms  || '',
+    delivery_terms: c.fields.delivery_terms || ''
+  };
+}
+
+// Setzt Wert in einem <select>; fehlt die Option, wird sie dynamisch hinzugefügt
+// (z.B. wenn Customer einen Wert hat, der nicht in der globalen PaymentTerm-Tabelle steht).
+function _setSelectValueWithFallback(sel, value) {
+  if (!sel || !value) return;
+  let opt = Array.from(sel.options).find(o => o.value === value);
+  if (!opt) {
+    opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = value;
+    sel.appendChild(opt);
+  }
+  sel.value = value;
+}
+
 // Helper: Quote-Skelett anlegen + öffnen, mit voreingestelltem Customer + Contact
 async function _aiCreateQuoteSkeleton(customerId, contactId) {
   const cur = getCurrentCompany();
@@ -2008,6 +2049,12 @@ async function _aiCreateQuoteSkeleton(customerId, contactId) {
   };
   if (customerId) fields.customer_id = [customerId];
   if (contactId)  fields.contact_id  = [contactId];
+  // Stammdaten aus dem Kunden ziehen (Zahlungsziel, Lieferbedingungen)
+  if (customerId) {
+    const terms = await getCustomerTerms(customerId);
+    if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
+    if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
+  }
   // Verknüpfung zum Freshdesk-Ticket + Zusammenfassung am Quote ablegen,
   // damit der User später im Quote-Modal direkt darauf zugreifen kann.
   if (_fdTicketState.id) {
@@ -3187,6 +3234,10 @@ async function prepareQuoteFromVoice() {
       ai_summary: 'Per Sprache vorbereitet:\n' + userTurns + manualNote
     };
     if (m.contact_id) fields.contact_id = [m.contact_id];
+    // Stammdaten aus dem Kunden ziehen (Zahlungsziel, Lieferbedingungen)
+    const terms = await getCustomerTerms(m.customer_id);
+    if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
+    if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
     const created = await writeData('Quote', fields);
     // Items als QuoteItem anlegen — fehlertolerant pro Item
     for (const it of allItems) {
@@ -9627,9 +9678,20 @@ async function openQuoteModal(id) {
   const attachments = allAttachments.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const paymentTerms = allPaymentTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const deliveryTerms = allDeliveryTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
-  // Default-Werte für neue Angebote
-  const initialPayment  = f.payment_terms  || (id ? '' : (paymentTerms.find(t => t.fields.is_default)?.fields.name || ''));
-  const initialDelivery = f.delivery_terms || (id ? '' : (deliveryTerms.find(t => t.fields.is_default)?.fields.name || ''));
+  // Default-Werte: erst aus Quote selbst, sonst aus Customer-Stammdaten,
+  // sonst (Fallback für ganz neue Anlagen ohne Customer) globaler Default aus PaymentTerm-Tabelle
+  let initialPayment  = f.payment_terms  || '';
+  let initialDelivery = f.delivery_terms || '';
+  if (!initialPayment && currentCustomerId) {
+    const t = customerTermsFromList(currentCustomerId, allCustomers);
+    if (t.payment_terms) initialPayment = t.payment_terms;
+  }
+  if (!initialDelivery && currentCustomerId) {
+    const t = customerTermsFromList(currentCustomerId, allCustomers);
+    if (t.delivery_terms) initialDelivery = t.delivery_terms;
+  }
+  if (!initialPayment  && !id) initialPayment  = paymentTerms.find(t => t.fields.is_default)?.fields.name || '';
+  if (!initialDelivery && !id) initialDelivery = deliveryTerms.find(t => t.fields.is_default)?.fields.name || '';
   const selectedAttachmentIds = f.attachment_ids || [];
   // Template-Cache für die Vorlagen-Picker
   window._quoteTemplates = allTemplates.filter(t =>
@@ -10853,20 +10915,16 @@ function onQuoteCustomerChange(value) {
       }
     }
   }
-  // 2) Defaults aus Customer (nur wenn Felder leer; Select wird per Wert gesetzt)
+  // 2) Stammdaten aus Customer (Zahlungsziel + Lieferbedingungen) IMMER aus Customer übernehmen
+  //    bei Wechsel — auch wenn die Felder schon Werte haben. Falls der Customer-Wert nicht in
+  //    den globalen Options ist, wird er als Option dynamisch ergänzt.
   if (cid) {
     const cFields = cache.byId?.[cid] || {};
-    const ptSel = document.querySelector('#modalBox select[name="payment_terms"]');
-    if (ptSel && !ptSel.value) {
-      const want = cFields.payment_terms || '14 Tage netto';
-      const opt = Array.from(ptSel.options).find(o => o.value === want);
-      if (opt) ptSel.value = want;
+    if (cFields.payment_terms) {
+      _setSelectValueWithFallback(document.querySelector('#modalBox select[name="payment_terms"]'), cFields.payment_terms);
     }
-    const dtSel = document.querySelector('#modalBox select[name="delivery_terms"]');
-    if (dtSel && !dtSel.value) {
-      const want = cFields.delivery_terms || 'EXW Fellbach';
-      const opt = Array.from(dtSel.options).find(o => o.value === want);
-      if (opt) dtSel.value = want;
+    if (cFields.delivery_terms) {
+      _setSelectValueWithFallback(document.querySelector('#modalBox select[name="delivery_terms"]'), cFields.delivery_terms);
     }
     // 3) Standardvorlagen mit aktuellem Kunden-Kontext nach-substituieren (sofern Felder noch leer)
     setTimeout(() => {
@@ -14138,17 +14196,12 @@ function onOrderCustomerChange(value) {
   }
   if (cid) {
     const cFields = cache.byId?.[cid] || {};
-    const ptSel = document.querySelector('#modalBox select[name="payment_terms"]');
-    if (ptSel && !ptSel.value) {
-      const want = cFields.payment_terms || '14 Tage netto';
-      const opt = Array.from(ptSel.options).find(o => o.value === want);
-      if (opt) ptSel.value = want;
+    // Stammdaten aus Customer immer überschreiben bei Wechsel
+    if (cFields.payment_terms) {
+      _setSelectValueWithFallback(document.querySelector('#modalBox select[name="payment_terms"]'), cFields.payment_terms);
     }
-    const dtSel = document.querySelector('#modalBox select[name="delivery_terms"]');
-    if (dtSel && !dtSel.value) {
-      const want = cFields.delivery_terms || 'EXW Fellbach';
-      const opt = Array.from(dtSel.options).find(o => o.value === want);
-      if (opt) dtSel.value = want;
+    if (cFields.delivery_terms) {
+      _setSelectValueWithFallback(document.querySelector('#modalBox select[name="delivery_terms"]'), cFields.delivery_terms);
     }
     const addresses = cache.addresses || [];
     const dlvEl = document.getElementById('oc_delivery_address_id');
@@ -18197,11 +18250,12 @@ function onInvoiceCustomerChange(value) {
   }
   if (cid) {
     const cFields = cache.byId?.[cid] || {};
-    const ptSel = document.querySelector('#modalBox select[name="payment_terms"]');
-    if (ptSel && !ptSel.value) {
-      const want = cFields.payment_terms || '14 Tage netto';
-      const opt = Array.from(ptSel.options).find(o => o.value === want);
-      if (opt) ptSel.value = want;
+    // Stammdaten aus Customer immer überschreiben bei Wechsel
+    if (cFields.payment_terms) {
+      _setSelectValueWithFallback(document.querySelector('#modalBox select[name="payment_terms"]'), cFields.payment_terms);
+    }
+    if (cFields.delivery_terms) {
+      _setSelectValueWithFallback(document.querySelector('#modalBox select[name="delivery_terms"]'), cFields.delivery_terms);
     }
     const addresses = cache.addresses || [];
     const dlvEl = document.getElementById('ic_delivery_address_id');
