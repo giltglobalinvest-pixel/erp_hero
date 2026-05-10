@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.39';
+const APP_VERSION = 'v3.40';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1252,21 +1252,20 @@ async function loadFreshdeskTicketsPreview() {
     tickets.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
     wrap.innerHTML = `
       <p class="text-xs text-ink-500 mb-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · sortiert nach letzte Änderung · Klick öffnet Details</p>
-      <div class="divide-y divide-ink-100 -mx-2">
+      <div class="space-y-2">
         ${tickets.map(t => {
           const subject = t.subject || '(ohne Betreff)';
           const ticketNo = 'FT-' + t.id;
           const dt = t.updated_at ? new Date(t.updated_at).toLocaleString('de-DE') : '';
           const tType = t.type ? escapeHtml(t.type) : '';
-          // Cache-Treffer schon mal initial einsetzen (z.B. nach Refresh) — sonst leerer Slot
           const cached = _fdAiSummaryCache.get(t.id);
           const initialAi = cached && cached.updated_at === t.updated_at ? !!cached.aiNote : false;
           return `
-            <div data-ticket-id="${t.id}" onclick="openFreshdeskTicket(${t.id})" class="px-2 py-2.5 hover:bg-ink-50 rounded cursor-pointer transition group">
-              <div class="flex items-baseline justify-between gap-2 mb-0.5">
+            <div data-ticket-id="${t.id}" onclick="openFreshdeskTicket(${t.id})" class="border border-ink-200 rounded-xl px-3 py-3 bg-white hover:bg-ink-50 hover:border-brand-300 hover:shadow-sm cursor-pointer transition group">
+              <div class="flex items-baseline justify-between gap-2 mb-1">
                 <div class="flex items-baseline gap-2 flex-wrap min-w-0">
                   <span class="text-xs font-mono text-ink-500">${escapeHtml(ticketNo)}</span>
-                  <span class="font-medium text-ink-900 truncate group-hover:text-brand-700">${escapeHtml(subject)}</span>
+                  <span class="font-semibold text-ink-900 truncate group-hover:text-brand-700">${escapeHtml(subject)}</span>
                   ${tType ? `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-medium">${tType}</span>` : ''}
                   <span class="ai-badge-slot inline-flex">${initialAi ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>` : ''}</span>
                 </div>
@@ -1935,8 +1934,15 @@ function initNavSections() {
   document.querySelectorAll('.nav-section').forEach(btn => {
     const items = btn.parentElement.querySelector('.nav-items');
     const chev = btn.querySelector('.nav-chevron');
-    if (!OPEN_BY_DEFAULT.has(btn.dataset.section)) items?.classList.add('hidden');
-    if (items?.classList.contains('hidden') && chev) chev.style.transform = 'rotate(-90deg)';
+    if (!items) return;
+    // Defensiv: explizit auf gewünschten Zustand setzen (statt nur conditional add)
+    if (OPEN_BY_DEFAULT.has(btn.dataset.section)) {
+      items.classList.remove('hidden');
+      if (chev) chev.style.transform = 'rotate(0deg)';
+    } else {
+      items.classList.add('hidden');
+      if (chev) chev.style.transform = 'rotate(-90deg)';
+    }
     btn.addEventListener('click', () => {
       const open = !items.classList.contains('hidden');
       items.classList.toggle('hidden');
