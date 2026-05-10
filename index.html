@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.91';
+const APP_VERSION = 'v3.92';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -9019,6 +9019,47 @@ async function nextCustomerNo(companyId) {
   return 'K-' + (max + 1);
 }
 
+// Vergibt nachträglich Kundennummern an alle Customer ohne customer_no.
+// Sortierung: chronologisch nach createdTime (älteste zuerst). Nur Admin.
+async function backfillCustomerNumbers() {
+  if (!APP_KEYS.user?.is_admin) return toast('Nur für Admins', 'error');
+  const cur = getCurrentCompany();
+  if (!cur) return toast('Kein Mandant ausgewählt', 'error');
+  const all = await readData('Customer');
+  const inCo = all.filter(c => (c.fields.company_id || []).includes(cur.id));
+  const missing = inCo
+    .filter(c => !((c.fields.customer_no || '').trim()))
+    .sort((a, b) => (a.createdTime || '').localeCompare(b.createdTime || ''));
+  if (missing.length === 0) { toast('Alle Kunden haben bereits eine Nummer ✓', 'success'); return; }
+  // Höchste bestehende Nummer ermitteln (analog nextCustomerNo)
+  let max = 1000;
+  inCo.forEach(c => {
+    const m = (c.fields.customer_no || '').match(/^K-(\d+)$/);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  });
+  const plan = missing.map((c, i) => ({
+    id: c.id,
+    name: c.fields.name1 || '(ohne Name)',
+    newNo: 'K-' + (max + 1 + i)
+  }));
+  const preview = plan.slice(0, 10).map(p => `${p.newNo} → ${p.name}`).join('\n');
+  if (!confirm(`Insgesamt ${plan.length} Kunde${plan.length===1?'':'n'} ohne Nummer.\n\nFolgende Nummern werden vergeben:\n\n${preview}${plan.length > 10 ? `\n…(+${plan.length-10} weitere)` : ''}\n\nFortsetzen?`)) return;
+  toast('Vergebe ' + plan.length + ' Kundennummern…', 'info', 2500);
+  let okCount = 0, failCount = 0;
+  for (const p of plan) {
+    try {
+      await updateData('Customer', p.id, { customer_no: p.newNo });
+      okCount++;
+    } catch (e) {
+      failCount++;
+      console.warn('Backfill fehlgeschlagen für', p.name, e.message);
+    }
+  }
+  if (failCount === 0) toast('✓ ' + okCount + ' Kundennummern vergeben', 'success', 4000);
+  else toast(okCount + ' OK, ' + failCount + ' Fehler — siehe Konsole', 'warn', 7000);
+  renderCustomers();
+}
+
 async function renderCustomers() {
   setPageTitle('Kunden');
   const cur = getCurrentCompany();
@@ -9080,9 +9121,20 @@ async function renderCustomers() {
           <h2 class="text-xl font-bold text-ink-900">Kunden</h2>
           <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · ${list.length} Einträge</p>
         </div>
-        <button onclick="openCustomerModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-          <i data-lucide="plus" class="w-4 h-4"></i> Neuer Kunde
-        </button>
+        <div class="flex items-center gap-2 flex-wrap">
+          ${(() => {
+            // Wenn es Kunden ohne customer_no gibt (Mandant-Scope), Backfill-Button zeigen
+            const missing = list.filter(c => !((c.fields.customer_no || '').trim()));
+            return missing.length > 0 && APP_KEYS.user?.is_admin
+              ? `<button onclick="backfillCustomerNumbers()" class="bg-amber-500 hover:bg-amber-600 text-white rounded-lg px-3 py-2 text-sm font-medium flex items-center gap-2" title="${missing.length} Kunde${missing.length===1?'':'n'} ohne Kundennummer">
+                  <i data-lucide="hash" class="w-4 h-4"></i> Nummern auffüllen (${missing.length})
+                </button>`
+              : '';
+          })()}
+          <button onclick="openCustomerModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+            <i data-lucide="plus" class="w-4 h-4"></i> Neuer Kunde
+          </button>
+        </div>
       </div>
       <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="p-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
