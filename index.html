@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.88';
+const APP_VERSION = 'v3.89';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1396,7 +1396,8 @@ async function loadFreshdeskTicketsPreview() {
           const dt = t.updated_at ? new Date(t.updated_at).toLocaleString('de-DE') : '';
           const tType = t.type ? escapeHtml(t.type) : '';
           const cached = _fdAiSummaryCache.get(t.id);
-          const initialAi = cached && cached.updated_at === t.updated_at ? !!cached.aiNote : false;
+          const initialAi  = cached && cached.updated_at === t.updated_at ? !!cached.aiNote  : false;
+          const initialOwn = cached && cached.updated_at === t.updated_at ? !!cached.ownNote : false;
           const linkedQuotes = quotesByTicketId.get(String(t.id)) || [];
           const quoteBadges = linkedQuotes.map(q => {
             const qf = q.fields || {};
@@ -1434,10 +1435,11 @@ async function loadFreshdeskTicketsPreview() {
               </div>
               <!-- Zeile 2: Subject groß, 2 Zeilen erlaubt -->
               <p class="text-base font-semibold text-ink-900 group-hover:text-brand-700 leading-snug break-words mb-1.5" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(subject)}</p>
-              <!-- Zeile 3: Tags / KI-Badge / Quote-Badges (Async-Slot bleibt immer vorhanden für späteres Befüllen) -->
+              <!-- Zeile 3: Tags / KI-Badge / Own-Note-Badge / Quote-Badges (Async-Slots werden später befüllt) -->
               <div class="flex items-center gap-1.5 flex-wrap mb-1 empty:hidden">
                 ${tType ? `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-medium">${tType}</span>` : ''}
                 <span class="ai-badge-slot inline-flex">${initialAi ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>` : ''}</span>
+                <span class="own-note-slot inline-flex">${initialOwn ? `<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5" title="Du hast eine eigene Notiz an diesem Ticket"><i data-lucide="message-square" class="w-2.5 h-2.5"></i> Notiz</span>` : ''}</span>
                 ${quoteBadges}
               </div>
               <!-- Zeile 4: Datum + Prio -->
@@ -1448,22 +1450,36 @@ async function loadFreshdeskTicketsPreview() {
       </div>
     `;
     if (window.lucide) lucide.createIcons();
-    // Im Hintergrund: pro Ticket prüfen ob letzte Notiz eine KI-Zusammenfassung ist.
+    // Im Hintergrund: pro Ticket prüfen ob KI-Notiz UND/ODER eigene interne Notiz vorhanden.
     // Cache-aware: Tickets mit unverändertem updated_at brauchen keinen API-Call.
     // Concurrency-Limit 5, damit Freshdesk-Rate-Limits nicht angetastet werden.
     const tasks = tickets.map(t => async () => {
-      const ai = await _checkLastNoteAiSummary(t);
+      const scan = await _checkLastNoteAiSummary(t);
+      const aiNote = scan?.aiNote || null;
+      const ownNote = scan?.ownNote || null;
       // Nur DOM patchen, wenn die Liste noch sichtbar ist
       const row = document.querySelector('[data-ticket-id="' + t.id + '"]');
       if (!row) return;
-      const slot = row.querySelector('.ai-badge-slot');
-      if (!slot) return;
-      if (ai) {
-        slot.innerHTML = `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>`;
-        if (window.lucide) lucide.createIcons();
-      } else {
-        slot.innerHTML = '';
+      // Eigene-Notiz-Filter anwenden:
+      //   'hide' → Tickets mit eigener Notiz aus der Liste entfernen
+      //   'only' → Tickets OHNE eigene Notiz entfernen
+      if (_inquiriesOwnNoteFilter === 'hide' && ownNote) { row.remove(); return; }
+      if (_inquiriesOwnNoteFilter === 'only' && !ownNote) { row.remove(); return; }
+      // KI-Badge
+      const aiSlot = row.querySelector('.ai-badge-slot');
+      if (aiSlot) {
+        aiSlot.innerHTML = aiNote
+          ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>`
+          : '';
       }
+      // Eigene-Notiz-Badge
+      const ownSlot = row.querySelector('.own-note-slot');
+      if (ownSlot) {
+        ownSlot.innerHTML = ownNote
+          ? `<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5" title="Du hast eine eigene Notiz an diesem Ticket — Klick auf KI-Badge öffnet das Bearbeiten-Modal"><i data-lucide="message-square" class="w-2.5 h-2.5"></i> Notiz</span>`
+          : '';
+      }
+      if (window.lucide) lucide.createIcons();
     });
     _runWithLimit(tasks, 5).catch(() => {});
   } catch (err) {
@@ -2332,6 +2348,7 @@ async function _findCustomerContactByEmail(email) {
 
 // Marker im Notiz-Body, an dem wir die KI-Note in den Conversations erkennen.
 const FD_AI_SUMMARY_MARKER = '🤖 KI-Zusammenfassung';
+const FD_INTERNAL_NOTE_MARKER = '📝 Interne Notiz';
 
 // Postet eine private Notiz im Freshdesk-Ticket mit Quote-Details + Deep-Link zur App.
 // Wird nach Quote-Anlage aus dem Ticket-Workflow aufgerufen. Best-effort, schluckt Fehler.
@@ -2381,40 +2398,61 @@ const _fdAiSummaryCache = new Map();
 // Robuster Marker-Check: beide Body-Felder, Volltext + Variante ohne Emoji
 // (falls Freshdesk das Emoji escaped/normalisiert hat).
 async function _fetchLastAiSummaryNote(ticketId) {
+  const r = await _fetchTicketPrivateNoteScan(ticketId);
+  return r.aiNote;
+}
+
+// Scannt ALLE privaten Notizen eines Tickets und liefert:
+//   - aiNote:  neueste KI-Zusammenfassung (Marker 🤖 / FD_AI_SUMMARY_MARKER)
+//   - ownNote: neueste eigene interne Notiz (Marker FD_INTERNAL_NOTE_MARKER + Author-Match)
+// Wichtig: wir suchen jeweils die NEUESTE — nicht nur die letzte überhaupt.
+// Sonst übersieht der KI-Badge-Check die KI-Notiz, sobald danach eine User-
+// Notiz dazukommt.
+async function _fetchTicketPrivateNoteScan(ticketId) {
   const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
   const list = (Array.isArray(conv) ? conv : []).slice()
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-  // Erste private Notiz in chronologisch absteigender Sortierung = neueste private Notiz
-  const lastPrivateNote = list.find(c => c && c.private);
-  if (!lastPrivateNote) return null;
-  const haystack = String((lastPrivateNote.body || '') + '\n' + (lastPrivateNote.body_text || ''));
-  const matched =
-    haystack.includes(FD_AI_SUMMARY_MARKER) ||
-    haystack.includes('KI-Zusammenfassung') ||  // Fallback ohne Emoji
-    haystack.includes('🤖');                    // Fallback nur Emoji
-  console.log('[AI-Check] Ticket', ticketId,
-              '· last private note id=', lastPrivateNote.id,
-              '· created_at=', lastPrivateNote.created_at,
-              '· match=', matched,
-              '· body-snippet=', haystack.slice(0, 120));
-  return matched ? lastPrivateNote : null;
+  const privates = list.filter(c => c && c.private);
+  const isAiNote = (c) => {
+    const h = String((c.body || '') + '\n' + (c.body_text || ''));
+    return h.includes(FD_AI_SUMMARY_MARKER) || h.includes('KI-Zusammenfassung') || h.includes('🤖');
+  };
+  const ownName = (APP_KEYS.user?.name || '').trim();
+  const isOwnNote = (c) => {
+    const h = String((c.body || '') + '\n' + (c.body_text || ''));
+    if (!h.includes(FD_INTERNAL_NOTE_MARKER) && !h.includes('Interne Notiz')) return false;
+    if (!ownName) return false;
+    // Author-Match: der Username steht im Header der Notiz
+    return h.includes(ownName);
+  };
+  const aiNote  = privates.find(isAiNote)  || null;
+  const ownNote = privates.find(isOwnNote) || null;
+  return { aiNote, ownNote, privates };
 }
 
-// Cache-aware Check: liefert die KI-Zusammenfassung der letzten Notiz, falls
-// vorhanden — sonst null. Nutzt updated_at als Cache-Key, damit bei Refresh
-// nur neu/geänderte Tickets erneut Conversations laden müssen.
+// Cache-aware Check: liefert {aiNote, ownNote} eines Tickets.
+//   aiNote  = neueste KI-Zusammenfassung (falls vorhanden)
+//   ownNote = neueste eigene interne Notiz des aktuellen Users
+// Nutzt updated_at als Cache-Key, damit bei Refresh nur neu/geänderte Tickets
+// erneut Conversations laden müssen.
 async function _checkLastNoteAiSummary(ticket) {
   const cached = _fdAiSummaryCache.get(ticket.id);
-  if (cached && cached.updated_at === ticket.updated_at) return cached.aiNote;
-  let aiNote = null;
-  try {
-    aiNote = await _fetchLastAiSummaryNote(ticket.id);
-  } catch (e) {
-    console.warn('[AI-Check] Fehler bei Ticket', ticket.id, e.message);
-    return cached ? cached.aiNote : null;
+  if (cached && cached.updated_at === ticket.updated_at) {
+    return { aiNote: cached.aiNote, ownNote: cached.ownNote };
   }
-  _fdAiSummaryCache.set(ticket.id, { updated_at: ticket.updated_at, aiNote });
-  return aiNote;
+  let scan = { aiNote: null, ownNote: null };
+  try {
+    scan = await _fetchTicketPrivateNoteScan(ticket.id);
+  } catch (e) {
+    console.warn('[Note-Scan] Fehler bei Ticket', ticket.id, e.message);
+    return cached ? { aiNote: cached.aiNote, ownNote: cached.ownNote } : { aiNote: null, ownNote: null };
+  }
+  _fdAiSummaryCache.set(ticket.id, {
+    updated_at: ticket.updated_at,
+    aiNote: scan.aiNote,
+    ownNote: scan.ownNote
+  });
+  return { aiNote: scan.aiNote, ownNote: scan.ownNote };
 }
 
 // Concurrency-Limit für parallele Calls (max N gleichzeitig).
@@ -2667,7 +2705,23 @@ async function saveFreshdeskTicketSummary(opts) {
 // kleinen Modal, ohne das volle Detail-Modal zu öffnen. Aufruf vom KI-Badge
 // in der Tickets-Übersicht.
 // State für die Quick-Notiz im KI-Zusammenfassungs-Modal
-let _quickNoteState = { ticketId: null, recognition: null, recording: false, interim: '', saving: false };
+//   existingNoteId: vorhandene eigene Notiz im Ticket → Edit-Mode (PUT statt POST)
+//   existingNoteHtml: Original-HTML der Notiz (für Header-Erhalt beim Edit)
+let _quickNoteState = {
+  ticketId: null, recognition: null, recording: false, interim: '', saving: false,
+  existingNoteId: null, existingNoteHtml: null
+};
+
+// Extrahiert den reinen Notiz-Text aus dem HTML-Body (ohne den "📝 Interne Notiz"-Header)
+function _qnExtractTextFromNote(html) {
+  if (!html) return '';
+  const text = _fdHtmlToText(html);
+  const lines = text.split('\n');
+  // Header-Zeile (mit Marker) finden + alle Zeilen danach behalten
+  const headerIdx = lines.findIndex(l => l.includes(FD_INTERNAL_NOTE_MARKER) || (l.includes('Interne Notiz') && l.includes('—')));
+  if (headerIdx >= 0) return lines.slice(headerIdx + 1).join('\n').trim();
+  return text.trim();
+}
 
 function _qnHasSpeechApi() {
   return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -2768,15 +2822,26 @@ async function _qnSave(ticketId) {
   _qnRenderSaveBtn();
   try {
     const author = APP_KEYS.user?.name ? ' — ' + APP_KEYS.user.name : '';
-    const html = '<p><strong>📝 Interne Notiz</strong>' + escapeHtml(author) + '</p>' +
+    const ts = ' · ' + new Date().toLocaleString('de-DE');
+    const html = '<p><strong>' + FD_INTERNAL_NOTE_MARKER + '</strong>' + escapeHtml(author) + escapeHtml(ts) + '</p>' +
                  '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
-    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', {
-      method: 'POST',
-      body: { body: html, private: true }
-    });
-    toast('Notiz im Ticket gespeichert', 'success', 2500);
+    if (_quickNoteState.existingNoteId) {
+      // UPDATE einer bestehenden Notiz via PUT /api/v2/conversations/{id}
+      await proxyFetch('freshdesk/api/v2/conversations/' + _quickNoteState.existingNoteId, {
+        method: 'PUT',
+        body: { body: html }
+      });
+      toast('Notiz aktualisiert', 'success', 2500);
+    } else {
+      // Neue Notiz via POST /api/v2/tickets/{id}/notes
+      await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', {
+        method: 'POST',
+        body: { body: html, private: true }
+      });
+      toast('Notiz im Ticket gespeichert', 'success', 2500);
+    }
     // Sauber aufräumen + zurück zur Übersicht
-    _quickNoteState = { ticketId: null, recognition: null, recording: false, interim: '', saving: false };
+    _quickNoteState = { ticketId: null, recognition: null, recording: false, interim: '', saving: false, existingNoteId: null, existingNoteHtml: null };
     closeModal();
     // Liste neu laden — KI-Cache invalidieren, damit aktuelle Notiz-Marker stimmen
     _fdAiSummaryCache.delete(ticketId);
@@ -2801,8 +2866,16 @@ function _qnRenderSaveBtn() {
 
 async function showAiSummaryQuickView(ticketId) {
   if (!ticketId) return;
-  _quickNoteState = { ticketId, recognition: null, recording: false, interim: '', saving: false };
+  _quickNoteState = { ticketId, recognition: null, recording: false, interim: '', saving: false, existingNoteId: null, existingNoteHtml: null };
   const hasMic = _qnHasSpeechApi();
+  // Bestehende eigene Notiz aus Cache holen (falls vorhanden) — für Edit-Vorfüllung
+  const cached = _fdAiSummaryCache.get(ticketId);
+  const existingOwn = cached?.ownNote || null;
+  if (existingOwn) {
+    _quickNoteState.existingNoteId = existingOwn.id;
+    _quickNoteState.existingNoteHtml = existingOwn.body || existingOwn.body_text || '';
+  }
+  const existingText = existingOwn ? _qnExtractTextFromNote(_quickNoteState.existingNoteHtml) : '';
   openModal(`
     <div class="p-6">
       <div class="flex items-center justify-between mb-4">
@@ -2821,17 +2894,20 @@ async function showAiSummaryQuickView(ticketId) {
       <!-- Quick-Notiz-Section -->
       <div class="mt-5 border-t border-ink-100 pt-4 bg-amber-50/30 -mx-6 px-6 -mb-2 py-3 rounded-b-xl">
         <p class="text-xs font-semibold text-amber-900 mb-2 flex items-center gap-1.5">
-          <i data-lucide="message-square-plus" class="w-3.5 h-3.5"></i> Interne Notiz für Mitarbeiter ${hasMic ? '— Text oder Sprache' : '(Text)'}
+          <i data-lucide="${existingOwn ? 'edit-3' : 'message-square-plus'}" class="w-3.5 h-3.5"></i>
+          ${existingOwn ? 'Deine bestehende interne Notiz bearbeiten' : 'Interne Notiz für Mitarbeiter'}
+          ${hasMic ? '<span class="text-ink-500 font-normal">— Text oder Sprache</span>' : '<span class="text-ink-500 font-normal">(Text)</span>'}
         </p>
-        <textarea id="qnText" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 resize-y bg-white" placeholder="${hasMic ? 'Schreibe oder klick auf Sprachnotiz…' : 'Schreibe deine Notiz hier…'}"></textarea>
+        <textarea id="qnText" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 resize-y bg-white" placeholder="${hasMic ? 'Schreibe oder klick auf Sprachnotiz…' : 'Schreibe deine Notiz hier…'}">${escapeHtml(existingText)}</textarea>
         <div class="flex gap-2 mt-2 flex-wrap items-center">
           ${hasMic ? `<button id="qnMicBtn" type="button" onclick="_qnToggleMic(${ticketId})" class="bg-purple-100 text-purple-700 border border-purple-300 hover:bg-purple-200 rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5">
             <i data-lucide="mic" class="w-4 h-4"></i> Sprachnotiz
           </button>` : ''}
           <button id="qnSaveBtn" type="button" onclick="_qnSave(${ticketId})" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-1.5 flex-1 min-w-[200px] justify-center">
-            <i data-lucide="send" class="w-4 h-4"></i> Speichern + zurück zur Übersicht
+            <i data-lucide="send" class="w-4 h-4"></i> ${existingOwn ? 'Aktualisieren + zurück zur Übersicht' : 'Speichern + zurück zur Übersicht'}
           </button>
         </div>
+        ${existingOwn ? `<p class="text-[11px] text-ink-500 italic mt-1">Wird per <code>PUT /conversations/${existingOwn.id}</code> aktualisiert — keine zweite Notiz im Ticket-Verlauf.</p>` : ''}
         <p id="qnStatus" class="text-[11px] text-ink-500 mt-1 min-h-[14px]"></p>
       </div>
 
@@ -2845,11 +2921,25 @@ async function showAiSummaryQuickView(ticketId) {
   `, { maxWidth: 'max-w-2xl' });
   try {
     // Erst Cache prüfen (vom Badge-Check oft schon gefüllt), sonst frisch fetchen.
-    // Nutzt _fetchLastAiSummaryNote — gleiche Logik wie das Badge, damit beide
-    // konsistent dieselbe Notiz finden (drei Marker-Varianten + body/body_text).
-    const cached = _fdAiSummaryCache.get(ticketId);
-    let aiNote = cached?.aiNote || null;
-    if (!aiNote) aiNote = await _fetchLastAiSummaryNote(ticketId);
+    // Wir holen einen FULL Scan, damit auch ownNote für den Edit-Mode aktuell ist —
+    // falls die Async-Badge-Erkennung beim Initial-Render noch nicht durchgelaufen ist.
+    const cached2 = _fdAiSummaryCache.get(ticketId);
+    let aiNote  = cached2?.aiNote  || null;
+    let ownNote = cached2?.ownNote || null;
+    if (!cached2) {
+      const scan = await _fetchTicketPrivateNoteScan(ticketId);
+      aiNote = scan.aiNote;
+      ownNote = scan.ownNote;
+      // In Cache schreiben, damit nachfolgende Calls schneller sind
+      _fdAiSummaryCache.set(ticketId, { updated_at: null, aiNote, ownNote });
+    }
+    // Falls ownNote nachträglich gefunden wurde: Textarea + Edit-Mode aktivieren
+    if (ownNote && !_quickNoteState.existingNoteId) {
+      _quickNoteState.existingNoteId = ownNote.id;
+      _quickNoteState.existingNoteHtml = ownNote.body || ownNote.body_text || '';
+      const ta = document.getElementById('qnText');
+      if (ta && !ta.value) ta.value = _qnExtractTextFromNote(_quickNoteState.existingNoteHtml);
+    }
     const wrap = document.getElementById('aiSummaryQuickContent');
     if (!wrap) return;
     if (!aiNote) {
@@ -10010,6 +10100,15 @@ let _inquiriesTickerTimer = null;
 //   'closed'   → status:5                              — nur geschlossen
 //   'all'      → kein Status-Filter
 let _inquiriesStatusFilter = (typeof localStorage !== 'undefined' && localStorage.getItem('inquiriesStatusFilter')) || 'open';
+// Eigene-Notiz-Filter: 'show' (Default) | 'hide' (Tickets mit eigener interner Notiz raus) | 'only' (NUR mit eigener Notiz)
+let _inquiriesOwnNoteFilter = (typeof localStorage !== 'undefined' && localStorage.getItem('inquiriesOwnNoteFilter')) || 'show';
+
+function setInquiriesOwnNoteFilter(value) {
+  if (!value) return;
+  _inquiriesOwnNoteFilter = value;
+  localStorage.setItem('inquiriesOwnNoteFilter', value);
+  loadFreshdeskTicketsPreview();
+}
 
 function _inquiriesStatusFilterQuery() {
   switch (_inquiriesStatusFilter) {
@@ -10167,6 +10266,11 @@ async function renderInquiries() {
               <option value="resolved" ${_inquiriesStatusFilter==='resolved'?'selected':''}>Gelöst</option>
               <option value="closed"   ${_inquiriesStatusFilter==='closed'?'selected':''}>Geschlossen</option>
               <option value="all"      ${_inquiriesStatusFilter==='all'?'selected':''}>Alle</option>
+            </select>
+            <select onchange="setInquiriesOwnNoteFilter(this.value)" class="text-xs border border-ink-200 rounded-lg px-2 py-1 bg-white" title="Eigene-Notiz-Filter">
+              <option value="show" ${_inquiriesOwnNoteFilter==='show'?'selected':''}>Eigene Notizen anzeigen</option>
+              <option value="hide" ${_inquiriesOwnNoteFilter==='hide'?'selected':''}>Eigene Notizen ausblenden</option>
+              <option value="only" ${_inquiriesOwnNoteFilter==='only'?'selected':''}>Nur eigene Notizen</option>
             </select>
             <span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-medium">read-only</span>
           </div>
