@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.38';
+const APP_VERSION = 'v3.39';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1650,18 +1650,29 @@ const FD_AI_SUMMARY_MARKER = '🤖 KI-Zusammenfassung';
 //   - updated_at      : wenn Tickets unverändert sind, kein neuer Lookup nötig
 const _fdAiSummaryCache = new Map();
 
-// Holt die Conversations eines Tickets, prüft die letzte (chronologisch) auf
-// den AI-Marker. Liefert das Note-Objekt oder null.
+// Holt die Conversations eines Tickets, prüft die LETZTE private Notiz auf den
+// AI-Marker. „Letzte Notiz" = neueste private Notiz (öffentliche Replies werden
+// in Freshdesk-Sprech nicht als „Notiz" gezählt).
+// Robuster Marker-Check: beide Body-Felder, Volltext + Variante ohne Emoji
+// (falls Freshdesk das Emoji escaped/normalisiert hat).
 async function _fetchLastAiSummaryNote(ticketId) {
   const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
   const list = (Array.isArray(conv) ? conv : []).slice()
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-  const last = list[0];
-  if (last && last.private) {
-    const raw = String(last.body || last.body_text || '');
-    if (raw.includes(FD_AI_SUMMARY_MARKER)) return last;
-  }
-  return null;
+  // Erste private Notiz in chronologisch absteigender Sortierung = neueste private Notiz
+  const lastPrivateNote = list.find(c => c && c.private);
+  if (!lastPrivateNote) return null;
+  const haystack = String((lastPrivateNote.body || '') + '\n' + (lastPrivateNote.body_text || ''));
+  const matched =
+    haystack.includes(FD_AI_SUMMARY_MARKER) ||
+    haystack.includes('KI-Zusammenfassung') ||  // Fallback ohne Emoji
+    haystack.includes('🤖');                    // Fallback nur Emoji
+  console.log('[AI-Check] Ticket', ticketId,
+              '· last private note id=', lastPrivateNote.id,
+              '· created_at=', lastPrivateNote.created_at,
+              '· match=', matched,
+              '· body-snippet=', haystack.slice(0, 120));
+  return matched ? lastPrivateNote : null;
 }
 
 // Cache-aware Check: liefert die KI-Zusammenfassung der letzten Notiz, falls
@@ -1674,6 +1685,7 @@ async function _checkLastNoteAiSummary(ticket) {
   try {
     aiNote = await _fetchLastAiSummaryNote(ticket.id);
   } catch (e) {
+    console.warn('[AI-Check] Fehler bei Ticket', ticket.id, e.message);
     return cached ? cached.aiNote : null;
   }
   _fdAiSummaryCache.set(ticket.id, { updated_at: ticket.updated_at, aiNote });
