@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.46';
+const APP_VERSION = 'v3.47';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2333,21 +2333,14 @@ function renderWelcome() {
       </div>
 
       ${_proxyBase() ? `
-        <button type="button" onclick="openVoiceAssistant()" class="mt-6 w-full bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 text-white rounded-2xl p-5 sm:p-6 hover:shadow-xl transition-all hover:scale-[1.01] active:scale-[0.99] group text-left">
-          <div class="flex items-center gap-4">
-            <div class="w-14 h-14 sm:w-16 sm:h-16 bg-white/15 rounded-full grid place-items-center group-hover:bg-white/25 transition shrink-0">
-              <i data-lucide="mic" class="w-7 h-7 sm:w-8 sm:h-8"></i>
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-base sm:text-lg font-bold flex items-center gap-2 flex-wrap">
-                KI-Sprachassistent
-                <span class="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded font-semibold">Beta</span>
-              </h3>
-              <p class="text-xs sm:text-sm text-purple-100 mt-1">„Erstelle ein Angebot für Mustermann GmbH mit Frequenzumrichter ACS580…"</p>
-            </div>
-            <i data-lucide="arrow-right" class="w-5 h-5 sm:w-6 sm:h-6 group-hover:translate-x-1 transition shrink-0"></i>
+        <div class="mt-6 bg-white border border-purple-200 rounded-2xl overflow-hidden shadow-sm">
+          <div class="bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 text-white px-4 sm:px-5 py-3 flex items-center gap-3">
+            <i data-lucide="sparkles" class="w-5 h-5 shrink-0"></i>
+            <h3 class="font-bold flex-1 text-base">KI-Sprachassistent</h3>
+            <span class="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded font-semibold">Beta</span>
           </div>
-        </button>
+          <div id="voiceAssistantWrap" class="p-4 sm:p-5"></div>
+        </div>
       ` : ''}
 
       <h3 class="mt-8 mb-3 text-sm font-semibold text-ink-500 uppercase tracking-wider">Roadmap</h3>
@@ -2372,6 +2365,11 @@ function renderWelcome() {
   `;
   document.getElementById('pageContent').innerHTML = html;
   if (window.lucide) lucide.createIcons();
+  // Voice-Assistant inline anzeigen, wenn Container da ist (Proxy konfiguriert)
+  if (document.getElementById('voiceAssistantWrap')) {
+    _renderVoiceAssistant();
+    _loadVoiceContext();
+  }
 }
 
 function roadmapCard(ver, title, icon, state, sub) {
@@ -2435,7 +2433,8 @@ let _voiceState = {
   processing: false,
   context: null,        // { customers, articles, contacts }
   ttsEnabled: true,
-  ttsSpeaking: false    // KI spricht gerade (für UI-Indikator + Stop-Button)
+  ttsSpeaking: false,   // KI spricht gerade (für UI-Indikator + Stop-Button)
+  handsFree: true       // nach KI-Antwort automatisch wieder zuhören (bei needs_input)
 };
 
 // TTS-State (außerhalb von _voiceState, damit nicht resetet wird)
@@ -2521,16 +2520,7 @@ function _renderVoiceAssistant() {
     : 'lade Kontext…';
 
   wrap.innerHTML = `
-    <div class="flex items-center justify-between mb-3">
-      <h3 class="text-lg font-bold text-ink-900 flex items-center gap-2">
-        <i data-lucide="mic" class="w-5 h-5 text-purple-600"></i>
-        KI-Sprachassistent
-      </h3>
-      <button type="button" onclick="closeVoiceAssistant()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
-        <i data-lucide="x" class="w-5 h-5"></i>
-      </button>
-    </div>
-    <p class="text-[11px] text-ink-500 mb-3">${escapeHtml(ctxStatus)} · Multi-Turn-Konversation, Sprache: Deutsch</p>
+    <p class="text-[11px] text-ink-500 mb-3">${escapeHtml(ctxStatus)} · Sprache: Deutsch</p>
 
     ${_voiceState.history.length > 0 ? `
       <div class="space-y-2 mb-4 max-h-[35vh] overflow-y-auto">
@@ -2587,12 +2577,19 @@ function _renderVoiceAssistant() {
       </div>
     ` : ''}
 
-    <div class="flex items-center justify-between text-xs text-ink-700 pt-2 border-t border-ink-100">
-      <label class="flex items-center gap-2 cursor-pointer select-none ${_voiceState.ttsEnabled ? 'text-purple-700' : 'text-ink-500'}">
-        <input type="checkbox" ${_voiceState.ttsEnabled ? 'checked' : ''} onchange="_voiceState.ttsEnabled = this.checked; if (!this.checked) stopVoiceTts();" class="w-4 h-4 rounded accent-purple-600">
-        <i data-lucide="${_voiceState.ttsEnabled ? 'volume-2' : 'volume-x'}" class="w-3.5 h-3.5"></i>
-        <span class="font-medium">KI antwortet per Sprache</span>
-      </label>
+    <div class="flex items-center justify-between text-xs text-ink-700 pt-2 border-t border-ink-100 flex-wrap gap-2">
+      <div class="flex items-center gap-3 flex-wrap">
+        <label class="flex items-center gap-1.5 cursor-pointer select-none ${_voiceState.ttsEnabled ? 'text-purple-700' : 'text-ink-500'}">
+          <input type="checkbox" ${_voiceState.ttsEnabled ? 'checked' : ''} onchange="_voiceState.ttsEnabled = this.checked; if (!this.checked) stopVoiceTts();" class="w-4 h-4 rounded accent-purple-600">
+          <i data-lucide="${_voiceState.ttsEnabled ? 'volume-2' : 'volume-x'}" class="w-3.5 h-3.5"></i>
+          <span class="font-medium">Sprachausgabe</span>
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer select-none ${_voiceState.handsFree ? 'text-purple-700' : 'text-ink-500'}">
+          <input type="checkbox" ${_voiceState.handsFree ? 'checked' : ''} onchange="_voiceState.handsFree = this.checked; _renderVoiceAssistant();" class="w-4 h-4 rounded accent-purple-600">
+          <i data-lucide="${_voiceState.handsFree ? 'infinity' : 'hand'}" class="w-3.5 h-3.5"></i>
+          <span class="font-medium">Hands-free</span>
+        </label>
+      </div>
       ${_voiceState.history.length > 0 ? `
         <button type="button" onclick="resetVoiceConversation()" class="text-ink-500 hover:text-ink-900 inline-flex items-center gap-1">
           <i data-lucide="rotate-ccw" class="w-3 h-3"></i> Neu starten
@@ -2679,7 +2676,12 @@ async function processVoiceInput(userText) {
     _voiceState.lastResponse = response;
     const speech = (response.speech || '').trim() || '(keine Antwort)';
     _voiceState.history.push({ role: 'assistant', content: speech });
-    if (_voiceState.ttsEnabled && speech !== '(keine Antwort)') _speakText(speech);
+    if (_voiceState.ttsEnabled && speech !== '(keine Antwort)') {
+      _speakText(speech); // löst _autoListenIfNeeded via onend/onerror aus
+    } else {
+      // Kein TTS: trotzdem Auto-Listen triggern (mit kleiner Pause, damit User die Antwort lesen kann)
+      setTimeout(_autoListenIfNeeded, 800);
+    }
   } catch (e) {
     toast('KI-Fehler: ' + e.message, 'error', 6000);
   } finally {
@@ -2779,10 +2781,33 @@ function _speakText(text) {
     if (!_ttsVoice) _ttsVoice = _ttsPickVoice();
     if (_ttsVoice) u.voice = _ttsVoice;
     u.onstart = () => { _voiceState.ttsSpeaking = true; _renderVoiceAssistant(); };
-    u.onend   = () => { _voiceState.ttsSpeaking = false; _renderVoiceAssistant(); };
-    u.onerror = () => { _voiceState.ttsSpeaking = false; _renderVoiceAssistant(); };
+    u.onend   = () => {
+      _voiceState.ttsSpeaking = false;
+      _renderVoiceAssistant();
+      _autoListenIfNeeded();
+    };
+    u.onerror = () => {
+      _voiceState.ttsSpeaking = false;
+      _renderVoiceAssistant();
+      _autoListenIfNeeded();
+    };
     window.speechSynthesis.speak(u);
   } catch (e) { /* ignore */ }
+}
+
+// Hands-free: nach KI-Antwort wieder zuhören, wenn KI Rückfragen hat (status=needs_input).
+// Wird NICHT automatisch wieder gestartet, wenn die KI alles hat (status=ready) — dann
+// soll der User klicken, um die Quote-Anlage zu bestätigen.
+function _autoListenIfNeeded() {
+  if (!_voiceState.handsFree) return;
+  if (_voiceState.recording || _voiceState.processing || _voiceState.ttsSpeaking) return;
+  if (!_voiceState.lastResponse || _voiceState.lastResponse.status !== 'needs_input') return;
+  setTimeout(() => {
+    // Nochmal prüfen — User könnte zwischenzeitlich Stop gedrückt haben
+    if (_voiceState.recording || _voiceState.processing || _voiceState.ttsSpeaking) return;
+    if (!document.getElementById('voiceAssistantWrap')) return; // User auf anderer Seite
+    if (_voiceState.handsFree) startVoiceRecording();
+  }, 400);
 }
 
 function stopVoiceTts() {
@@ -2839,7 +2864,11 @@ async function prepareQuoteFromVoice() {
         }
       }
     }
-    closeVoiceAssistant();
+    // Cleanup: TTS stoppen, Recognition stoppen
+    if ('speechSynthesis' in window) try { window.speechSynthesis.cancel(); } catch (_) {}
+    if (_voiceState.recognition) try { _voiceState.recognition.abort(); } catch (_) {}
+    _voiceState.recording = false;
+    _voiceState.ttsSpeaking = false;
     toast('Angebot ' + quoteNo + ' angelegt — öffne Editor', 'success', 3500);
     setTimeout(() => openQuoteModal(created.id), 200);
   } catch (e) {
