@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.76';
+const APP_VERSION = 'v3.77';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -850,8 +850,12 @@ async function loginWithUserKey(userKey, longLived = false) {
     name: data.user.name,
     role: data.user.role,
     is_admin: data.user.is_admin,
-    allowed_companies: data.user.allowed_companies || []
+    allowed_companies: data.user.allowed_companies || [],
+    freshdesk_company_keys: data.user.freshdesk_company_keys
   };
+  // Proxy-Version detect: v2 liefert `freshdesk_company_keys` (Array) zurück,
+  // v1 hat das Feld nicht. Nur bei v2 senden wir den X-Company-Id Header.
+  APP_KEYS.proxyV2 = Array.isArray(data.user.freshdesk_company_keys);
   await Promise.all([loadCompanies(), loadUsersCache()]);
   return APP_KEYS.user;
 }
@@ -875,8 +879,10 @@ async function tryAutoLogin() {
           name: data.user.name,
           role: data.user.role,
           is_admin: data.user.is_admin,
-          allowed_companies: data.user.allowed_companies || []
+          allowed_companies: data.user.allowed_companies || [],
+          freshdesk_company_keys: data.user.freshdesk_company_keys
         };
+        APP_KEYS.proxyV2 = Array.isArray(data.user.freshdesk_company_keys);
         APP_KEYS.sessionToken = token;
         await Promise.all([loadCompanies(), loadUsersCache()]);
         return true;
@@ -1263,6 +1269,10 @@ if (!window._ticketStatusMenuOutsideHandler) {
 async function updateTicketStatus(ticketId, statusCode) {
   // Menü sofort schließen
   document.getElementById('ticketStatusMenu_' + ticketId)?.classList.add('hidden');
+  // PUT braucht Val.town-Proxy v2 (CORS allow-methods + x-company-id)
+  if (!APP_KEYS.proxyV2) {
+    return toast('Status-Wechsel benötigt Val.town-Proxy v2. Bitte als Admin → Einstellungen → Val.town-Setup öffnen und den Code aktualisieren.', 'error', 8000);
+  }
   try {
     await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, {
       method: 'PUT',
@@ -2214,6 +2224,12 @@ async function rewriteFreshdeskTicketTitle() {
   if (!t) return;
   if (!_proxyBase()) return toast('Proxy nicht konfiguriert', 'error');
   if (_fdTicketState.titleRewriting) return;
+  // PUT/PATCH-Methoden brauchen Val.town-Proxy v2 (CORS-allow-methods und
+  // x-company-id-Header). Sonst gleich abbrechen statt KI-Tokens zu
+  // verbrennen — der Server-Call würde am Preflight scheitern.
+  if (!APP_KEYS.proxyV2) {
+    return toast('Diese Funktion benötigt Val.town-Proxy v2. Bitte als Admin → Einstellungen → Val.town-Setup öffnen und den Code aktualisieren.', 'error', 8000);
+  }
 
   // Firma bestimmen — best verfügbare Quelle
   const ef = _fdTicketState.editFields || {};
@@ -3266,13 +3282,13 @@ async function proxyFetch(path, opts = {}) {
     'Authorization': 'Bearer ' + bearer,
     'Accept': 'application/json'
   }, opts.headers || {});
-  // Aktuelle Firma als Header NUR für Freshdesk-Pfade mitsenden — der Proxy
-  // nutzt das, um pro User × Firma den richtigen Freshdesk-Key zu wählen.
-  // Wichtig: andere Endpoints (auth/me/anthropic/health) bleiben dadurch
-  // backwards-kompatibel zur alten Val.town-Version, wo X-Company-Id
-  // nicht in den erlaubten CORS-Headern steht.
+  // Aktuelle Firma als Header NUR für Freshdesk-Pfade mitsenden — und NUR
+  // wenn der Proxy auch v2 (also Per-Firma-Keys) unterstützt. Sonst würde
+  // der CORS-Preflight beim alten Proxy am unbekannten Header scheitern.
+  // proxyV2 wird beim Login/AutoLogin gesetzt: true wenn /me das Feld
+  // freshdesk_company_keys zurückgegeben hat.
   const isFreshdeskPath = String(path).replace(/^\/+/, '').startsWith('freshdesk/');
-  if (isFreshdeskPath && !headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
+  if (APP_KEYS.proxyV2 && isFreshdeskPath && !headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
     headers['X-Company-Id'] = APP_KEYS.currentCompanyId;
   }
   if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
