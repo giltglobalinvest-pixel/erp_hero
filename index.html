@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.44';
+const APP_VERSION = 'v3.45';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2332,6 +2332,24 @@ function renderWelcome() {
         </div>
       </div>
 
+      ${_proxyBase() ? `
+        <button type="button" onclick="openVoiceAssistant()" class="mt-6 w-full bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 text-white rounded-2xl p-5 sm:p-6 hover:shadow-xl transition-all hover:scale-[1.01] active:scale-[0.99] group text-left">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 sm:w-16 sm:h-16 bg-white/15 rounded-full grid place-items-center group-hover:bg-white/25 transition shrink-0">
+              <i data-lucide="mic" class="w-7 h-7 sm:w-8 sm:h-8"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <h3 class="text-base sm:text-lg font-bold flex items-center gap-2 flex-wrap">
+                KI-Sprachassistent
+                <span class="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded font-semibold">Beta</span>
+              </h3>
+              <p class="text-xs sm:text-sm text-purple-100 mt-1">„Erstelle ein Angebot für Mustermann GmbH mit Frequenzumrichter ACS580…"</p>
+            </div>
+            <i data-lucide="arrow-right" class="w-5 h-5 sm:w-6 sm:h-6 group-hover:translate-x-1 transition shrink-0"></i>
+          </div>
+        </button>
+      ` : ''}
+
       <h3 class="mt-8 mb-3 text-sm font-semibold text-ink-500 uppercase tracking-wider">Roadmap</h3>
       <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         ${roadmapCard('v1.0', 'Login & Shell', 'check', 'done', 'Mandantenfähig, Auth via Airtable')}
@@ -2393,6 +2411,372 @@ function statusTile(label, icon, value, ok) {
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ============================================================
+   KI-SPRACHASSISTENT (Beta)
+   Multi-Turn-Konversation per Web-Speech + KI-Antwort als JSON.
+   Workflow:
+   1) User klickt Mic → spricht
+   2) onend → Transkript an KI mit Kontext (Customers, Articles, History)
+   3) KI antwortet im JSON-Format: speech + status (ready/needs_input)
+        + matched (customer_id, contact_id, items[])
+   4) speech wird optional via TTS vorgelesen
+   5) Bei status=ready erscheint "Angebot vorbereiten"-Button
+   6) Klick legt Quote + QuoteItems an, öffnet Editor
+   ============================================================ */
+
+let _voiceState = {
+  recognition: null,
+  recording: false,
+  interim: '',
+  history: [],          // [{role:'user'|'assistant', content:'...'}]
+  lastResponse: null,   // letzte parsed JSON-Antwort
+  processing: false,
+  context: null,        // { customers, articles, contacts }
+  ttsEnabled: true
+};
+
+function openVoiceAssistant() {
+  if (!_proxyBase()) { toast('KI nicht verfügbar — API-Proxy nicht konfiguriert', 'error', 6000); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    toast('Spracherkennung ist in deinem Browser nicht verfügbar. Empfehlung: Safari oder Chrome.', 'error', 7000);
+    return;
+  }
+  // Reset State
+  _voiceState = {
+    recognition: null, recording: false, interim: '',
+    history: [], lastResponse: null, processing: false,
+    context: null, ttsEnabled: true
+  };
+  openModal(`<div id="voiceAssistantWrap" class="p-4 sm:p-6"></div>`, { maxWidth: 'max-w-2xl' });
+  _renderVoiceAssistant();
+  _loadVoiceContext();
+}
+
+async function _loadVoiceContext() {
+  const cur = getCurrentCompany();
+  if (!cur) return;
+  try {
+    const [customers, contacts, articles] = await Promise.all([
+      readData('Customer').catch(() => []),
+      readData('Contact').catch(() => []),
+      readData('Article').catch(() => [])
+    ]);
+    _voiceState.context = {
+      customers: customers.filter(c => (c.fields.company_id || []).includes(cur.id) && c.fields.status !== 'archiviert'),
+      contacts:  contacts,
+      articles:  articles.filter(a => (a.fields.company_id || []).includes(cur.id) && a.fields.status !== 'archiviert')
+    };
+  } catch (e) {
+    console.warn('Voice-Context-Loading failed:', e.message);
+  }
+  _renderVoiceAssistant();
+}
+
+function _renderVoiceAssistant() {
+  const wrap = document.getElementById('voiceAssistantWrap');
+  if (!wrap) return;
+  const ctx = _voiceState.context;
+  const ctxStatus = ctx
+    ? `${ctx.customers.length} Kunden · ${ctx.articles.length} Artikel im Kontext`
+    : 'lade Kontext…';
+
+  wrap.innerHTML = `
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-ink-900 flex items-center gap-2">
+        <i data-lucide="mic" class="w-5 h-5 text-purple-600"></i>
+        KI-Sprachassistent
+      </h3>
+      <button type="button" onclick="closeVoiceAssistant()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+        <i data-lucide="x" class="w-5 h-5"></i>
+      </button>
+    </div>
+    <p class="text-[11px] text-ink-500 mb-3">${escapeHtml(ctxStatus)} · Multi-Turn-Konversation, Sprache: Deutsch</p>
+
+    ${_voiceState.history.length > 0 ? `
+      <div class="space-y-2 mb-4 max-h-[35vh] overflow-y-auto">
+        ${_voiceState.history.map(m => `
+          <div class="flex gap-2 ${m.role === 'user' ? 'justify-end' : 'justify-start'}">
+            <div class="${m.role === 'user' ? 'bg-brand-500 text-white' : 'bg-purple-50 border border-purple-200 text-ink-800'} rounded-xl px-3 py-2 text-sm max-w-[85%] whitespace-pre-wrap leading-relaxed">${escapeHtml(m.content)}</div>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
+
+    <div class="bg-ink-50 border border-ink-200 rounded-xl p-4 mb-4 text-center">
+      <button type="button" onclick="${_voiceState.recording ? 'stopVoiceRecording()' : 'startVoiceRecording()'}"
+              ${_voiceState.processing ? 'disabled' : ''}
+              class="${_voiceState.recording ? 'bg-red-500 hover:bg-red-600 animate-pulse' : 'bg-purple-600 hover:bg-purple-700'} text-white rounded-full w-20 h-20 grid place-items-center shadow-lg disabled:opacity-50 transition mx-auto">
+        <i data-lucide="${_voiceState.recording ? 'square' : 'mic'}" class="w-9 h-9"></i>
+      </button>
+      <p class="mt-3 text-sm text-ink-600">
+        ${_voiceState.processing
+          ? '<span class="inline-flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> KI denkt nach…</span>'
+          : _voiceState.recording
+            ? 'Sprich jetzt — Tipp auf Stop wenn fertig'
+            : (_voiceState.history.length === 0 ? 'Klick zum Sprechen' : 'Antworten oder Info ergänzen')}
+      </p>
+      ${_voiceState.interim ? `<p class="text-xs text-ink-500 italic mt-2 px-2">„${escapeHtml(_voiceState.interim)}"</p>` : ''}
+    </div>
+
+    ${_voiceState.lastResponse?.status === 'ready' ? `
+      <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4">
+        <p class="text-xs font-semibold text-emerald-900 mb-1 flex items-center gap-1.5">
+          <i data-lucide="check-circle-2" class="w-4 h-4"></i> Bereit zum Anlegen
+        </p>
+        <p class="text-xs text-ink-700 mb-2">Ich erzeuge ein Angebots-Skelett mit den genannten Artikeln und öffne den Editor.</p>
+        <button type="button" onclick="prepareQuoteFromVoice()" class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-emerald-700 inline-flex items-center gap-2">
+          <i data-lucide="file-plus" class="w-4 h-4"></i> Angebot vorbereiten + öffnen
+        </button>
+      </div>
+    ` : ''}
+
+    <div class="flex items-center justify-between text-xs text-ink-500 pt-2 border-t border-ink-100">
+      <label class="flex items-center gap-1.5 cursor-pointer">
+        <input type="checkbox" ${_voiceState.ttsEnabled ? 'checked' : ''} onchange="_voiceState.ttsEnabled = this.checked" class="w-3.5 h-3.5 rounded">
+        <span>Antwort vorlesen</span>
+      </label>
+      ${_voiceState.history.length > 0 ? `
+        <button type="button" onclick="resetVoiceConversation()" class="hover:text-ink-900 inline-flex items-center gap-1">
+          <i data-lucide="rotate-ccw" class="w-3 h-3"></i> Neu starten
+        </button>
+      ` : ''}
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeVoiceAssistant() {
+  // Aufräumen: Recognition stoppen, TTS stoppen
+  try { if (_voiceState.recognition) _voiceState.recognition.abort(); } catch (_) {}
+  try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch (_) {}
+  closeModal();
+}
+
+function startVoiceRecording() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  const recognition = new SR();
+  recognition.lang = 'de-DE';
+  recognition.interimResults = true;
+  recognition.continuous = false; // single-shot, simpler State
+  let finalText = '';
+  recognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) finalText += r[0].transcript + ' ';
+      else interim += r[0].transcript;
+    }
+    _voiceState.interim = (finalText + interim).trim();
+    // Nur den interim-Text-Selektor updaten (vermeidet komplettes Re-Render)
+    const interimP = document.querySelector('#voiceAssistantWrap p.italic');
+    if (interimP) interimP.textContent = '„' + _voiceState.interim + '"';
+    else _renderVoiceAssistant();
+  };
+  recognition.onerror = (e) => {
+    console.warn('SpeechRecognition error:', e.error);
+    if (e.error === 'no-speech' || e.error === 'aborted') return;
+    toast('Spracherkennung-Fehler: ' + e.error, 'error', 4000);
+  };
+  recognition.onend = () => {
+    _voiceState.recognition = null;
+    if (!_voiceState.recording) return; // wurde manuell via stopVoiceRecording beendet
+    _voiceState.recording = false;
+    const text = (finalText.trim() || _voiceState.interim || '').trim();
+    if (text) processVoiceInput(text);
+    else _renderVoiceAssistant();
+  };
+  _voiceState.recognition = recognition;
+  _voiceState.recording = true;
+  _voiceState.interim = '';
+  try { recognition.start(); }
+  catch (e) {
+    toast('Mikrofon konnte nicht gestartet werden: ' + e.message, 'error', 6000);
+    _voiceState.recording = false;
+  }
+  _renderVoiceAssistant();
+}
+
+function stopVoiceRecording() {
+  if (_voiceState.recognition) {
+    const text = _voiceState.interim;
+    _voiceState.recording = false;
+    try { _voiceState.recognition.stop(); } catch (_) {}
+    _voiceState.recognition = null;
+    if (text.trim()) processVoiceInput(text.trim());
+    else _renderVoiceAssistant();
+  }
+}
+
+async function processVoiceInput(userText) {
+  if (!userText.trim()) return;
+  _voiceState.history.push({ role: 'user', content: userText.trim() });
+  _voiceState.interim = '';
+  _voiceState.processing = true;
+  _renderVoiceAssistant();
+  try {
+    const response = await _voiceCallAi(userText.trim());
+    _voiceState.lastResponse = response;
+    const speech = (response.speech || '').trim() || '(keine Antwort)';
+    _voiceState.history.push({ role: 'assistant', content: speech });
+    if (_voiceState.ttsEnabled && speech !== '(keine Antwort)') _speakText(speech);
+  } catch (e) {
+    toast('KI-Fehler: ' + e.message, 'error', 6000);
+  } finally {
+    _voiceState.processing = false;
+    _renderVoiceAssistant();
+  }
+}
+
+// ⚙️ PROMPT-ITERATION GESCHIEHT HIER:
+// Diesen String iterativ schärfen (Beispiele, Regeln, Ausgabe-Schema).
+function _voiceBuildPrompt(userText) {
+  const ctx = _voiceState.context || { customers: [], articles: [], contacts: [] };
+  const customerSummary = ctx.customers.slice(0, 200).map(c => {
+    const f = c.fields || {};
+    return [c.id, f.customer_no || '–', f.name1 || '', f.city || ''].join(' | ');
+  }).join('\n');
+  const articleSummary = ctx.articles.slice(0, 300).map(a => {
+    const f = a.fields || {};
+    return [a.id, f.sku || f.article_no || '–', f.name || '', f.manufacturer || '', f.price_net || ''].join(' | ');
+  }).join('\n');
+  const historyTxt = _voiceState.history.slice(-10).map(m =>
+    (m.role === 'user' ? 'Mitarbeiter' : 'Du') + ': ' + m.content
+  ).join('\n\n');
+
+  return `Du bist KI-Sales-Assistent bei FLP Lift Parts (Aufzugsersatzteile, Reparatur Frequenzumrichter). Aufgabe: Aus Spracheingaben eines Mitarbeiters auf Deutsch ein Angebot vorbereiten.
+
+VERFÜGBARE KUNDEN (record_id | kundenr | name | stadt):
+${customerSummary || '(keine)'}
+
+VERFÜGBARE ARTIKEL (record_id | sku | name | hersteller | preis_netto):
+${articleSummary || '(keine)'}
+
+KONVERSATION BISHER:
+${historyTxt || '(neu)'}
+
+NEUE EINGABE DES MITARBEITERS:
+"${userText}"
+
+Antworte AUSSCHLIESSLICH mit einem JSON-Objekt (keine Code-Fences, keine Erklärung davor/danach) genau in diesem Schema:
+
+{
+  "speech": "Kurze freundliche Rückmeldung an den Mitarbeiter (max 2-3 kurze Sätze, deutsch). Bestätige was du verstanden hast oder frage gezielt nach was fehlt.",
+  "status": "ready" wenn alle Daten für ein Angebot komplett sind, sonst "needs_input",
+  "missing": ["Liste was noch fehlt — leer wenn ready"],
+  "matched": {
+    "customer_id": "Airtable-record_id des erkannten Kunden, ODER null",
+    "customer_name_spoken": "wie der Mitarbeiter den Kunden genannt hat",
+    "customer_alternatives": [{"id":"...","name":"...","reason":"..."}],
+    "contact_id": "Airtable-record_id des Kontakts, ODER null",
+    "items": [
+      {
+        "article_id": "Airtable-record_id ODER null wenn unklar",
+        "qty": 1,
+        "name_spoken": "wie der Mitarbeiter den Artikel genannt hat",
+        "alternatives": [{"id":"...","name":"...","reason":"..."}],
+        "match_confidence": "high|low|guess"
+      }
+    ]
+  }
+}
+
+REGELN:
+- "ready" NUR wenn customer_id != null UND mindestens ein Item mit article_id != null gesetzt ist
+- Bei unklarem Kunden: customer_id=null, customer_alternatives mit max 3 Vorschlägen, status=needs_input
+- Bei unklarem Artikel: article_id=null, alternatives mit max 3 Vorschlägen
+- Bei mehreren Artikeln im selben Satz mehrere items[]-Einträge erzeugen
+- speech: SEHR KURZ. Beispiele: "Angebot für Mustermann GmbH mit ABB ACS580. Welche Menge?" / "Ich finde zwei Müller — Müller Aufzüge in Berlin oder Müller Service in Hamburg?" / "Verstanden, Angebot bereit. Tippe auf 'Vorbereiten'."
+- Verwende NUR record_ids, die in den obigen Listen vorkommen
+- Mengen-Defaults: wenn nicht genannt, qty=1
+- Berücksichtige die KONVERSATION BISHER — der Mitarbeiter ergänzt schrittweise`;
+}
+
+async function _voiceCallAi(userText) {
+  const prompt = _voiceBuildPrompt(userText);
+  const raw = await askAI(prompt, { maxTokens: 2000 });
+  let parsed = null;
+  try {
+    const m = String(raw || '').match(/\{[\s\S]*\}/);
+    if (m) parsed = JSON.parse(m[0]);
+  } catch (e) {
+    console.warn('Voice JSON-Parse fehlgeschlagen:', e.message, raw);
+  }
+  if (!parsed) {
+    return { speech: String(raw || '(keine Antwort)').slice(0, 300), status: 'needs_input', missing: ['JSON-Parse-Fehler'] };
+  }
+  return parsed;
+}
+
+function _speakText(text) {
+  if (!('speechSynthesis' in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(String(text || '').slice(0, 500));
+    u.lang = 'de-DE';
+    u.rate = 1.05;
+    u.pitch = 1.0;
+    window.speechSynthesis.speak(u);
+  } catch (e) { /* ignore */ }
+}
+
+function resetVoiceConversation() {
+  _voiceState.history = [];
+  _voiceState.lastResponse = null;
+  _voiceState.interim = '';
+  if ('speechSynthesis' in window) try { window.speechSynthesis.cancel(); } catch (_) {}
+  _renderVoiceAssistant();
+}
+
+// Legt Quote + QuoteItems aus dem letzten KI-Response-Set an
+async function prepareQuoteFromVoice() {
+  const r = _voiceState.lastResponse;
+  if (!r || r.status !== 'ready') return;
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Mandant fehlt', 'error'); return; }
+  const m = r.matched || {};
+  if (!m.customer_id) { toast('Kunde nicht erkannt', 'error'); return; }
+  try {
+    const quoteNo = await nextQuoteNo(cur.id);
+    const today = new Date();
+    const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const userTurns = _voiceState.history.filter(h => h.role === 'user').map(h => '> ' + h.content).join('\n');
+    const fields = {
+      quote_no: quoteNo,
+      company_id: [cur.id],
+      customer_id: [m.customer_id],
+      date: iso(today),
+      valid_until: iso(validUntil),
+      status: 'Entwurf',
+      ai_summary: 'Per Sprache vorbereitet:\n' + userTurns
+    };
+    if (m.contact_id) fields.contact_id = [m.contact_id];
+    const created = await writeData('Quote', fields);
+    // Items als QuoteItem anlegen — fehlertolerant pro Item
+    if (Array.isArray(m.items)) {
+      for (const it of m.items) {
+        if (!it.article_id) continue;
+        try {
+          await writeData('QuoteItem', {
+            quote_id: [created.id],
+            article_id: [it.article_id],
+            qty: Number(it.qty) || 1
+          });
+        } catch (e) {
+          console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message);
+        }
+      }
+    }
+    closeVoiceAssistant();
+    toast('Angebot ' + quoteNo + ' angelegt — öffne Editor', 'success', 3500);
+    setTimeout(() => openQuoteModal(created.id), 200);
+  } catch (e) {
+    toast('Fehler beim Anlegen: ' + e.message, 'error', 7000);
+  }
 }
 
 /* renderTemplateContent: Wenn Inhalt HTML-Tags enthält (Rich-Text aus Quill),
