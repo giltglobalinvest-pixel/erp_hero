@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.71';
+const APP_VERSION = 'v3.72';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3153,6 +3153,11 @@ async function proxyFetch(path, opts = {}) {
     'Authorization': 'Bearer ' + bearer,
     'Accept': 'application/json'
   }, opts.headers || {});
+  // Aktuelle Firma immer als Header mitsenden — der Proxy nutzt das, um
+  // pro User × Firma den richtigen Freshdesk-Key zu wählen.
+  if (!headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
+    headers['X-Company-Id'] = APP_KEYS.currentCompanyId;
+  }
   if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const res = await fetch(url, {
     method: opts.method || 'GET',
@@ -4909,14 +4914,27 @@ function userRow(rec) {
   const inactive = f.status !== 'aktiv';
   const isAdmin = !!f.is_admin;
   const cnt = (f.allowed_companies || []).length;
-  const hasFreshdesk = !!(f.freshdesk_api_key || '').trim();
+  const hasFreshdeskDefault = !!(f.freshdesk_api_key || '').trim();
+  let fdCompanyCount = 0;
+  try {
+    const raw = (f.freshdesk_keys_json || '').toString().trim();
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        fdCompanyCount = Object.values(p).filter(v => (v || '').toString().trim()).length;
+      }
+    }
+  } catch (_) {}
+  const fdBadge = (fdCompanyCount > 0 || hasFreshdeskDefault)
+    ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded inline-flex items-center gap-0.5" title="Freshdesk-Keys: ${fdCompanyCount} pro Firma${hasFreshdeskDefault ? ' + Default' : ''}"><i data-lucide="headphones" class="w-2.5 h-2.5"></i> FD${fdCompanyCount > 0 ? ' ' + fdCompanyCount + '×' : ''}${hasFreshdeskDefault ? '+D' : ''}</span>`
+    : '';
   return `
     <div class="flex items-center justify-between p-4">
       <div class="min-w-0">
         <div class="flex items-center gap-2 flex-wrap">
           <p class="font-medium ${inactive ? 'text-ink-500' : 'text-ink-900'} truncate">${escapeHtml(f.name || '–')}</p>
           ${isAdmin ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded">admin</span>' : ''}
-          ${hasFreshdesk ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded inline-flex items-center gap-0.5" title="Eigener Freshdesk-Key gesetzt"><i data-lucide="headphones" class="w-2.5 h-2.5"></i> FD</span>' : ''}
+          ${fdBadge}
         </div>
         <p class="text-xs text-ink-500 mt-0.5 truncate">
           ${escapeHtml(f.role || '—')} · ${cnt} Firma${cnt===1?'':'n'} · ${escapeHtml(f.status || '—')}
@@ -4944,10 +4962,11 @@ function generateApiKey() {
 }
 
 async function openUserModal(id) {
-  // Sicherstellen, dass das Feld freshdesk_api_key in der User-Tabelle existiert
+  // Sicherstellen, dass die FD-Key-Felder in der User-Tabelle existieren
   // (idempotent — legt nur an, wenn nicht vorhanden)
   await ensureFields('User', [
-    { name: 'freshdesk_api_key', type: 'singleLineText' }
+    { name: 'freshdesk_api_key',   type: 'singleLineText' },
+    { name: 'freshdesk_keys_json', type: 'multilineText'  }
   ]).catch(()=>{});
 
   let f = {};
@@ -4960,6 +4979,16 @@ async function openUserModal(id) {
     companies = await readData('Company', "{status}='aktiv'", { sort: [{ field: 'name', direction: 'asc' }] });
   } catch (e) {}
   const allowedSet = new Set(f.allowed_companies || []);
+
+  // Per-Firma-Keys aus JSON parsen (robust gegen leeren / kaputten String)
+  let fdKeysByCompany = {};
+  try {
+    const raw = (f.freshdesk_keys_json || '').toString().trim();
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (p && typeof p === 'object' && !Array.isArray(p)) fdKeysByCompany = p;
+    }
+  } catch (_) { /* ignorieren */ }
   const apiKey = id ? (f.api_key || '') : generateApiKey();
   const companiesHtml = companies.length === 0
     ? '<p class="text-xs text-ink-500">Keine aktiven Firmen verfügbar.</p>'
@@ -4986,15 +5015,37 @@ async function openUserModal(id) {
       </div>
 
       <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 mb-3">
-        <label class="block text-sm font-medium text-ink-900 mb-1 flex items-center gap-1.5"><i data-lucide="headphones" class="w-3.5 h-3.5 text-emerald-700"></i> Freshdesk API-Key <span class="text-ink-500 font-normal text-xs">(persönlich)</span></label>
-        ${id && (f.freshdesk_api_key || '').trim() ? `
-          <p class="text-[11px] text-ink-500 font-mono mb-1.5">aktuell: ${escapeHtml(_maskSecret(f.freshdesk_api_key))}</p>
-          <input type="password" name="freshdesk_api_key" value="" placeholder="zum Beibehalten leer lassen" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs bg-white">
-          <p class="text-[11px] text-ink-500 mt-1">Leer lassen = aktueller Wert bleibt. Neuer Wert überschreibt.</p>
-        ` : `
-          <input type="password" name="freshdesk_api_key" value="" placeholder="z.B. aBcDeFgHiJ123456 (aus Freshdesk → Profile Settings)" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs bg-white">
-          <p class="text-[11px] text-ink-500 mt-1">Optional. Wenn gesetzt: Freshdesk-Tickets werden mit diesem User-Account abgerufen. Wenn leer: Fallback auf Val.town env var.</p>
-        `}
+        <label class="block text-sm font-medium text-ink-900 mb-1 flex items-center gap-1.5"><i data-lucide="headphones" class="w-3.5 h-3.5 text-emerald-700"></i> Freshdesk API-Keys <span class="text-ink-500 font-normal text-xs">(persönlich · pro Firma)</span></label>
+        <p class="text-[11px] text-ink-600 mb-2 leading-snug">
+          Jede Firma kann eine eigene Freshdesk-Instanz haben — pro Firma einen eigenen Key eintragen.
+          Der <strong>Default-Key</strong> wird als Fallback genutzt, falls für eine Firma kein eigener Key gesetzt ist.
+          Leer lassen = bestehender Wert bleibt erhalten.
+        </p>
+
+        <!-- Per-Firma-Keys (alle aktiven Firmen, damit Admin Keys auch
+             vor Firma-Zuweisung eintragen kann) -->
+        ${companies.length === 0 ? '<p class="text-[11px] text-ink-500 italic mb-2">Keine aktiven Firmen vorhanden.</p>' : companies.map(c => {
+          const existing = (fdKeysByCompany[c.id] || '').toString().trim();
+          const masked = existing ? _maskSecret(existing) : '';
+          return `
+            <div class="mb-2">
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">${escapeHtml(c.fields.name || '–')}</label>
+              ${existing ? `<p class="text-[10px] text-ink-500 font-mono mb-1">aktuell: ${escapeHtml(masked)}</p>` : ''}
+              <input type="password" name="fd_key__${c.id}" value="" placeholder="${existing ? 'leer = beibehalten · neuer Wert überschreibt' : 'leer = Default-Key verwenden'}" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+              ${existing ? `<button type="button" onclick="this.closest('div').querySelector('input').value='__CLEAR__'; this.textContent='✓ wird beim Speichern gelöscht'; this.disabled=true;" class="text-[10px] text-red-600 hover:text-red-700 mt-0.5 underline">Diesen Key entfernen</button>` : ''}
+            </div>`;
+        }).join('')}
+
+        <!-- Default-Key (Fallback) -->
+        <div class="mt-2 pt-2 border-t border-emerald-200">
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Default-Key (Fallback) <span class="text-ink-500 font-normal">— wird genutzt, wenn kein firmenspezifischer Key existiert</span></label>
+          ${id && (f.freshdesk_api_key || '').trim() ? `
+            <p class="text-[10px] text-ink-500 font-mono mb-1">aktuell: ${escapeHtml(_maskSecret(f.freshdesk_api_key))}</p>
+            <input type="password" name="freshdesk_api_key" value="" placeholder="leer = beibehalten" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+          ` : `
+            <input type="password" name="freshdesk_api_key" value="" placeholder="optional — z.B. aBcDeFgHiJ123456" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+          `}
+        </div>
       </div>
 
       <label class="block text-sm font-medium text-ink-700 mb-1">Status</label>
@@ -5037,9 +5088,44 @@ async function saveUser(e, id) {
     is_admin:  fd.get('is_admin') === 'on',
     allowed_companies: fd.getAll('allowed_companies')
   };
-  // Freshdesk-Key: leer = nicht ändern (beim Edit), beim Anlegen = nur setzen wenn gefüllt
+  // Freshdesk Default-Key: leer = nicht ändern (beim Edit), beim Anlegen = nur setzen wenn gefüllt
   const freshdeskKey = (fd.get('freshdesk_api_key') || '').trim();
   if (freshdeskKey) fields.freshdesk_api_key = freshdeskKey;
+
+  // Per-Firma-Keys einsammeln: alle Form-Inputs mit name="fd_key__<companyId>"
+  // 1) Wenn id vorhanden → bestehendes JSON laden, dann mergen
+  // 2) Wenn input leer → Wert beibehalten
+  // 3) Wenn input == "__CLEAR__" → Key entfernen
+  // 4) Sonst → setzen / überschreiben
+  let existingFdKeys = {};
+  if (id) {
+    try {
+      const all = await readData('User');
+      const cur = all.find(r => r.id === id)?.fields || {};
+      const raw = (cur.freshdesk_keys_json || '').toString().trim();
+      if (raw) existingFdKeys = JSON.parse(raw) || {};
+      if (typeof existingFdKeys !== 'object' || Array.isArray(existingFdKeys)) existingFdKeys = {};
+    } catch (_) { existingFdKeys = {}; }
+  }
+  let fdKeysChanged = false;
+  for (const [name, value] of fd.entries()) {
+    if (!name.startsWith('fd_key__')) continue;
+    const companyId = name.slice('fd_key__'.length);
+    const v = (value || '').toString().trim();
+    if (v === '') continue; // leer = beibehalten
+    fdKeysChanged = true;
+    if (v === '__CLEAR__') {
+      delete existingFdKeys[companyId];
+    } else {
+      existingFdKeys[companyId] = v;
+    }
+  }
+  if (fdKeysChanged) {
+    fields.freshdesk_keys_json = Object.keys(existingFdKeys).length > 0
+      ? JSON.stringify(existingFdKeys)
+      : '';
+  }
+
   if (!fields.name)    return toast('Name fehlt', 'error');
   if (!fields.api_key) return toast('API-Key fehlt', 'error');
   if (!id) fields.created = new Date().toISOString().slice(0,10);
@@ -5734,7 +5820,7 @@ async function deleteQuoteBundle(id) {
 // Settings-UI angezeigt; User legt einen "HTTP val" in Val.town an
 // und fügt diesen Code ein. Alle Secrets kommen aus env vars oder
 // vom Airtable User-Record (per-User Freshdesk-Key).
-const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth (Sessions in Val.town blob)
+const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy v2 mit Session-Token + per-User-×-Firma-Freshdesk-Keys
 // =====================================================================
 // HTTP-Val für Val.town. Routet:
 //   POST /auth                     →  Login: User-Key prüfen, Session-Token ausgeben
@@ -5743,8 +5829,9 @@ const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy mit Session-Token-Auth (Sess
 //   POST /sessions/revoke-user     →  ALLE Sessions eines Users killen (Admin only)
 //   POST /anthropic/v1/messages    →  api.anthropic.com (mit ANTHROPIC_API_KEY)
 //   GET  /freshdesk/api/v2/...     →  <domain>.freshdesk.com
-//                                      (User-eigener Key bevorzugt,
-//                                       env var FRESHDESK_API_KEY als Fallback)
+//                                      Key-Auswahl: User × aktuelle Firma
+//                                      (Header X-Company-Id) → User-Default
+//                                      → env var FRESHDESK_API_KEY
 //   GET  /health                   →  Auth-Check (für "Verbindung testen")
 //
 // WICHTIG — Sessions persistent:
@@ -5825,13 +5912,29 @@ async function lookupUser(userKey: string) {
   const data = await res.json();
   const rec = (data.records || [])[0];
   if (!rec) return null;
+  // Per-Firma-Keys: JSON-Object { "<companyId>": "<key>" } im Feld
+  // freshdesk_keys_json. Robust gegen leeren / kaputten String.
+  let fdKeysByCompany: Record<string, string> = {};
+  try {
+    const raw = (rec.fields.freshdesk_keys_json || "").toString().trim();
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [k, v] of Object.entries(parsed)) {
+          const s = (v || "").toString().trim();
+          if (s) fdKeysByCompany[k] = s;
+        }
+      }
+    }
+  } catch (_) { /* malformed JSON → ignorieren, Fallback greift */ }
   const user = {
     id: rec.id,
     name: rec.fields.name || "",
     role: rec.fields.role || "",
     is_admin: !!rec.fields.is_admin,
     allowed_companies: rec.fields.allowed_companies || [],
-    freshdesk_api_key: (rec.fields.freshdesk_api_key || "").trim() || null
+    freshdesk_api_key: (rec.fields.freshdesk_api_key || "").trim() || null,
+    freshdesk_keys_by_company: fdKeysByCompany
   };
   USER_CACHE.set(userKey, { user, expires: Date.now() + CACHE_TTL_MS });
   return user;
@@ -5851,7 +5954,8 @@ async function resolveAuth(token: string) {
       role: sess.role || "",
       is_admin: sess.isAdmin,
       allowed_companies: sess.allowedCompanies || [],
-      freshdesk_api_key: sess.freshdeskApiKey
+      freshdesk_api_key: sess.freshdeskApiKey,
+      freshdesk_keys_by_company: sess.freshdeskKeysByCompany || {}
     };
   }
   // 2) Legacy: Bearer == user_key (Übergangsmodus, nicht persistieren)
@@ -5864,7 +5968,8 @@ async function resolveAuth(token: string) {
       role: u.role,
       is_admin: u.is_admin,
       allowed_companies: u.allowed_companies,
-      freshdesk_api_key: u.freshdesk_api_key
+      freshdesk_api_key: u.freshdesk_api_key,
+      freshdesk_keys_by_company: u.freshdesk_keys_by_company || {}
     };
   } catch (_) { /* fall through */ }
   return null;
@@ -5876,7 +5981,7 @@ function jsonResponse(body: unknown, status = 200) {
     headers: {
       "content-type": "application/json",
       "access-control-allow-origin": "*",
-      "access-control-allow-headers": "authorization, content-type",
+      "access-control-allow-headers": "authorization, content-type, x-company-id",
       "access-control-allow-methods": "GET, POST, OPTIONS"
     }
   });
@@ -5889,7 +5994,7 @@ export default async function (req: Request): Promise<Response> {
       status: 204,
       headers: {
         "access-control-allow-origin": "*",
-        "access-control-allow-headers": "authorization, content-type",
+        "access-control-allow-headers": "authorization, content-type, x-company-id",
         "access-control-allow-methods": "GET, POST, OPTIONS",
         "access-control-max-age": "86400"
       }
@@ -5919,6 +6024,7 @@ export default async function (req: Request): Promise<Response> {
       isAdmin: user.is_admin,
       allowedCompanies: user.allowed_companies,
       freshdeskApiKey: user.freshdesk_api_key,
+      freshdeskKeysByCompany: user.freshdesk_keys_by_company || {},
       expires: Date.now() + ttl,
       longLived
     });
@@ -5931,7 +6037,8 @@ export default async function (req: Request): Promise<Response> {
         role: user.role,
         is_admin: user.is_admin,
         allowed_companies: user.allowed_companies,
-        has_freshdesk_key: !!user.freshdesk_api_key
+        has_freshdesk_key: !!user.freshdesk_api_key,
+        freshdesk_company_keys: Object.keys(user.freshdesk_keys_by_company || {})
       }
     });
   }
@@ -5958,7 +6065,8 @@ export default async function (req: Request): Promise<Response> {
         role: user.role,
         is_admin: user.is_admin,
         allowed_companies: user.allowed_companies,
-        has_freshdesk_key: !!user.freshdesk_api_key
+        has_freshdesk_key: !!user.freshdesk_api_key,
+        freshdesk_company_keys: Object.keys(user.freshdesk_keys_by_company || {})
       }
     });
   }
@@ -5983,7 +6091,8 @@ export default async function (req: Request): Promise<Response> {
       user: {
         name: user.name,
         is_admin: user.is_admin,
-        has_freshdesk_key: !!user.freshdesk_api_key
+        has_freshdesk_key: !!user.freshdesk_api_key,
+        freshdesk_company_keys: Object.keys(user.freshdesk_keys_by_company || {})
       }
     });
   }
@@ -6028,11 +6137,21 @@ export default async function (req: Request): Promise<Response> {
       .replace(/\\/+$/, "")
       .trim();
     if (!domain) return jsonResponse({ error: "FRESHDESK_DOMAIN env var fehlt in Val.town" }, 500);
-    // Per-User-Key bevorzugt (aus Airtable User.freshdesk_api_key);
-    // Fallback: env var FRESHDESK_API_KEY (für User ohne eigenen Key).
-    const fdKey = user.freshdesk_api_key || Deno.env.get("FRESHDESK_API_KEY");
+    // Key-Auswahl in 3 Stufen:
+    //  1. User × aktuelle Firma (X-Company-Id Header) → freshdesk_keys_by_company[companyId]
+    //  2. User-Default → freshdesk_api_key
+    //  3. Server-Fallback → env var FRESHDESK_API_KEY
+    const companyId = (req.headers.get("x-company-id") || "").trim();
+    let fdKey: string | null = null;
+    let fdKeySource = "fallback-env";
+    if (companyId && user.freshdesk_keys_by_company && user.freshdesk_keys_by_company[companyId]) {
+      fdKey = user.freshdesk_keys_by_company[companyId];
+      fdKeySource = "user-company";
+    }
+    if (!fdKey && user.freshdesk_api_key) { fdKey = user.freshdesk_api_key; fdKeySource = "user-default"; }
+    if (!fdKey) fdKey = Deno.env.get("FRESHDESK_API_KEY") || null;
     if (!fdKey) return jsonResponse({
-      error: "Kein Freshdesk-Key verfügbar. Entweder beim User in der App eintragen (Admin → Benutzer) oder FRESHDESK_API_KEY env var in Val.town setzen."
+      error: "Kein Freshdesk-Key verfügbar. Entweder beim User in der App eintragen (Admin → Benutzer · pro Firma oder Default) oder FRESHDESK_API_KEY env var in Val.town setzen."
     }, 500);
     const target = \`https://\${domain}.freshdesk.com/\${fdPath}\${url.search}\`;
     const basic = btoa(\`\${fdKey}:X\`);
@@ -6250,6 +6369,9 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
       <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
         ${stepHeader(2, 'Code in den Val einfügen', '')}
         <div class="pl-11">
+          <div class="bg-amber-50 border border-amber-200 rounded-lg p-2.5 mb-3 text-[12px] text-amber-900 leading-snug">
+            <strong>⚠ Update v2 (ERP v3.72):</strong> Der Proxy unterstützt jetzt <strong>Freshdesk-Keys pro User × Firma</strong>. Wenn du eine ältere Version in Val.town deployed hast, ersetze den Code dort komplett mit der unten stehenden Variante. Bestehende Single-User-Keys laufen automatisch als Default-Fallback weiter — keine Migration nötig.
+          </div>
           <p class="text-sm text-ink-700 mb-2">Den vorhandenen Beispiel-Code in Val.town komplett ersetzen mit:</p>
           <div class="relative">
             <button type="button" onclick="copyValTownCode(this)" class="absolute top-2 right-2 z-10 bg-ink-900 text-white text-xs px-2.5 py-1.5 rounded-lg hover:bg-ink-700 flex items-center gap-1.5 shadow">
