@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.96';
+const APP_VERSION = 'v3.97';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -8385,26 +8385,38 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
       <!-- ============ STEP 9 — Freshsales-CRM (optional) ============ -->
       ${(() => {
         const fsDomain = APP_KEYS.freshsalesSubdomain || '';
+        const canPushEnv = !!(APP_KEYS.valtownKey && APP_KEYS.valtownValId);
         return `
         <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
           ${stepHeader(9, 'Freshsales-CRM-Sync (optional)', fsDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
           <div class="pl-11">
-            <p class="text-sm text-ink-700 mb-2">Wenn du dein Kunden-Stammdaten auch in Freshsales/Freshworks CRM pflegen willst, kann die App Firmen (und später Kontakte) per Button-Klick dorthin syncen.</p>
+            <p class="text-sm text-ink-700 mb-2">Damit ERP-Hero Firmen automatisch ins Freshsales-CRM pushen kann (bei Verwendung in einem Quote/Auftrag), braucht es Subdomain + API-Token.</p>
             <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 mb-3 text-[11px] text-blue-900">
-              <strong>So funktioniert's:</strong> Subdomain hier eintragen, API-Token nur in Val.town (Env-Var <code>FRESHSALES_API_KEY</code>) — der Token bleibt damit serverside.
-              Token holen: in Freshsales oben rechts <strong>Profil → Settings → API Settings → Token kopieren</strong>.
+              <strong>Token holen:</strong> in Freshsales oben rechts <strong>Profil → Settings → API Settings → Token kopieren</strong>.<br>
+              ${canPushEnv
+                ? '✓ Beim Speichern wird der Token automatisch als Val.town-Env-Var <code>FRESHSALES_API_KEY</code> abgelegt (per Val.town-API) — wir speichern ihn NICHT in der App-Master-Base.'
+                : '⚠ Val.town-Auto-Setup oben durchführen, damit Token automatisch in Val.town gespeichert werden kann. Sonst musst du <code>FRESHSALES_API_KEY</code> manuell in Val.town setzen.'}
             </div>
-            <label class="block text-xs font-medium text-ink-700 mb-1">Subdomain</label>
-            <div class="flex gap-2 flex-wrap mb-2">
-              <input type="text" id="settingsFsDomain" value="${escapeHtml(fsDomain)}" placeholder="z.B. gilt (ohne .myfreshworks.com)" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
-              <button type="button" onclick="saveFreshsalesSubdomain()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+            <div class="grid sm:grid-cols-2 gap-2 mb-2">
+              <div>
+                <label class="block text-xs font-medium text-ink-700 mb-1">Subdomain</label>
+                <input type="text" id="settingsFsDomain" value="${escapeHtml(fsDomain)}" placeholder="z.B. gilt" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
+                <p class="text-[10px] text-ink-500 mt-0.5">aus <code>gilt.myfreshworks.com</code></p>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-ink-700 mb-1">API-Token ${canPushEnv ? '(landet in Val.town)' : '(noch nicht zustellbar)'}</label>
+                <input type="password" id="settingsFsApiKey" value="" placeholder="${fsDomain ? 'leer = beibehalten' : 'aus Freshsales Settings'}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono" autocomplete="off">
+                <p class="text-[10px] text-ink-500 mt-0.5">${canPushEnv ? 'wird beim Speichern direkt in Val.town gepusht' : 'nicht in App speichern — manuell in Val.town setzen'}</p>
+              </div>
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <button type="button" onclick="saveFreshsalesSetup(this)" class="bg-brand-500 hover:bg-brand-600 text-white rounded-lg px-4 py-2 text-sm font-medium flex items-center gap-2">
                 <i data-lucide="save" class="w-4 h-4"></i> Speichern
               </button>
+              ${fsDomain ? `<button type="button" onclick="testFreshsalesConnection(this)" class="text-xs px-3 py-1.5 border border-ink-200 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5">
+                <i data-lucide="activity" class="w-3.5 h-3.5"></i> Verbindung testen
+              </button>` : ''}
             </div>
-            <p class="text-[11px] text-ink-500 mb-3">Beispiel: wenn die Freshsales-URL <code>https://gilt.myfreshworks.com/crm/sales</code> ist → eintragen: <code>gilt</code></p>
-            ${fsDomain ? `<button type="button" onclick="testFreshsalesConnection(this)" class="text-xs px-3 py-1.5 border border-ink-200 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5">
-              <i data-lucide="activity" class="w-3.5 h-3.5"></i> Verbindung testen
-            </button>` : ''}
           </div>
         </div>`;
       })()}
@@ -8525,27 +8537,69 @@ async function saveSalesGroupId() {
   }
 }
 
-async function saveFreshsalesSubdomain() {
+// Legacy-Helper (eingebaute Bestandscompat — nutzt saveFreshsalesSetup)
+async function saveFreshsalesSubdomain() { return saveFreshsalesSetup(); }
+
+// Speichert Subdomain in Master-Base + optional API-Token direkt als Val.town-Env-Var.
+async function saveFreshsalesSetup(btnEl) {
   const inp = document.getElementById('settingsFsDomain');
+  const tokInp = document.getElementById('settingsFsApiKey');
   if (!inp) return;
-  const val = (inp.value || '').trim()
+  const subdomain = (inp.value || '').trim()
     .replace(/^https?:\/\//i, '')
     .replace(/\.myfreshworks\.com\/?.*$/i, '')
     .replace(/\/+$/, '');
+  const apiToken = (tokInp?.value || '').trim();
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
   try {
+    // 1. Subdomain in Master-Base (idempotent)
     const keys = await _fetchMasterBaseKeys();
     const existing = keys.find(r => r.fields.key_name === 'freshsalesSubdomain');
-    if (val) {
-      await _writeMasterBaseKey('freshsalesSubdomain', val, existing?.id || null);
-      APP_KEYS.freshsalesSubdomain = val;
-      toast('Freshsales-Subdomain gespeichert', 'success');
+    if (subdomain) {
+      await _writeMasterBaseKey('freshsalesSubdomain', subdomain, existing?.id || null);
+      APP_KEYS.freshsalesSubdomain = subdomain;
     } else if (existing) {
       await _deleteMasterBaseKey(existing.id);
       APP_KEYS.freshsalesSubdomain = null;
+    }
+
+    // 2. API-Token direkt in Val.town als Env-Var pushen (falls Token + Val-Token vorhanden)
+    let valtownPushed = false;
+    if (apiToken && APP_KEYS.valtownKey && APP_KEYS.valtownValId) {
+      try {
+        await valtownSetEnvVar(APP_KEYS.valtownKey, APP_KEYS.valtownValId, 'FRESHSALES_API_KEY', apiToken, 'Freshsales API-Token (vom ERP-Wizard gesetzt)');
+        // Zusätzlich Subdomain als Env-Var (falls geändert)
+        if (subdomain) {
+          await valtownSetEnvVar(APP_KEYS.valtownKey, APP_KEYS.valtownValId, 'FRESHSALES_SUBDOMAIN', subdomain, 'Freshsales-Subdomain');
+        }
+        valtownPushed = true;
+      } catch (eVt) {
+        console.warn('[Val.town] FS-Env-Var setzen fehlgeschlagen:', eVt.message);
+        toast('Subdomain gespeichert, aber Val.town-Env-Push fehlgeschlagen: ' + eVt.message, 'warn', 8000);
+      }
+    } else if (subdomain && !apiToken && APP_KEYS.valtownKey && APP_KEYS.valtownValId) {
+      // Subdomain wurde aktualisiert, aber kein neuer Token → trotzdem Subdomain-Env-Var aktualisieren
+      try {
+        await valtownSetEnvVar(APP_KEYS.valtownKey, APP_KEYS.valtownValId, 'FRESHSALES_SUBDOMAIN', subdomain, 'Freshsales-Subdomain');
+        valtownPushed = true;
+      } catch (_) {}
+    }
+
+    if (subdomain) {
+      toast(valtownPushed
+        ? '✓ Freshsales-Setup gespeichert (App + Val.town aktualisiert)'
+        : 'Subdomain gespeichert. Bitte FRESHSALES_API_KEY manuell in Val.town setzen.',
+        'success', 4500);
+    } else {
       toast('Subdomain entfernt', 'success');
     }
     renderAdminSettings();
-  } catch (e) { toast(e.message, 'error', 7000); }
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+  } finally {
+    if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
+  }
 }
 
 async function testFreshsalesConnection(btnEl) {
@@ -9818,8 +9872,14 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
     }
     return true;
   } catch (e) {
-    if (!silent) toast('Sync fehlgeschlagen: ' + (e.message || e), 'error', 9000);
-    else console.warn('[Lazy-Push FS] customer=' + customerId + ': ' + (e.message || e));
+    const m = (e.message || String(e));
+    // Spezial-Fall: FS-Env-Vars fehlen in Val.town
+    let userMsg = 'Sync fehlgeschlagen: ' + m;
+    if (/FRESHSALES_SUBDOMAIN|FRESHSALES_API_KEY/i.test(m)) {
+      userMsg = 'Freshsales-Setup unvollständig — Admin → Einstellungen → Step 9: Subdomain + API-Token eintragen (App pushed ihn automatisch in Val.town).';
+    }
+    if (!silent) toast(userMsg, 'error', 10000);
+    else console.warn('[Lazy-Push FS] customer=' + customerId + ': ' + m);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
     return false;
   }
