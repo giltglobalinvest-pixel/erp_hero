@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.98';
+const APP_VERSION = 'v3.99';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -682,7 +682,7 @@ const APP_KEYS = {
   // (Maintenance-Updates aus dem Chat heraus ohne Copy-Paste möglich).
   valtownKey: null,
   valtownValId: null,
-  // Freshsales-CRM: Subdomain (z.B. "gilt" für gilt.myfreshworks.com)
+  // Freshsales-CRM: Subdomain (z.B. "gilt" für gilt.freshworks.com)
   // + API-Key liegt in Val.town als env var, NICHT im Browser
   freshsalesSubdomain: null
 };
@@ -847,9 +847,9 @@ function freshsalesAccountUrl(accountId) {
   if (!dom || !accountId) return null;
   const clean = dom
     .replace(/^https?:\/\//i, '')
-    .replace(/\.myfreshworks\.com\/?.*$/i, '')
+    .replace(/\.freshworks\.com\/?.*$/i, '')
     .replace(/\/+$/, '');
-  return 'https://' + clean + '.myfreshworks.com/crm/sales/sales_accounts/' + accountId;
+  return 'https://' + clean + '.freshworks.com/crm/sales/sales_accounts/' + accountId;
 }
 
 // Liefert die Deep-Link-URL der App, die ein Quote direkt öffnet
@@ -7691,18 +7691,18 @@ export default async function (req: Request): Promise<Response> {
   }
 
   // 5) Freshsales / Freshworks-CRM — Routet /freshsales/api/... an
-  //    https://<subdomain>.myfreshworks.com/crm/sales/api/...
+  //    https://<subdomain>.freshworks.com/crm/sales/api/...
   //    Auth: "Token token=API_TOKEN" Header. Subdomain + Key kommen aus env vars.
   if (path.startsWith("freshsales/")) {
     const fsPath = path.replace(/^freshsales\\//, "");
     let subdomain = (Deno.env.get("FRESHSALES_SUBDOMAIN") || "").trim()
       .replace(/^https?:\\/\\//i, "")
-      .replace(/\\.myfreshworks\\.com\\/?.*$/i, "")
+      .replace(/\\.freshworks\\.com\\/?.*$/i, "")
       .replace(/\\/+$/, "");
     if (!subdomain) return jsonResponse({ error: "FRESHSALES_SUBDOMAIN env var fehlt in Val.town" }, 500);
     const fsKey = Deno.env.get("FRESHSALES_API_KEY");
     if (!fsKey) return jsonResponse({ error: "FRESHSALES_API_KEY env var fehlt in Val.town" }, 500);
-    const target = \`https://\${subdomain}.myfreshworks.com/crm/sales/\${fsPath}\${url.search}\`;
+    const target = \`https://\${subdomain}.freshworks.com/crm/sales/\${fsPath}\${url.search}\`;
     const init: RequestInit = {
       method: req.method,
       headers: {
@@ -7737,7 +7737,7 @@ function _valtownEnvVars() {
     { name: 'ANTHROPIC_API_KEY',  hint: 'Anthropic Console → API Keys → Create. Beginnt mit sk-ant-...', value: '', secret: true, required: true },
     { name: 'FRESHDESK_DOMAIN',   hint: 'Subdomain ohne .freshdesk.com (z.B. wenn URL flpliftparts.freshdesk.com → "flpliftparts")', value: '', secret: false, required: true },
     { name: 'FRESHDESK_API_KEY',  hint: 'OPTIONAL — Fallback-Key. Wird nur verwendet, wenn ein User keinen eigenen Freshdesk-Key in seinem Profil hat. Empfehlung: leer lassen und stattdessen pro Mitarbeiter den persönlichen Key in Admin → Benutzer eintragen.', value: '', secret: true, required: false },
-    { name: 'FRESHSALES_SUBDOMAIN', hint: 'OPTIONAL — Subdomain ohne .myfreshworks.com (z.B. "gilt" wenn deine URL gilt.myfreshworks.com lautet). Nur nötig wenn du Kunden ins Freshsales-CRM syncen willst.', value: '', secret: false, required: false },
+    { name: 'FRESHSALES_SUBDOMAIN', hint: 'OPTIONAL — Subdomain ohne .freshworks.com (z.B. "gilt" wenn deine URL gilt.freshworks.com lautet). Nur nötig wenn du Kunden ins Freshsales-CRM syncen willst.', value: '', secret: false, required: false },
     { name: 'FRESHSALES_API_KEY',   hint: 'OPTIONAL — API-Token aus Freshsales: in der CRM-UI oben rechts Profil → "Settings" → "API Settings" → Token kopieren.', value: '', secret: true, required: false }
   ];
 }
@@ -8392,10 +8392,6 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
           ${stepHeader(9, 'Freshsales-CRM-Sync (optional)', fsDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
           <div class="pl-11">
             <p class="text-sm text-ink-700 mb-2">Damit ERP-Hero Firmen automatisch ins Freshsales-CRM pushen kann (bei Verwendung in einem Quote/Auftrag), braucht es Subdomain + API-Token.</p>
-            ${sameAsFd ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-2.5 mb-3 text-[12px] text-amber-900">
-              <strong>⚠ Achtung:</strong> Deine Freshsales-Subdomain ist identisch mit der Freshdesk-Subdomain (<code>${escapeHtml(fsDomain)}</code>). Das ist meistens falsch — Freshworks-CRM hat oft eine eigene Subdomain (Bundle Alias).
-              <br><br><strong>So findest du sie:</strong> Logge dich in Freshsales/Freshworks-CRM ein und schau auf die URL: <code>https://&lt;XYZ&gt;.myfreshworks.com/crm/sales/...</code> — das <code>&lt;XYZ&gt;</code> ist die richtige Subdomain.
-            </div>` : ''}
             <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 mb-3 text-[11px] text-blue-900">
               <strong>Token holen:</strong> in Freshsales oben rechts <strong>Profil → Settings → API Settings → Token kopieren</strong>.<br>
               ${canPushEnv
@@ -8406,7 +8402,7 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
               <div>
                 <label class="block text-xs font-medium text-ink-700 mb-1">Subdomain</label>
                 <input type="text" id="settingsFsDomain" value="${escapeHtml(fsDomain)}" placeholder="z.B. gilt" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
-                <p class="text-[10px] text-ink-500 mt-0.5">aus <code>gilt.myfreshworks.com</code></p>
+                <p class="text-[10px] text-ink-500 mt-0.5">aus <code>gilt.freshworks.com</code></p>
               </div>
               <div>
                 <label class="block text-xs font-medium text-ink-700 mb-1">API-Token ${canPushEnv ? '(landet in Val.town)' : '(noch nicht zustellbar)'}</label>
@@ -8552,7 +8548,7 @@ async function saveFreshsalesSetup(btnEl) {
   if (!inp) return;
   const subdomain = (inp.value || '').trim()
     .replace(/^https?:\/\//i, '')
-    .replace(/\.myfreshworks\.com\/?.*$/i, '')
+    .replace(/\.freshworks\.com\/?.*$/i, '')
     .replace(/\/+$/, '');
   const apiToken = (tokInp?.value || '').trim();
   const origHtml = btnEl?.innerHTML;
@@ -9882,7 +9878,7 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
     if (/FRESHSALES_SUBDOMAIN|FRESHSALES_API_KEY/i.test(m)) {
       userMsg = 'Freshsales-Setup unvollständig — Admin → Einstellungen → Step 9: Subdomain + API-Token eintragen.';
     } else if (/404/.test(m)) {
-      userMsg = 'Freshsales 404 — Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht im Freshworks-CRM. Logge dich in Freshsales ein, schau auf die URL (z.B. <bundle>.myfreshworks.com) und korrigiere die Subdomain in Admin → Einstellungen → Step 9.';
+      userMsg = 'Freshsales 404 — Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht im Freshworks-CRM. Logge dich in Freshsales ein, schau auf die URL (z.B. <bundle>.freshworks.com) und korrigiere die Subdomain in Admin → Einstellungen → Step 9.';
     } else if (/401|403/.test(m)) {
       userMsg = 'Freshsales-Token ungültig (' + m.match(/40[13]/)[0] + ') — neuen Token in Freshsales generieren und in Step 9 eintragen.';
     }
