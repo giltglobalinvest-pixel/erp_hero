@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.28';
+const APP_VERSION = 'v3.29';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1215,6 +1215,8 @@ async function loadFreshdeskTicketsPreview() {
     const query = `"(group_id:${groupId}) AND (status:2 OR status:3)"`;
     const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
     const tickets = data.results || [];
+    _inquiriesLastLoadedAt = Date.now();
+    _renderInquiriesFreshness();
     if (tickets.length === 0) {
       wrap.innerHTML = '<p class="text-xs text-ink-500 italic">Keine offenen / ausstehenden Tickets der Sales-Gruppe.</p>';
       return;
@@ -5246,8 +5248,63 @@ async function nextInquiryNo(companyId) {
   return 'AN-' + (max + 1);
 }
 
+// Auto-Refresh-State für das Anfragen-Modul
+let _inquiriesRefreshTimer = null;
+let _inquiriesRefreshIntervalSec = 60;
+let _inquiriesLastLoadedAt = 0;
+let _inquiriesTickerTimer = null;
+
+function _stopInquiriesAutoRefresh() {
+  if (_inquiriesRefreshTimer) { clearInterval(_inquiriesRefreshTimer); _inquiriesRefreshTimer = null; }
+  if (_inquiriesTickerTimer)  { clearInterval(_inquiriesTickerTimer);  _inquiriesTickerTimer  = null; }
+  document.removeEventListener('visibilitychange', _onInquiriesVisibility);
+}
+function _onInquiriesVisibility() {
+  // Beim Zurückkommen aus dem Hintergrund-Tab: einmal sofort neu laden,
+  // wenn das letzte Refresh schon länger her ist als das Intervall.
+  if (document.hidden) return;
+  if (!document.getElementById('freshdeskTicketsWrap')) {
+    // User ist nicht mehr auf der Anfragen-Seite — abräumen
+    _stopInquiriesAutoRefresh();
+    return;
+  }
+  const ageSec = (Date.now() - _inquiriesLastLoadedAt) / 1000;
+  if (ageSec > _inquiriesRefreshIntervalSec) loadFreshdeskTicketsPreview();
+}
+function _startInquiriesAutoRefresh() {
+  _stopInquiriesAutoRefresh();
+  // Hauptintervall: alle N Sekunden neu laden, aber nur wenn Tab sichtbar
+  _inquiriesRefreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    if (!document.getElementById('freshdeskTicketsWrap')) {
+      _stopInquiriesAutoRefresh();
+      return;
+    }
+    loadFreshdeskTicketsPreview();
+  }, _inquiriesRefreshIntervalSec * 1000);
+  // Sekündlicher Ticker für die "vor X Sek."-Anzeige
+  _inquiriesTickerTimer = setInterval(_renderInquiriesFreshness, 1000);
+  document.addEventListener('visibilitychange', _onInquiriesVisibility);
+}
+function _renderInquiriesFreshness() {
+  const el = document.getElementById('inqFreshness');
+  if (!el) { _stopInquiriesAutoRefresh(); return; }
+  if (!_inquiriesLastLoadedAt) { el.textContent = ''; return; }
+  const sec = Math.max(0, Math.floor((Date.now() - _inquiriesLastLoadedAt) / 1000));
+  let txt;
+  if (sec < 5)        txt = 'gerade aktualisiert';
+  else if (sec < 60)  txt = 'vor ' + sec + ' Sek.';
+  else if (sec < 3600) txt = 'vor ' + Math.floor(sec / 60) + ' Min.';
+  else                 txt = 'vor ' + Math.floor(sec / 3600) + ' h';
+  el.textContent = txt;
+}
+
 async function renderInquiries() {
   setPageTitle('Anfragen');
+  // Falls vorher schon ein Auto-Refresh lief, stoppen (z.B. bei Mandantenwechsel)
+  _stopInquiriesAutoRefresh();
+  _inquiriesLastLoadedAt = 0;
+
   const cur = getCurrentCompany();
   if (!cur) {
     document.getElementById('pageContent').innerHTML = `
@@ -5263,14 +5320,24 @@ async function renderInquiries() {
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-5xl mx-auto">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
           <h2 class="text-xl font-bold text-ink-900">Anfragen</h2>
           <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (Sales · offen/ausstehend)</p>
         </div>
-        <button type="button" onclick="loadFreshdeskTicketsPreview()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-          <i data-lucide="refresh-cw" class="w-4 h-4"></i> Tickets laden
-        </button>
+        <div class="flex items-center gap-2 flex-wrap">
+          <span id="inqFreshness" class="text-[11px] text-ink-500 italic"></span>
+          <select id="inqRefreshSelect" onchange="setInquiriesRefreshInterval(this.value)" class="text-xs border border-ink-200 rounded-lg px-2 py-2 bg-white" title="Auto-Refresh-Intervall">
+            <option value="0">Auto-Refresh: aus</option>
+            <option value="30">alle 30 Sek.</option>
+            <option value="60" selected>alle 60 Sek.</option>
+            <option value="120">alle 2 Min.</option>
+            <option value="300">alle 5 Min.</option>
+          </select>
+          <button type="button" onclick="loadFreshdeskTicketsPreview()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i> <span class="hidden sm:inline">Jetzt laden</span>
+          </button>
+        </div>
       </div>
 
       ${legacyCount > 0 ? `
@@ -5301,8 +5368,31 @@ async function renderInquiries() {
     </div>
   `;
   if (window.lucide) lucide.createIcons();
+  // Persistierte Wahl wiederherstellen
+  const savedInt = parseInt(localStorage.getItem('inquiriesRefreshIntervalSec') || '60', 10);
+  if (Number.isFinite(savedInt) && savedInt >= 0) {
+    _inquiriesRefreshIntervalSec = savedInt;
+    const sel = document.getElementById('inqRefreshSelect');
+    if (sel) sel.value = String(savedInt);
+  }
   // Auto-Load der Tickets beim Seitenaufruf
   setTimeout(() => loadFreshdeskTicketsPreview(), 50);
+  // Auto-Refresh-Loop starten (falls Intervall > 0)
+  if (_inquiriesRefreshIntervalSec > 0) _startInquiriesAutoRefresh();
+}
+
+// Aufgerufen vom Dropdown — speichert Wahl + (re)startet den Loop
+function setInquiriesRefreshInterval(valueStr) {
+  const sec = parseInt(valueStr, 10) || 0;
+  _inquiriesRefreshIntervalSec = sec;
+  localStorage.setItem('inquiriesRefreshIntervalSec', String(sec));
+  if (sec === 0) {
+    _stopInquiriesAutoRefresh();
+    toast('Auto-Refresh aus', 'info', 1500);
+  } else {
+    _startInquiriesAutoRefresh();
+    toast('Auto-Refresh: alle ' + sec + ' Sek.', 'info', 1500);
+  }
 }
 
 /* Löscht alle lokalen Inquiry-Records des aktuellen Mandanten. Mit Bestätigung. */
