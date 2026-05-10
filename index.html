@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.42';
+const APP_VERSION = 'v3.43';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2034,7 +2034,9 @@ async function aiCreateQuoteFromMatch() {
   }
 }
 
-// Aktion: Customer + Contact aus extrahierten Daten anlegen
+// Aktion: Customer + Contact aus extrahierten Daten anlegen.
+// Setzt zusätzlich Defaults: Zahlungsziel "14 Tage netto", Lieferbedingungen "EXW Hellbach".
+// Legt automatisch eine Rechnungsadresse mit der Firmenanschrift an (kind=invoice, primary).
 // Liefert {customerId, contactId} oder wirft.
 async function _aiCreateCustomerAndContactFromExtracted() {
   const cur = getCurrentCompany();
@@ -2048,20 +2050,50 @@ async function _aiCreateCustomerAndContactFromExtracted() {
                         ((ct.first_name || '') + ' ' + (ct.last_name || '')).trim() ||
                         (requesterEmail ? requesterEmail.split('@')[0] : '');
   if (!customerName) throw new Error('Weder Firmenname noch Kontaktname erkennbar — Kunde manuell anlegen');
-  // Customer anlegen
+  const street  = (co.street  || '').trim();
+  const zip     = (co.zip     || '').trim();
+  const city    = (co.city    || '').trim();
+  const country = (co.country || '').trim() || 'Deutschland';
+  // Customer anlegen mit Standard-Defaults
   const customerFields = {
-    name1:    customerName,
-    street:   (co.street || '').trim(),
-    zip:      (co.zip || '').trim(),
-    city:     (co.city || '').trim(),
-    country:  (co.country || '').trim() || 'Deutschland',
-    email:    (ct.email || requesterEmail || '').trim(),
-    phone:    (ct.phone || '').trim(),
-    vat_id:   (co.vat_id || '').trim(),
-    status:   'aktiv',
-    company_id: [cur.id]
+    name1:          customerName,
+    street, zip, city, country,
+    email:          (ct.email || requesterEmail || '').trim(),
+    phone:          (ct.phone || '').trim(),
+    vat_id:         (co.vat_id || '').trim(),
+    payment_terms:  '14 Tage netto',
+    delivery_terms: 'EXW Hellbach',
+    status:         'aktiv',
+    company_id:     [cur.id]
   };
   const customer = await writeData('Customer', customerFields);
+  // Rechnungsadresse als Firmenanschrift kopieren (kind=invoice, is_primary=true).
+  // Schema sicherstellen, falls die Address-Tabelle vom Tenant noch nicht da ist.
+  if (street || zip || city) {
+    try {
+      await ensureTable('Address', [{ name: 'name', type: 'singleLineText' }]).catch(()=>{});
+      await ensureFields('Address', [
+        { name: 'customer_id', type: 'singleLineText' },
+        { name: 'kind',        type: 'singleLineText' },
+        { name: 'is_primary',  type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
+        { name: 'street',      type: 'singleLineText' },
+        { name: 'zip',         type: 'singleLineText' },
+        { name: 'city',        type: 'singleLineText' },
+        { name: 'country',     type: 'singleLineText' },
+        { name: 'recipient',   type: 'singleLineText' },
+        { name: 'notes',       type: 'multilineText' }
+      ]).catch(()=>{});
+      await writeData('Address', {
+        customer_id: customer.id, // im Schema als singleLineText, nicht linked
+        kind:        'invoice',
+        is_primary:  true,
+        recipient:   customerName,
+        street, zip, city, country
+      });
+    } catch (e) {
+      console.warn('Rechnungsadresse konnte nicht angelegt werden:', e.message);
+    }
+  }
   // Contact anlegen, wenn Vor- oder Nachname vorhanden
   let contactId = null;
   const fn = (ct.first_name || '').trim();
