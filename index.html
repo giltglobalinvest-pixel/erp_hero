@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.85';
+const APP_VERSION = 'v3.86';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2548,19 +2548,11 @@ WICHTIG: Antworte AUSSCHLIESSLICH mit dem Stichpunkt, kein Text drumherum, keine
   // Neuen Titel zusammenbauen (deutsche Anführungszeichen „ ")
   const ticketLabel = 'FT-' + t.id;
   const newTitle = `Anfrage „${ticketLabel}" von „${firma}" für „${topic}"`;
+  const oldTitle = t.subject || '(ohne Betreff)';
 
-  // Confirm-Dialog mit Vorschau
-  const ok = confirm(
-    'Titel umschreiben?\n\n' +
-    'ALT: ' + (t.subject || '(ohne Betreff)') + '\n\n' +
-    'NEU: ' + newTitle + '\n\n' +
-    'Der Titel wird im Freshdesk-Ticket aktualisiert.'
-  );
-  if (!ok) {
-    _fdTicketState.titleRewriting = false;
-    _renderFreshdeskTicket();
-    return;
-  }
+  // Direkt-Update — kein Confirm. User hat per Button-Klick explizit signalisiert,
+  // dass er den Titel umschreiben will. Bei Bedarf kann er den Titel
+  // anschließend in Freshdesk manuell korrigieren.
 
   // Freshdesk-Update
   try {
@@ -2575,7 +2567,7 @@ WICHTIG: Antworte AUSSCHLIESSLICH mit dem Stichpunkt, kein Text drumherum, keine
       _fdAiSummaryCache.delete(String(t.id));
       loadFreshdeskTicketsPreview();
     }
-    toast('Titel aktualisiert', 'success', 2500);
+    toast('✓ Titel aktualisiert: „' + (newTitle.length > 60 ? newTitle.slice(0, 57) + '…' : newTitle) + '"', 'success', 4500);
   } catch (e) {
     toast('Fehler beim Update: ' + (e.message || e), 'error', 7000);
   } finally {
