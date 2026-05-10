@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.48';
+const APP_VERSION = 'v3.49';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2433,8 +2433,11 @@ let _voiceState = {
   processing: false,
   context: null,        // { customers, articles, contacts }
   ttsEnabled: true,
-  ttsSpeaking: false,   // KI spricht gerade (für UI-Indikator + Stop-Button)
-  handsFree: true       // nach KI-Antwort automatisch wieder zuhören (bei needs_input)
+  ttsSpeaking: false,
+  handsFree: true,
+  manualItems: [],      // [{article_id, qty, sku, name}] — manuell ausgewählte Artikel
+  articlePickerOpen: false,
+  articleSearch: ''
 };
 
 // TTS-State (außerhalb von _voiceState, damit nicht resetet wird)
@@ -2484,7 +2487,8 @@ function openVoiceAssistant() {
   _voiceState = {
     recognition: null, recording: false, interim: '',
     history: [], lastResponse: null, processing: false,
-    context: null, ttsEnabled: true, ttsSpeaking: false
+    context: null, ttsEnabled: true, ttsSpeaking: false,
+    handsFree: true, manualItems: [], articlePickerOpen: false, articleSearch: ''
   };
   openModal(`<div id="voiceAssistantWrap" class="p-4 sm:p-6"></div>`, { maxWidth: 'max-w-2xl' });
   _renderVoiceAssistant();
@@ -2581,17 +2585,11 @@ function _renderVoiceAssistant() {
       </p>
     </div>
 
-    ${_voiceState.lastResponse?.status === 'ready' ? `
-      <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4">
-        <p class="text-xs font-semibold text-emerald-900 mb-1 flex items-center gap-1.5">
-          <i data-lucide="check-circle-2" class="w-4 h-4"></i> Bereit zum Anlegen
-        </p>
-        <p class="text-xs text-ink-700 mb-2">Ich erzeuge ein Angebots-Skelett mit den genannten Artikeln und öffne den Editor.</p>
-        <button type="button" onclick="prepareQuoteFromVoice()" class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-emerald-700 inline-flex items-center gap-2">
-          <i data-lucide="file-plus" class="w-4 h-4"></i> Angebot vorbereiten + öffnen
-        </button>
-      </div>
-    ` : ''}
+    ${_renderManualItemsBlock()}
+
+    ${_renderArticlePickerBlock()}
+
+    ${_renderReadyBlock()}
 
     <div class="flex items-center justify-between text-xs text-ink-700 pt-2 border-t border-ink-100 flex-wrap gap-2">
       <div class="flex items-center gap-3 flex-wrap">
@@ -2621,6 +2619,153 @@ function closeVoiceAssistant() {
   try { if (_voiceState.recognition) _voiceState.recognition.abort(); } catch (_) {}
   try { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); } catch (_) {}
   closeModal();
+}
+
+/* ========== Manuelle Artikel-Auswahl im Sprachassistenten ========== */
+
+// Liste der bereits hinzugefügten manuellen Items + Toggle für den Picker
+function _renderManualItemsBlock() {
+  const items = _voiceState.manualItems || [];
+  const open = _voiceState.articlePickerOpen;
+  return `
+    <div class="mb-3 flex items-center gap-2 flex-wrap">
+      <button type="button" onclick="${open ? 'closeArticlePicker()' : 'openArticlePicker()'}" class="${open ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-white text-ink-700 border-ink-200'} border rounded-lg px-3 py-1.5 text-xs font-medium hover:border-purple-300 inline-flex items-center gap-1.5">
+        <i data-lucide="${open ? 'x' : 'list-plus'}" class="w-3.5 h-3.5"></i>
+        ${open ? 'Picker schließen' : 'Artikel manuell auswählen'}
+        ${items.length > 0 ? `<span class="ml-1 bg-purple-600 text-white rounded-full px-1.5 text-[10px] font-bold">${items.length}</span>` : ''}
+      </button>
+      ${items.length > 0 ? `<button type="button" onclick="clearManualItems()" class="text-xs text-ink-500 hover:text-red-600 inline-flex items-center gap-1"><i data-lucide="trash" class="w-3 h-3"></i> Alle entfernen</button>` : ''}
+    </div>
+    ${items.length > 0 ? `
+      <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-3">
+        <p class="text-[10px] uppercase tracking-wider text-emerald-700 mb-2 font-semibold">Manuell ausgewählt (${items.length})</p>
+        <div class="space-y-1">
+          ${items.map(it => `
+            <div class="flex items-center gap-2 bg-white rounded-lg px-2 py-1.5 border border-emerald-100">
+              <span class="text-xs font-mono text-ink-500 shrink-0">${escapeHtml(it.sku || '–')}</span>
+              <span class="text-sm font-medium text-ink-900 truncate flex-1 min-w-0">${escapeHtml(it.name || '')}</span>
+              <input type="number" min="1" value="${it.qty}" onchange="updateManualItemQty('${it.article_id}', this.value)" class="w-14 px-2 py-0.5 border border-ink-200 rounded text-xs text-center">
+              <button type="button" onclick="removeManualItem('${it.article_id}')" class="text-ink-400 hover:text-red-600 p-0.5">
+                <i data-lucide="x" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    ` : ''}
+  `;
+}
+
+// Inline-Picker mit Suche + Treffer-Liste + Hinzufügen
+function _renderArticlePickerBlock() {
+  if (!_voiceState.articlePickerOpen) return '';
+  const ctx = _voiceState.context || { articles: [] };
+  const q = (_voiceState.articleSearch || '').toLowerCase().trim();
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const filtered = !tokens.length ? ctx.articles.slice(0, 30) : ctx.articles.filter(a => {
+    const f = a.fields || {};
+    const haystack = [f.sku, f.article_no, f.name, f.manufacturer, f.name2, f.description].filter(Boolean).join(' ').toLowerCase();
+    return tokens.every(t => haystack.includes(t));
+  }).slice(0, 30);
+  return `
+    <div class="bg-ink-50 border border-ink-200 rounded-xl p-3 mb-3">
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-xs font-semibold text-ink-700 flex items-center gap-1.5"><i data-lucide="search" class="w-3.5 h-3.5"></i> Artikel suchen</p>
+        <span class="text-[11px] text-ink-500">${filtered.length}${ctx.articles.length > 30 ? '/' + ctx.articles.length : ''} Treffer</span>
+      </div>
+      <input type="search" id="voiceArticleSearch" oninput="setArticleSearch(this.value)" value="${escapeHtml(_voiceState.articleSearch)}" placeholder="SKU, Name, Hersteller… (Tokens getrennt mit Leerzeichen)" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-purple-500/30">
+      <div class="space-y-1 max-h-[40vh] overflow-y-auto">
+        ${filtered.length === 0 ? '<p class="text-xs text-ink-500 italic p-2">Keine Treffer</p>' : filtered.map(a => {
+          const f = a.fields || {};
+          const sku = f.sku || f.article_no || '';
+          const name = f.name || '';
+          const mfg = f.manufacturer || '';
+          return `
+            <div class="bg-white border border-ink-200 rounded-lg p-2 flex items-center gap-2">
+              <div class="flex-1 min-w-0">
+                <p class="text-[11px] font-mono text-ink-500 truncate">${escapeHtml(sku)}${mfg ? ' · ' + escapeHtml(mfg) : ''}</p>
+                <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(name)}</p>
+              </div>
+              <input type="number" id="picker-qty-${a.id}" value="1" min="1" class="w-14 px-2 py-1 border border-ink-200 rounded text-sm text-center shrink-0">
+              <button type="button" onclick="addArticleManually('${a.id}')" class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-2.5 py-1.5 text-xs inline-flex items-center gap-1 shrink-0">
+                <i data-lucide="plus" class="w-3 h-3"></i> Hinzufügen
+              </button>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// "Bereit"-Block: zeigt Anlegen-Button wenn Customer da + mind. 1 Item (KI oder manuell)
+function _renderReadyBlock() {
+  const r = _voiceState.lastResponse;
+  const customerOk = !!(r && r.matched && r.matched.customer_id);
+  const aiItems = (r?.matched?.items || []).filter(i => i.article_id);
+  const totalItems = aiItems.length + (_voiceState.manualItems?.length || 0);
+  const ready = customerOk && totalItems > 0;
+  if (!ready) return '';
+  return `
+    <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4">
+      <p class="text-xs font-semibold text-emerald-900 mb-1 flex items-center gap-1.5">
+        <i data-lucide="check-circle-2" class="w-4 h-4"></i> Bereit zum Anlegen — ${totalItems} Artikel
+      </p>
+      <p class="text-xs text-ink-700 mb-2">Ich erzeuge ein Angebots-Skelett (Status: Entwurf) mit allen Artikeln und öffne den Editor.</p>
+      <button type="button" onclick="prepareQuoteFromVoice()" class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-emerald-700 inline-flex items-center gap-2">
+        <i data-lucide="file-plus" class="w-4 h-4"></i> Angebot vorbereiten + öffnen
+      </button>
+    </div>
+  `;
+}
+
+function openArticlePicker() {
+  _voiceState.articlePickerOpen = true;
+  _renderVoiceAssistant();
+  setTimeout(() => document.getElementById('voiceArticleSearch')?.focus(), 50);
+}
+function closeArticlePicker() {
+  _voiceState.articlePickerOpen = false;
+  _voiceState.articleSearch = '';
+  _renderVoiceAssistant();
+}
+function setArticleSearch(q) {
+  _voiceState.articleSearch = q;
+  _renderVoiceAssistant();
+  // Focus + Cursor wiederherstellen
+  setTimeout(() => {
+    const inp = document.getElementById('voiceArticleSearch');
+    if (inp) { inp.focus(); inp.setSelectionRange(q.length, q.length); }
+  }, 0);
+}
+function addArticleManually(articleId) {
+  const ctx = _voiceState.context || { articles: [] };
+  const a = ctx.articles.find(x => x.id === articleId);
+  if (!a) return;
+  const f = a.fields || {};
+  const sku = f.sku || f.article_no || '';
+  const name = f.name || '';
+  const qtyInp = document.getElementById('picker-qty-' + articleId);
+  const qty = Math.max(1, parseInt(qtyInp?.value || '1', 10) || 1);
+  const existing = (_voiceState.manualItems || []).find(i => i.article_id === articleId);
+  if (existing) existing.qty += qty;
+  else (_voiceState.manualItems = _voiceState.manualItems || []).push({ article_id: articleId, qty, sku, name });
+  toast(`Hinzugefügt: ${qty}× ${sku || name}`, 'success', 1500);
+  _renderVoiceAssistant();
+}
+function removeManualItem(articleId) {
+  _voiceState.manualItems = (_voiceState.manualItems || []).filter(i => i.article_id !== articleId);
+  _renderVoiceAssistant();
+}
+function updateManualItemQty(articleId, val) {
+  const qty = Math.max(1, parseInt(val, 10) || 1);
+  const it = (_voiceState.manualItems || []).find(i => i.article_id === articleId);
+  if (it) it.qty = qty;
+}
+function clearManualItems() {
+  if (!confirm('Alle manuell ausgewählten Artikel entfernen?')) return;
+  _voiceState.manualItems = [];
+  _renderVoiceAssistant();
 }
 
 function startVoiceRecording() {
@@ -2890,20 +3035,33 @@ function resetVoiceConversation() {
   _renderVoiceAssistant();
 }
 
-// Legt Quote + QuoteItems aus dem letzten KI-Response-Set an
+// Legt Quote + QuoteItems aus dem letzten KI-Response-Set + manuell ausgewählten Items an
 async function prepareQuoteFromVoice() {
   const r = _voiceState.lastResponse;
-  if (!r || r.status !== 'ready') return;
   const cur = getCurrentCompany();
   if (!cur) { toast('Mandant fehlt', 'error'); return; }
-  const m = r.matched || {};
-  if (!m.customer_id) { toast('Kunde nicht erkannt', 'error'); return; }
+  const m = r?.matched || {};
+  if (!m.customer_id) { toast('Kunde nicht erkannt — bitte per Sprache nennen', 'error'); return; }
+  // Items kombinieren: KI-erkannte (mit article_id) + manuell ausgewählte
+  const aiItems = (Array.isArray(m.items) ? m.items : []).filter(it => it.article_id);
+  const manualItems = _voiceState.manualItems || [];
+  // Bei Duplikaten (gleicher article_id) Mengen aufaddieren
+  const merged = new Map();
+  [...aiItems, ...manualItems].forEach(it => {
+    const id = it.article_id;
+    const qty = Math.max(1, Number(it.qty) || 1);
+    if (merged.has(id)) merged.get(id).qty += qty;
+    else merged.set(id, { article_id: id, qty });
+  });
+  const allItems = [...merged.values()];
+  if (allItems.length === 0) { toast('Keine Artikel ausgewählt', 'error'); return; }
   try {
     const quoteNo = await nextQuoteNo(cur.id);
     const today = new Date();
     const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
     const iso = (d) => d.toISOString().slice(0, 10);
     const userTurns = _voiceState.history.filter(h => h.role === 'user').map(h => '> ' + h.content).join('\n');
+    const manualNote = manualItems.length > 0 ? `\nManuell ausgewählt:\n` + manualItems.map(i => `- ${i.qty}× ${i.sku} ${i.name}`).join('\n') : '';
     const fields = {
       quote_no: quoteNo,
       company_id: [cur.id],
@@ -2911,23 +3069,20 @@ async function prepareQuoteFromVoice() {
       date: iso(today),
       valid_until: iso(validUntil),
       status: 'Entwurf',
-      ai_summary: 'Per Sprache vorbereitet:\n' + userTurns
+      ai_summary: 'Per Sprache vorbereitet:\n' + userTurns + manualNote
     };
     if (m.contact_id) fields.contact_id = [m.contact_id];
     const created = await writeData('Quote', fields);
     // Items als QuoteItem anlegen — fehlertolerant pro Item
-    if (Array.isArray(m.items)) {
-      for (const it of m.items) {
-        if (!it.article_id) continue;
-        try {
-          await writeData('QuoteItem', {
-            quote_id: [created.id],
-            article_id: [it.article_id],
-            qty: Number(it.qty) || 1
-          });
-        } catch (e) {
-          console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message);
-        }
+    for (const it of allItems) {
+      try {
+        await writeData('QuoteItem', {
+          quote_id: [created.id],
+          article_id: [it.article_id],
+          qty: it.qty
+        });
+      } catch (e) {
+        console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message);
       }
     }
     // Cleanup: TTS stoppen, Recognition stoppen
