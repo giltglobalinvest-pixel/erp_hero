@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.65';
+const APP_VERSION = 'v3.66';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1394,7 +1394,9 @@ async function openFreshdeskTicket(ticketId) {
     },
     cache: { customers: [], contacts: [], articles: [] },
     articlePickerOpen: false,
-    articleSearch: ''
+    articleSearch: '',
+    linkedQuotes: [],          // Quotes mit freshdesk_ticket_id == ticketId
+    cachedAiLoaded: false      // true wenn KI-Analyse aus persistierter Note rekonstruiert wurde
   };
   // Modal mit Loading-Indicator zeigen
   openModal(`
@@ -1420,6 +1422,8 @@ async function openFreshdeskTicket(ticketId) {
     _fdTicketState.ticket = ticket;
     _fdTicketState.requester = ticket.requester || null;
     _renderFreshdeskTicket();
+    // Im Hintergrund: verknüpfte Quotes laden + ggf. persistierte KI-Analyse aus Notes wiederherstellen
+    _loadLinkedQuotesAndCachedAi(ticketId);
   } catch (e) {
     const body = document.getElementById('fdTicketBody');
     if (body) {
@@ -1430,6 +1434,117 @@ async function openFreshdeskTicket(ticketId) {
       if (window.lucide) lucide.createIcons();
     }
   }
+}
+
+// Marker für persistierte KI-Daten in der Note (HTML-Comment am Ende der Note).
+// Form: <!--AI_DATA:base64-encoded-JSON--> (Base64 vermeidet HTML-Konflikte mit Sonderzeichen).
+const FD_AI_DATA_MARKER_START = '<!--AI_DATA:';
+const FD_AI_DATA_MARKER_END   = '-->';
+
+function _encodeAiData(obj) {
+  try {
+    return FD_AI_DATA_MARKER_START + btoa(unescape(encodeURIComponent(JSON.stringify(obj)))) + FD_AI_DATA_MARKER_END;
+  } catch (_) { return ''; }
+}
+function _decodeAiData(noteBody) {
+  if (!noteBody) return null;
+  const startIdx = noteBody.indexOf(FD_AI_DATA_MARKER_START);
+  if (startIdx < 0) return null;
+  const dataStart = startIdx + FD_AI_DATA_MARKER_START.length;
+  const endIdx = noteBody.indexOf(FD_AI_DATA_MARKER_END, dataStart);
+  if (endIdx < 0) return null;
+  const b64 = noteBody.substring(dataStart, endIdx).trim();
+  try {
+    return JSON.parse(decodeURIComponent(escape(atob(b64))));
+  } catch (e) {
+    console.warn('[FD] AI_DATA-Decode fehlgeschlagen:', e.message);
+    return null;
+  }
+}
+
+// Lädt verknüpfte Quotes (per freshdesk_ticket_id) + sucht in Conversations
+// nach persistierter KI-Analyse, restored State daraus.
+async function _loadLinkedQuotesAndCachedAi(ticketId) {
+  // 1) Quotes parallel laden
+  try {
+    const allQuotes = await readData('Quote');
+    const tidStr = String(ticketId);
+    _fdTicketState.linkedQuotes = allQuotes
+      .filter(q => String(q.fields.freshdesk_ticket_id || '') === tidStr)
+      .sort((a, b) => (b.fields.date || '').localeCompare(a.fields.date || ''));
+  } catch (_) { _fdTicketState.linkedQuotes = []; }
+
+  // 2) Conversations für KI-Cache holen (best-effort, leise)
+  try {
+    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    const list = (Array.isArray(conv) ? conv : []).slice()
+      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    // Letzte private Note mit AI-Marker suchen
+    const aiNote = list.find(c => {
+      if (!c || !c.private) return false;
+      const raw = String(c.body || c.body_text || '');
+      return raw.includes(FD_AI_SUMMARY_MARKER) || raw.includes('KI-Zusammenfassung');
+    });
+    if (aiNote) {
+      // Conversations cachen, damit Verlauf-Toggle nicht doppelt lädt
+      _fdTicketState.conversations = list.slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      // Versuche, strukturierte AI_DATA aus dem Body zu extrahieren
+      const aiData = _decodeAiData(aiNote.body || aiNote.body_text || '');
+      if (aiData) {
+        // State aus persistierten Daten rekonstruieren
+        _fdTicketState.summary    = aiData.summary || _fdTicketState.summary;
+        _fdTicketState.extracted  = aiData.extracted || _fdTicketState.extracted;
+        _fdTicketState.editFields = Object.assign({}, _fdTicketState.editFields, aiData.editFields || {});
+        // Match aus Customer/Contact-IDs ableiten falls möglich (Caches müssen geladen sein)
+        _fdTicketState.cachedAiLoaded = true;
+        // Caches asynchron laden, dann Match auflösen + neu rendern
+        await _loadFdCachesIfNeeded();
+        _resolveFdMatchFromIds();
+      } else {
+        // Fallback: nur den Text-Inhalt als Summary übernehmen, ohne strukturierte Daten
+        const fullText = _fdHtmlToText(aiNote.body || aiNote.body_text || '');
+        const lines = fullText.split('\n');
+        const headerIdx = lines.findIndex(l => l.includes('KI-Zusammenfassung') || l.includes('🤖'));
+        const cleanText = headerIdx >= 0 ? lines.slice(headerIdx + 1).join('\n').trim() : fullText;
+        _fdTicketState.summary = cleanText;
+        _fdTicketState.cachedAiLoaded = true;
+      }
+    }
+  } catch (e) {
+    console.warn('[FD] Cached-AI-Loading fehlgeschlagen:', e.message);
+  }
+  _renderFreshdeskTicket();
+}
+
+// Caches (Customer/Contact/Article) laden falls noch nicht vorhanden
+async function _loadFdCachesIfNeeded() {
+  if (_fdTicketState.cache?.customers?.length) return;
+  const cur = getCurrentCompany();
+  try {
+    const [allCustomers, allContacts, allArticles] = await Promise.all([
+      readData('Customer').catch(() => []),
+      readData('Contact').catch(() => []),
+      readData('Article').catch(() => [])
+    ]);
+    _fdTicketState.cache = {
+      customers: allCustomers.filter(c => (c.fields.company_id || []).includes(cur?.id) && c.fields.status !== 'archiviert')
+        .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de')),
+      contacts: allContacts,
+      articles: allArticles.filter(a => (a.fields.company_id || []).includes(cur?.id) && a.fields.status !== 'archiviert')
+        .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'))
+    };
+  } catch (_) {}
+}
+
+// Match-Status aus EditFields-IDs ableiten (für den grünen Status-Banner)
+function _resolveFdMatchFromIds() {
+  const ef = _fdTicketState.editFields || {};
+  const cache = _fdTicketState.cache || {};
+  if (!ef.customer_id) { _fdTicketState.match = null; return; }
+  const customer = (cache.customers || []).find(c => c.id === ef.customer_id);
+  if (!customer) { _fdTicketState.match = null; return; }
+  const contact = ef.contact_id ? (cache.contacts || []).find(c => c.id === ef.contact_id) : null;
+  _fdTicketState.match = { customer, contact };
 }
 
 function _renderFreshdeskTicket() {
@@ -1491,6 +1606,8 @@ function _renderFreshdeskTicket() {
         })()}</div>
       </div>
 
+      ${_renderFdLinkedQuotesBlock()}
+
       <!-- KI-Zusammenfassung -->
       <div class="border-t border-ink-100 pt-3">
         ${(() => {
@@ -1503,10 +1620,12 @@ function _renderFreshdeskTicket() {
             </div>`;
           }
           if (_fdTicketState.summary) {
+            const cached = _fdTicketState.cachedAiLoaded;
             return `<div class="bg-purple-50 border border-purple-200 rounded-xl p-3">
               <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
                 <p class="text-xs font-semibold text-purple-900 flex items-center gap-1.5">
-                  <i data-lucide="sparkles" class="w-4 h-4"></i> KI-Zusammenfassung (Vorschau, noch nicht gespeichert)
+                  <i data-lucide="sparkles" class="w-4 h-4"></i>
+                  ${cached ? 'KI-Zusammenfassung (aus früherer Sitzung wiederhergestellt)' : 'KI-Zusammenfassung (Vorschau, noch nicht gespeichert)'}
                 </p>
                 <div class="flex gap-1.5 flex-wrap">
                   <button type="button" onclick="generateFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2 py-1 border border-purple-300 text-purple-700 hover:bg-purple-100 rounded inline-flex items-center gap-1 disabled:opacity-50">
@@ -1909,12 +2028,21 @@ async function saveFreshdeskTicketSummary() {
   _fdTicketState.summarySaving = true;
   _renderFreshdeskTicket();
   try {
-    // Note posten — der 🤖-Marker im Body ist der einzige „Tag", den wir brauchen.
-    // Die Übersicht erkennt KI-Zusammenfassungen anhand der LETZTEN privaten Notiz.
+    // Note posten — strukturierte AI-Daten als HTML-Comment am Ende anhängen,
+    // damit das Ticket beim erneuten Öffnen den State (Customer, Contact, Items, Edit-Felder)
+    // ohne neuen KI-Call wiederherstellen kann.
+    const aiPayload = {
+      version: 1,
+      summary: s,
+      extracted: _fdTicketState.extracted || null,
+      editFields: _fdTicketState.editFields || null,
+      savedAt: new Date().toISOString()
+    };
     const noteHtml =
       '<p><strong>' + FD_AI_SUMMARY_MARKER + '</strong> · erstellt am ' + escapeHtml(new Date().toLocaleString('de-DE')) +
       (APP_KEYS.user?.name ? ' von ' + escapeHtml(APP_KEYS.user.name) : '') + '</p>' +
-      '<p>' + escapeHtml(s).replace(/\n/g, '<br>') + '</p>';
+      '<p>' + escapeHtml(s).replace(/\n/g, '<br>') + '</p>' +
+      '\n' + _encodeAiData(aiPayload);
     await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
       method: 'POST',
       body: { body: noteHtml, private: true }
@@ -2012,6 +2140,37 @@ function discardFreshdeskTicketSummary() {
    Zeigt Match-Ergebnis (vorhandener Kunde im ERP) oder von der KI
    extrahierte Daten + Buttons zum Anlegen + Angebot erzeugen.
    ============================================================ */
+// Block mit verknüpften Quotes (per freshdesk_ticket_id). Wird beim Ticket-Open gefüllt.
+function _renderFdLinkedQuotesBlock() {
+  const linked = _fdTicketState.linkedQuotes || [];
+  if (linked.length === 0) return '';
+  return `
+    <div class="border-t border-ink-100 pt-3">
+      <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-2 font-semibold flex items-center gap-1.5">
+        <i data-lucide="link-2" class="w-3.5 h-3.5"></i> Verknüpfte Angebote (${linked.length})
+      </p>
+      <div class="space-y-1">
+        ${linked.map(q => {
+          const f = q.fields || {};
+          const status = f.status || 'Entwurf';
+          const total = f.total_gross != null && f.total_gross !== '' ? formatPrice(f.total_gross) + ' €' : '';
+          const dt = f.date ? new Date(f.date).toLocaleDateString('de-DE') : '';
+          return `
+            <button type="button" onclick="closeModal();setTimeout(()=>openQuoteModal('${q.id}'),120)" class="w-full text-left bg-white border border-ink-200 rounded-lg px-2.5 py-2 hover:border-brand-300 hover:bg-brand-50/30 flex items-center gap-2 transition group">
+              <span class="text-xs font-mono text-ink-500 shrink-0">${escapeHtml(f.quote_no || '–')}</span>
+              <span class="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded font-semibold ${status === 'Entwurf' ? 'bg-ink-100 text-ink-600' : status === 'Versendet' ? 'bg-blue-100 text-blue-700' : status === 'Angenommen' ? 'bg-emerald-100 text-emerald-700' : status === 'Abgelehnt' ? 'bg-red-100 text-red-700' : 'bg-ink-100 text-ink-600'}">${escapeHtml(status)}</span>
+              <span class="text-xs text-ink-700 truncate flex-1">${escapeHtml(f.title || '–')}</span>
+              <span class="text-xs text-ink-500 shrink-0">${escapeHtml(dt)}</span>
+              ${total ? `<span class="text-xs font-mono tabular-nums text-ink-900 shrink-0">${escapeHtml(total)}</span>` : ''}
+              <i data-lucide="chevron-right" class="w-3.5 h-3.5 text-ink-400 shrink-0 group-hover:text-brand-600"></i>
+            </button>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
 // Zentraler Editier-Block: Customer + Contact + Felder + Items + Anlegen-Button.
 // Alle Werte vorausgefüllt vom KI-Match, vom User editierbar bevor Quote angelegt wird.
 function _renderAiEditableFieldsBlock() {
