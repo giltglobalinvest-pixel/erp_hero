@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.45';
+const APP_VERSION = 'v3.46';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2434,8 +2434,45 @@ let _voiceState = {
   lastResponse: null,   // letzte parsed JSON-Antwort
   processing: false,
   context: null,        // { customers, articles, contacts }
-  ttsEnabled: true
+  ttsEnabled: true,
+  ttsSpeaking: false    // KI spricht gerade (für UI-Indikator + Stop-Button)
 };
+
+// TTS-State (außerhalb von _voiceState, damit nicht resetet wird)
+let _ttsWarmedUp = false;
+let _ttsVoice = null;
+
+// Beste deutsche Stimme finden (asynchron, weil voices Liste oft erst nach Boot fertig ist)
+function _ttsPickVoice() {
+  if (!('speechSynthesis' in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices.length) return null;
+  const de = voices.filter(v => /^de(-|_)/i.test(v.lang) || v.lang === 'de');
+  if (de.length === 0) return null;
+  // Bevorzuge bekannte gute deutsche Namen, sonst erste deutsche Stimme
+  const preferred = de.find(v => /(anna|helena|petra|markus|klaus|stefan|google|premium|enhanced)/i.test(v.name));
+  return preferred || de[0];
+}
+if ('speechSynthesis' in window) {
+  // Voices kommen oft asynchron nach App-Boot
+  try {
+    window.speechSynthesis.addEventListener('voiceschanged', () => { _ttsVoice = _ttsPickVoice(); });
+    _ttsVoice = _ttsPickVoice();
+  } catch (_) {}
+}
+
+// iOS Safari blockt TTS bis es einmalig aus User-Click ausgelöst wird.
+// Daher: beim ersten User-Click ein leeres Utterance schicken (volume 0).
+function _ttsWarmup() {
+  if (_ttsWarmedUp || !('speechSynthesis' in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0;
+    u.lang = 'de-DE';
+    window.speechSynthesis.speak(u);
+    _ttsWarmedUp = true;
+  } catch (_) {}
+}
 
 function openVoiceAssistant() {
   if (!_proxyBase()) { toast('KI nicht verfügbar — API-Proxy nicht konfiguriert', 'error', 6000); return; }
@@ -2444,11 +2481,11 @@ function openVoiceAssistant() {
     toast('Spracherkennung ist in deinem Browser nicht verfügbar. Empfehlung: Safari oder Chrome.', 'error', 7000);
     return;
   }
-  // Reset State
+  // Reset State (TTS-State bleibt persistent, der gehört nicht hierher)
   _voiceState = {
     recognition: null, recording: false, interim: '',
     history: [], lastResponse: null, processing: false,
-    context: null, ttsEnabled: true
+    context: null, ttsEnabled: true, ttsSpeaking: false
   };
   openModal(`<div id="voiceAssistantWrap" class="p-4 sm:p-6"></div>`, { maxWidth: 'max-w-2xl' });
   _renderVoiceAssistant();
@@ -2505,6 +2542,23 @@ function _renderVoiceAssistant() {
       </div>
     ` : ''}
 
+    ${_voiceState.ttsSpeaking ? `
+      <div class="bg-purple-100 border border-purple-300 rounded-xl px-3 py-2 mb-3 flex items-center justify-between gap-2">
+        <p class="text-xs text-purple-900 flex items-center gap-2">
+          <span class="inline-flex gap-0.5">
+            <span class="w-1 h-3 bg-purple-600 rounded animate-pulse" style="animation-delay:0ms"></span>
+            <span class="w-1 h-4 bg-purple-600 rounded animate-pulse" style="animation-delay:150ms"></span>
+            <span class="w-1 h-2 bg-purple-600 rounded animate-pulse" style="animation-delay:300ms"></span>
+            <span class="w-1 h-4 bg-purple-600 rounded animate-pulse" style="animation-delay:450ms"></span>
+          </span>
+          <span class="font-medium">KI spricht…</span>
+        </p>
+        <button type="button" onclick="stopVoiceTts()" class="text-[11px] bg-white border border-purple-300 text-purple-700 hover:bg-purple-50 rounded-lg px-2 py-1 inline-flex items-center gap-1">
+          <i data-lucide="square" class="w-3 h-3"></i> Stop
+        </button>
+      </div>
+    ` : ''}
+
     <div class="bg-ink-50 border border-ink-200 rounded-xl p-4 mb-4 text-center">
       <button type="button" onclick="${_voiceState.recording ? 'stopVoiceRecording()' : 'startVoiceRecording()'}"
               ${_voiceState.processing ? 'disabled' : ''}
@@ -2533,13 +2587,14 @@ function _renderVoiceAssistant() {
       </div>
     ` : ''}
 
-    <div class="flex items-center justify-between text-xs text-ink-500 pt-2 border-t border-ink-100">
-      <label class="flex items-center gap-1.5 cursor-pointer">
-        <input type="checkbox" ${_voiceState.ttsEnabled ? 'checked' : ''} onchange="_voiceState.ttsEnabled = this.checked" class="w-3.5 h-3.5 rounded">
-        <span>Antwort vorlesen</span>
+    <div class="flex items-center justify-between text-xs text-ink-700 pt-2 border-t border-ink-100">
+      <label class="flex items-center gap-2 cursor-pointer select-none ${_voiceState.ttsEnabled ? 'text-purple-700' : 'text-ink-500'}">
+        <input type="checkbox" ${_voiceState.ttsEnabled ? 'checked' : ''} onchange="_voiceState.ttsEnabled = this.checked; if (!this.checked) stopVoiceTts();" class="w-4 h-4 rounded accent-purple-600">
+        <i data-lucide="${_voiceState.ttsEnabled ? 'volume-2' : 'volume-x'}" class="w-3.5 h-3.5"></i>
+        <span class="font-medium">KI antwortet per Sprache</span>
       </label>
       ${_voiceState.history.length > 0 ? `
-        <button type="button" onclick="resetVoiceConversation()" class="hover:text-ink-900 inline-flex items-center gap-1">
+        <button type="button" onclick="resetVoiceConversation()" class="text-ink-500 hover:text-ink-900 inline-flex items-center gap-1">
           <i data-lucide="rotate-ccw" class="w-3 h-3"></i> Neu starten
         </button>
       ` : ''}
@@ -2556,6 +2611,8 @@ function closeVoiceAssistant() {
 }
 
 function startVoiceRecording() {
+  // iOS-Warmup: einmal pro Session aus User-Click triggern, sonst schweigt Safari
+  _ttsWarmup();
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) return;
   const recognition = new SR();
@@ -2717,10 +2774,21 @@ function _speakText(text) {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(String(text || '').slice(0, 500));
     u.lang = 'de-DE';
-    u.rate = 1.05;
+    u.rate = 1.0;
     u.pitch = 1.0;
+    if (!_ttsVoice) _ttsVoice = _ttsPickVoice();
+    if (_ttsVoice) u.voice = _ttsVoice;
+    u.onstart = () => { _voiceState.ttsSpeaking = true; _renderVoiceAssistant(); };
+    u.onend   = () => { _voiceState.ttsSpeaking = false; _renderVoiceAssistant(); };
+    u.onerror = () => { _voiceState.ttsSpeaking = false; _renderVoiceAssistant(); };
     window.speechSynthesis.speak(u);
   } catch (e) { /* ignore */ }
+}
+
+function stopVoiceTts() {
+  if ('speechSynthesis' in window) try { window.speechSynthesis.cancel(); } catch (_) {}
+  _voiceState.ttsSpeaking = false;
+  _renderVoiceAssistant();
 }
 
 function resetVoiceConversation() {
