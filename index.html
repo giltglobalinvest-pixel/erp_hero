@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.60';
+const APP_VERSION = 'v3.61';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2155,6 +2155,36 @@ function _setSelectValueWithFallback(sel, value) {
    - Keiner hat ein Bundle → null (oder globaler Default)
    ============================================================ */
 
+// Baut ein vollständiges QuoteItem-fields-Object aus einem Article-Record + Menge + Position.
+// Parität mit dem manuellen onQiArticleChange-Pfad (description als HTML mit name1, Preis/Einheit/MwSt aus Article).
+function _aiBuildQuoteItemFields(article, qty, pos, quoteId) {
+  const af = (article && article.fields) || {};
+  const titleLine = (af.name1 || '').trim();
+  const descBody  = (af.description || '').trim();
+  const titleHtml = titleLine ? '<p>' + escapeHtml(titleLine) + '</p>' : '';
+  const bodyHtml  = descBody
+    ? descBody.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('')
+    : '';
+  const description = titleHtml + bodyHtml;
+  const unitPrice = parseFloat(af.sales_price) || 0;
+  const vatRate   = parseFloat(af.vat_rate) || 19;
+  const unit      = (af.unit || 'Stück').trim();
+  const safeQty   = Math.max(1, Number(qty) || 1);
+  return {
+    quote_id:       [quoteId],
+    article_id:     [article.id],
+    pos:            pos,
+    qty:            safeQty,
+    unit:           unit,
+    unit_price_net: unitPrice,
+    discount_pct:   0,
+    vat_rate:       vatRate,
+    description:    description,
+    line_total_net: typeof calcLineNet === 'function' ? calcLineNet(safeQty, unitPrice, 0) : (safeQty * unitPrice),
+    label:          'Pos.' + pos + ' · ' + (titleLine.substring(0, 50) || '–')
+  };
+}
+
 // docType: 'Angebot' oder 'Auftrag'
 async function pickBundleForItems(items, docType) {
   const result = { bundleId: null, conflict: false, candidates: [] };
@@ -2283,15 +2313,23 @@ async function _aiCreateQuoteSkeleton(customerId, contactId) {
     ]);
   } catch (_) {}
   const created = await writeData('Quote', fields);
-  // QuoteItems aus den KI-erkannten Artikeln anlegen
+  // QuoteItems vollständig anlegen — Article-Daten frisch laden für korrekten Snapshot
   if (fdItems.length > 0) {
+    let allArticles = [];
+    try { allArticles = await readData('Article'); } catch (_) {}
+    const articleById = new Map(allArticles.map(a => [a.id, a]));
+    let pos = 1;
     for (const it of fdItems) {
       try {
-        await writeData('QuoteItem', {
-          quote_id: [created.id],
-          article_id: [it.article_id],
-          qty: Math.max(1, Number(it.qty) || 1)
-        });
+        const article = articleById.get(it.article_id);
+        if (!article) {
+          await writeData('QuoteItem', {
+            quote_id: [created.id], article_id: [it.article_id], qty: Math.max(1, Number(it.qty) || 1), pos: pos
+          });
+        } else {
+          await writeData('QuoteItem', _aiBuildQuoteItemFields(article, it.qty, pos, created.id));
+        }
+        pos++;
       } catch (e) {
         console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message);
       }
@@ -3565,14 +3603,23 @@ async function prepareQuoteFromVoice() {
     }
     if (chosenBundleId) fields.bundle_id = chosenBundleId;
     const created = await writeData('Quote', fields);
-    // Items als QuoteItem anlegen — fehlertolerant pro Item
+    // Items als QuoteItem anlegen — vollständig wie beim manuellen Hinzufügen
+    // (Pos fortlaufend, description aus name1, unit/preis/mwst aus Article)
+    const ctx = _voiceState.context || { articles: [] };
+    const articleById = new Map(ctx.articles.map(a => [a.id, a]));
+    let pos = 1;
     for (const it of allItems) {
       try {
-        await writeData('QuoteItem', {
-          quote_id: [created.id],
-          article_id: [it.article_id],
-          qty: it.qty
-        });
+        const article = articleById.get(it.article_id);
+        if (!article) {
+          // Fallback: minimal anlegen wenn Artikel nicht im Cache (sollte selten passieren)
+          await writeData('QuoteItem', {
+            quote_id: [created.id], article_id: [it.article_id], qty: it.qty, pos: pos
+          });
+        } else {
+          await writeData('QuoteItem', _aiBuildQuoteItemFields(article, it.qty, pos, created.id));
+        }
+        pos++;
       } catch (e) {
         console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message);
       }
@@ -10041,13 +10088,24 @@ async function openQuoteModal(id) {
   ensureFields('Company', [
     { name: 'brand_color', type: 'singleLineText' },
   ]).catch(()=>{});
-  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [], allAttachments = [], allAddresses = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allTemplates = [], allCompanies = [], allCustomFields = [], allPaymentTerms = [], allDeliveryTerms = [], allAttachments = [], allAddresses = [], allArticlesForCache = [];
   try {
-    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms, allAttachments, allAddresses] = await Promise.all([
+    [allCustomers, allContacts, allTemplates, allCompanies, allCustomFields, allPaymentTerms, allDeliveryTerms, allAttachments, allAddresses, allArticlesForCache] = await Promise.all([
       readData('Customer'), readData('Contact'), readData('Textemplate'), readData('Company'), readData('CustomField'),
-      readData('PaymentTerm'), readData('DeliveryTerm'), readData('Attachment'), readData('Address').catch(() => [])
+      readData('PaymentTerm'), readData('DeliveryTerm'), readData('Attachment'), readData('Address').catch(() => []),
+      readData('Article').catch(() => [])
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
+  // Article-Lookup-Cache für Item-Anzeige (Artikelnummer + Hersteller-Nr in der Position-Row sichtbar machen)
+  window._quoteItemArticleLookup = {};
+  allArticlesForCache.forEach(a => {
+    const af = a.fields || {};
+    window._quoteItemArticleLookup[a.id] = {
+      article_no: af.article_no || '',
+      manufacturer_no: af.manufacturer_no || '',
+      name1: af.name1 || ''
+    };
+  });
   const attachments = allAttachments.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv').sort((a,b)=>(a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const paymentTerms = allPaymentTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
   const deliveryTerms = allDeliveryTerms.filter(t => (t.fields.company_id || []).includes(cur.id) && (t.fields.status || 'aktiv') === 'aktiv').sort((a,b)=> (a.fields.name||'').localeCompare(b.fields.name||'','de'));
@@ -12007,6 +12065,18 @@ function quoteItemRow(quoteId, it) {
   // HTML aus Quill-Editor sauber als Text rendern (erste nicht-leere Zeile)
   const split = splitDescriptionTitleAndBody(f.description || '');
   const desc = split.title || '–';
+  // Artikelnummer + Hersteller-Nr aus Lookup-Cache (befüllt in openQuoteModal)
+  const aid = (f.article_id || [])[0];
+  const aLookup = aid && window._quoteItemArticleLookup ? window._quoteItemArticleLookup[aid] : null;
+  const artNo  = aLookup?.article_no || '';
+  const mfgNo  = aLookup?.manufacturer_no || '';
+  const artBadgeHtml = (artNo || mfgNo)
+    ? '<p class="text-[11px] text-ink-500 font-mono mt-0.5 truncate">' +
+        (artNo ? escapeHtml(artNo) : '') +
+        (artNo && mfgNo ? ' · ' : '') +
+        (mfgNo ? '<span class="text-ink-400">Hersteller: ' + escapeHtml(mfgNo) + '</span>' : '') +
+      '</p>'
+    : '';
   const ek = +(f.purchase_price || 0);
   const lineEk = (+(f.qty || 0)) * ek;
   const margin = lineNet - lineEk;
@@ -12029,6 +12099,7 @@ function quoteItemRow(quoteId, it) {
             <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
+          ${artBadgeHtml}
           <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
           ${internalLine}
         </div>
@@ -14192,15 +14263,26 @@ async function openOrderModal(id, opts = {}) {
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
   await ensureOrderSchema();
 
-  let f = {}, items = [], allCustomers = [], allContacts = [], allQuotes = [], allAddresses = [], allPaymentTerms = [], allDeliveryTerms = [], allBundles = [], allTemplates = [], allCompanies = [];
+  let f = {}, items = [], allCustomers = [], allContacts = [], allQuotes = [], allAddresses = [], allPaymentTerms = [], allDeliveryTerms = [], allBundles = [], allTemplates = [], allCompanies = [], allArticlesForOrderCache = [];
   try {
-    [allCustomers, allContacts, allQuotes, allAddresses, allPaymentTerms, allDeliveryTerms, allBundles, allTemplates, allCompanies] = await Promise.all([
+    [allCustomers, allContacts, allQuotes, allAddresses, allPaymentTerms, allDeliveryTerms, allBundles, allTemplates, allCompanies, allArticlesForOrderCache] = await Promise.all([
       readData('Customer'), readData('Contact'), readData('Quote'),
       readData('Address').catch(() => []), readData('PaymentTerm'), readData('DeliveryTerm'),
       readData('QuoteBundle').catch(() => []), readData('Textemplate').catch(() => []),
-      readData('Company').catch(() => [])
+      readData('Company').catch(() => []),
+      readData('Article').catch(() => [])
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
+  // Article-Lookup-Cache für Item-Anzeige
+  window._orderItemArticleLookup = {};
+  allArticlesForOrderCache.forEach(a => {
+    const af = a.fields || {};
+    window._orderItemArticleLookup[a.id] = {
+      article_no: af.article_no || '',
+      manufacturer_no: af.manufacturer_no || '',
+      name1: af.name1 || ''
+    };
+  });
   // Order-Bundles + Order-Templates Caches
   window._orderBundles = allBundles
     .filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert' && bundleDocType(b) === 'Auftrag')
@@ -14869,6 +14951,18 @@ function orderItemRow(orderId, it, locked) {
     discAbs > 0 ? 'Rabatt: −' + formatPrice(discAbs) + ' €' : '',
     'MwSt ' + (f.vat_rate || 0) + '%'
   ].filter(Boolean).join(' · ');
+  // Artikelnummer + Hersteller-Nr aus Lookup-Cache (für Order analog zu Quote)
+  const aid = (f.article_id || [])[0];
+  const aLookup = aid && window._orderItemArticleLookup ? window._orderItemArticleLookup[aid] : null;
+  const artNo  = aLookup?.article_no || '';
+  const mfgNo  = aLookup?.manufacturer_no || '';
+  const artBadgeHtml = (artNo || mfgNo)
+    ? '<p class="text-[11px] text-ink-500 font-mono mt-0.5 truncate">' +
+        (artNo ? escapeHtml(artNo) : '') +
+        (artNo && mfgNo ? ' · ' : '') +
+        (mfgNo ? '<span class="text-ink-400">Hersteller: ' + escapeHtml(mfgNo) + '</span>' : '') +
+      '</p>'
+    : '';
   return `
     <div class="p-3 bg-ink-50 rounded-lg border border-ink-100">
       <div class="flex items-start justify-between gap-2">
@@ -14877,6 +14971,7 @@ function orderItemRow(orderId, it, locked) {
             <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
+          ${artBadgeHtml}
           <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
         </div>
         <div class="flex items-center gap-2 shrink-0">
