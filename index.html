@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.49';
+const APP_VERSION = 'v3.50';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2664,7 +2664,9 @@ function _renderArticlePickerBlock() {
   const tokens = q.split(/\s+/).filter(Boolean);
   const filtered = !tokens.length ? ctx.articles.slice(0, 30) : ctx.articles.filter(a => {
     const f = a.fields || {};
-    const haystack = [f.sku, f.article_no, f.name, f.manufacturer, f.name2, f.description].filter(Boolean).join(' ').toLowerCase();
+    // Korrekte Article-Felder: name1, name2, article_no, manufacturer_no, description
+    const haystack = [f.article_no, f.name1, f.name2, f.manufacturer_no, f.description]
+      .filter(Boolean).join(' ').toLowerCase();
     return tokens.every(t => haystack.includes(t));
   }).slice(0, 30);
   return `
@@ -2673,18 +2675,20 @@ function _renderArticlePickerBlock() {
         <p class="text-xs font-semibold text-ink-700 flex items-center gap-1.5"><i data-lucide="search" class="w-3.5 h-3.5"></i> Artikel suchen</p>
         <span class="text-[11px] text-ink-500">${filtered.length}${ctx.articles.length > 30 ? '/' + ctx.articles.length : ''} Treffer</span>
       </div>
-      <input type="search" id="voiceArticleSearch" oninput="setArticleSearch(this.value)" value="${escapeHtml(_voiceState.articleSearch)}" placeholder="SKU, Name, Hersteller… (Tokens getrennt mit Leerzeichen)" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-purple-500/30">
+      <input type="search" id="voiceArticleSearch" oninput="setArticleSearch(this.value)" value="${escapeHtml(_voiceState.articleSearch)}" placeholder="Art-Nr, Name, Hersteller-Nr… (Tokens getrennt mit Leerzeichen)" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-purple-500/30">
       <div class="space-y-1 max-h-[40vh] overflow-y-auto">
         ${filtered.length === 0 ? '<p class="text-xs text-ink-500 italic p-2">Keine Treffer</p>' : filtered.map(a => {
           const f = a.fields || {};
-          const sku = f.sku || f.article_no || '';
-          const name = f.name || '';
-          const mfg = f.manufacturer || '';
+          const artNo = f.article_no || '';
+          const mfgNo = f.manufacturer_no || '';
+          const name1 = f.name1 || '';
+          const name2 = f.name2 || '';
           return `
             <div class="bg-white border border-ink-200 rounded-lg p-2 flex items-center gap-2">
               <div class="flex-1 min-w-0">
-                <p class="text-[11px] font-mono text-ink-500 truncate">${escapeHtml(sku)}${mfg ? ' · ' + escapeHtml(mfg) : ''}</p>
-                <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(name)}</p>
+                <p class="text-[11px] font-mono text-ink-500 truncate">${escapeHtml(artNo)}${mfgNo ? ' · ' + escapeHtml(mfgNo) : ''}</p>
+                <p class="text-sm font-medium text-ink-900 truncate">${escapeHtml(name1)}</p>
+                ${name2 ? `<p class="text-[11px] text-ink-500 italic truncate">${escapeHtml(name2)}</p>` : ''}
               </div>
               <input type="number" id="picker-qty-${a.id}" value="1" min="1" class="w-14 px-2 py-1 border border-ink-200 rounded text-sm text-center shrink-0">
               <button type="button" onclick="addArticleManually('${a.id}')" class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-2.5 py-1.5 text-xs inline-flex items-center gap-1 shrink-0">
@@ -2743,8 +2747,8 @@ function addArticleManually(articleId) {
   const a = ctx.articles.find(x => x.id === articleId);
   if (!a) return;
   const f = a.fields || {};
-  const sku = f.sku || f.article_no || '';
-  const name = f.name || '';
+  const sku = f.article_no || '';
+  const name = f.name1 || '';
   const qtyInp = document.getElementById('picker-qty-' + articleId);
   const qty = Math.max(1, parseInt(qtyInp?.value || '1', 10) || 1);
   const existing = (_voiceState.manualItems || []).find(i => i.article_id === articleId);
@@ -2893,7 +2897,8 @@ function _voiceBuildPrompt(userText) {
   }).join('\n');
   const articleSummary = ctx.articles.slice(0, 300).map(a => {
     const f = a.fields || {};
-    return [a.id, f.sku || f.article_no || '–', f.name || '', f.manufacturer || '', f.price_net || ''].join(' | ');
+    // Schema: article_no | name1 | name2 | manufacturer_no | sales_price
+    return [a.id, f.article_no || '–', f.name1 || '', f.name2 || '', f.manufacturer_no || '', f.sales_price || ''].join(' | ');
   }).join('\n');
   const historyTxt = _voiceState.history.slice(-10).map(m =>
     (m.role === 'user' ? 'Mitarbeiter' : 'Du') + ': ' + m.content
@@ -2912,7 +2917,7 @@ function _voiceBuildPrompt(userText) {
 VERFÜGBARE KUNDEN (record_id | kundenr | name | stadt):
 ${customerSummary || '(keine)'}
 
-VERFÜGBARE ARTIKEL (record_id | sku | name | hersteller | preis_netto):
+VERFÜGBARE ARTIKEL (record_id | art_nr | name1 | name2 | hersteller_nr | vk_preis):
 ${articleSummary || '(keine)'}
 
 KONVERSATION BISHER:
@@ -2929,7 +2934,7 @@ Mappe phonetische Aussprachen aktiv zurück:
   - Buchstaben: "ähl/ehl/L wie Ludwig" → L; "äff/ehf/F wie Friedrich" → F; "fau/V wie Viktor" → V; "be/B wie Berta" → B; "ge/G wie Gustav" → G; usw.
   - Buchstabier-Wendungen "X wie Y" → einfach X
   - Wenn ein Token wie "freitag", "sechzehn", "drei" vorkommt + Artikel-Codes existieren, die diese Buchstaben/Zahlen enthalten, prüfe Fuzzy-Match aggressiv
-  - Vergleiche IMMER mit der Artikelliste oben (sku-Spalte) — zähl Buchstaben/Ziffern und matche Pattern, nicht Wortlaut
+  - Vergleiche IMMER mit der Artikelliste oben — Codes können in art_nr, name1, name2 ODER hersteller_nr stehen — zähl Buchstaben/Ziffern und matche Pattern, nicht Wortlaut
   - Bei mehreren plausiblen SKUs (z.B. V3F16L vs V3F18L): article_id=null, alternatives setzen, status=needs_input und in speech eine konkrete Rückfrage mit 2-3 Optionen
 
 Antworte AUSSCHLIESSLICH mit einem JSON-Objekt (keine Code-Fences, keine Erklärung davor/danach) genau in diesem Schema:
