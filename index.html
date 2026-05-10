@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.83';
+const APP_VERSION = 'v3.84';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1804,23 +1804,28 @@ function _renderFreshdeskTicket() {
           }
           if (_fdTicketState.summary) {
             const cached = _fdTicketState.cachedAiLoaded;
+            const saved  = !!_fdTicketState.summarySaved;
+            let label;
+            if (cached)      label = 'KI-Zusammenfassung (aus früherer Sitzung wiederhergestellt)';
+            else if (saved)  label = '<span class="text-emerald-700">✓ Gespeichert als private Notiz</span>';
+            else             label = 'KI-Zusammenfassung (wird automatisch gespeichert…)';
             return `<div class="bg-purple-50 border border-purple-200 rounded-xl p-3">
               <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
                 <p class="text-xs font-semibold text-purple-900 flex items-center gap-1.5">
                   <i data-lucide="sparkles" class="w-4 h-4"></i>
-                  ${cached ? 'KI-Zusammenfassung (aus früherer Sitzung wiederhergestellt)' : 'KI-Zusammenfassung (Vorschau, noch nicht gespeichert)'}
+                  ${label}
                 </p>
                 <div class="flex gap-1.5 flex-wrap">
                   <button type="button" onclick="generateFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2 py-1 border border-purple-300 text-purple-700 hover:bg-purple-100 rounded inline-flex items-center gap-1 disabled:opacity-50">
                     <i data-lucide="refresh-cw" class="w-3 h-3"></i> Neu
                   </button>
-                  <button type="button" onclick="saveFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2.5 py-1 bg-purple-600 text-white hover:bg-purple-700 rounded inline-flex items-center gap-1 disabled:opacity-50">
+                  ${!saved && !cached ? `<button type="button" onclick="saveFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2.5 py-1 bg-purple-600 text-white hover:bg-purple-700 rounded inline-flex items-center gap-1 disabled:opacity-50">
                     ${_fdTicketState.summarySaving
                       ? '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Speichere…'
-                      : '<i data-lucide="save" class="w-3 h-3"></i> Als private Notiz im Ticket speichern'}
-                  </button>
+                      : '<i data-lucide="save" class="w-3 h-3"></i> Jetzt speichern'}
+                  </button>` : ''}
                   <button type="button" onclick="discardFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2 py-1 border border-purple-200 text-purple-600 hover:bg-purple-100 rounded disabled:opacity-50">
-                    Verwerfen
+                    Ausblenden
                   </button>
                 </div>
               </div>
@@ -1952,29 +1957,47 @@ function _collectFreshdeskAttachments() {
 }
 
 async function _downloadAttachmentAsBase64(att) {
-  // Anthropic Vision: max 5MB pro Bild, max 5 Bilder pro Request (wir limitieren konservativ).
+  // Anthropic Vision: max 5MB pro Bild, max 5 Bilder pro Request.
   const MAX_SIZE = 5 * 1024 * 1024;
   if (!att.attachment_url) return null;
   if (att.size && att.size > MAX_SIZE) return null;
-  try {
-    const res = await fetch(att.attachment_url);
-    if (!res.ok) return null;
-    const blob = await res.blob();
-    if (blob.size > MAX_SIZE) return null;
-    return await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const str = String(reader.result || '');
-        const i = str.indexOf(',');
-        resolve(i >= 0 ? str.slice(i + 1) : null);
-      };
-      reader.onerror = () => resolve(null);
-      reader.readAsDataURL(blob);
-    });
-  } catch (_) {
-    // CORS oder Netzwerkfehler — Bild wird einfach ausgelassen
-    return null;
-  }
+
+  // Versuche zwei Wege parallel-fallback:
+  //   1. Direkt-Download (manche Freshdesk-CDN-URLs haben CORS aktiviert)
+  //   2. Über Val.town-Proxy /attachment-proxy (CORS-Bypass)
+  const tryDirect = async () => {
+    try {
+      const r = await fetch(att.attachment_url);
+      if (!r.ok) return null;
+      const b = await r.blob();
+      return b.size <= MAX_SIZE ? b : null;
+    } catch (_) { return null; }
+  };
+  const tryProxy = async () => {
+    const base = _proxyBase();
+    const bearer = _bearerForProxy();
+    if (!base || !bearer) return null;
+    try {
+      const proxyUrl = base.replace(/\/+$/, '') + '/attachment-proxy?url=' + encodeURIComponent(att.attachment_url);
+      const r = await fetch(proxyUrl, { headers: { 'Authorization': 'Bearer ' + bearer } });
+      if (!r.ok) return null;
+      const b = await r.blob();
+      return b.size <= MAX_SIZE ? b : null;
+    } catch (_) { return null; }
+  };
+  let blob = await tryDirect();
+  if (!blob) blob = await tryProxy();
+  if (!blob) return null;
+  return await new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const str = String(reader.result || '');
+      const i = str.indexOf(',');
+      resolve(i >= 0 ? str.slice(i + 1) : null);
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(blob);
+  });
 }
 
 // Lädt sicher die Conversations falls noch nicht da (für KI-Kontext)
@@ -2001,6 +2024,7 @@ async function generateFreshdeskTicketSummary() {
   _fdTicketState.cachedAiLoaded = false;
   _fdTicketState.cachedAiNoStructure = false;
   _fdTicketState.editBlockHidden = false;
+  _fdTicketState.summarySaved = false;
   _renderFreshdeskTicket();
   try {
     await _ensureFreshdeskConversations();
@@ -2231,6 +2255,15 @@ ${fullText}`;
   } finally {
     _fdTicketState.summaryLoading = false;
     _renderFreshdeskTicket();
+  }
+  // Auto-Save: KI-Zusammenfassung sofort als private Notiz im Ticket speichern,
+  // damit sie auch nach Reload / erneuter Öffnung sichtbar bleibt und das
+  // KI-Badge in der Übersicht erscheint. User kann via "Verwerfen" wieder
+  // entfernen oder via "Neu" überschreiben.
+  if (_fdTicketState.summary && !_fdTicketState.summarySaving) {
+    try {
+      await saveFreshdeskTicketSummary({ silent: true });
+    } catch (_) { /* schluckt — User sieht den Save-Button als Fallback */ }
   }
 }
 
@@ -2548,7 +2581,8 @@ WICHTIG: Antworte AUSSCHLIESSLICH mit dem Stichpunkt, kein Text drumherum, keine
 // Speichert die aktuelle Zusammenfassung als private Notiz im Ticket (Freshdesk).
 // Setzt zusätzlich ein Tag aufs Ticket, damit die Übersicht es schnell erkennt.
 // Lädt anschließend den Verlauf neu, damit die Notiz angezeigt wird.
-async function saveFreshdeskTicketSummary() {
+async function saveFreshdeskTicketSummary(opts) {
+  const silent = !!(opts && opts.silent);
   const t = _fdTicketState.ticket;
   const s = _fdTicketState.summary;
   if (!t || !s) return;
@@ -2567,7 +2601,8 @@ async function saveFreshdeskTicketSummary() {
     };
     const noteHtml =
       '<p><strong>' + FD_AI_SUMMARY_MARKER + '</strong> · erstellt am ' + escapeHtml(new Date().toLocaleString('de-DE')) +
-      (APP_KEYS.user?.name ? ' von ' + escapeHtml(APP_KEYS.user.name) : '') + '</p>' +
+      (APP_KEYS.user?.name ? ' von ' + escapeHtml(APP_KEYS.user.name) : '') +
+      (silent ? ' · auto-gespeichert' : '') + '</p>' +
       '<p>' + escapeHtml(s).replace(/\n/g, '<br>') + '</p>' +
       '\n' + _encodeAiData(aiPayload);
     await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
@@ -2577,15 +2612,29 @@ async function saveFreshdeskTicketSummary() {
     // Cache für dieses Ticket invalidieren — beim nächsten Refresh / Quick-View
     // wird die Notiz frisch ermittelt und das Badge erscheint automatisch.
     _fdAiSummaryCache.delete(t.id);
-    toast('Zusammenfassung als private Notiz gespeichert', 'success', 3500);
-    // Conversations invalidieren + ggf. neu laden, damit die Notiz auftaucht
-    _fdTicketState.summary = null;
-    _fdTicketState.conversations = null;
-    if (_fdTicketState.showHistory) {
-      await _ensureFreshdeskConversations();
+    _fdTicketState.summarySaved = true;
+    if (!silent) {
+      toast('Zusammenfassung als private Notiz gespeichert', 'success', 3500);
+      // Manueller Save schließt die Vorschau und lädt Conversations neu,
+      // damit die Notiz im Verlauf erscheint.
+      _fdTicketState.summary = null;
+      _fdTicketState.conversations = null;
+      if (_fdTicketState.showHistory) {
+        await _ensureFreshdeskConversations();
+      }
+    } else {
+      // Silent/Auto-Save: Vorschau bleibt sichtbar, aber Conversations werden
+      // im Hintergrund invalidiert, damit nach erneutem Öffnen der Verlauf
+      // die neue Notiz mitliefert.
+      _fdTicketState.conversations = null;
+    }
+    // Liste im Hintergrund neu laden, damit das KI-Badge in der Übersicht erscheint
+    if (typeof loadFreshdeskTicketsPreview === 'function') {
+      try { loadFreshdeskTicketsPreview(); } catch (_) {}
     }
   } catch (e) {
-    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+    if (!silent) toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+    else console.warn('Auto-Save fehlgeschlagen:', e.message);
   } finally {
     _fdTicketState.summarySaving = false;
     _renderFreshdeskTicket();
@@ -2656,9 +2705,13 @@ async function showAiSummaryQuickView(ticketId) {
 }
 
 function discardFreshdeskTicketSummary() {
+  // "Ausblenden" — nur lokal: die Notiz im Freshdesk-Ticket bleibt erhalten
+  // (Auto-Save hat sie schon abgelegt). User kann via "Neu" eine frische
+  // Analyse generieren — die alte Notiz wird dadurch nicht gelöscht.
   _fdTicketState.summary = null;
   _fdTicketState.extracted = null;
   _fdTicketState.match = null;
+  _fdTicketState.summarySaved = false;
   _renderFreshdeskTicket();
 }
 
@@ -7015,6 +7068,38 @@ export default async function (req: Request): Promise<Response> {
       status: upstream.status,
       headers: {
         "content-type": upstream.headers.get("content-type") || "application/json",
+        "access-control-allow-origin": "*"
+      }
+    });
+  }
+
+  // 4a) Attachment-Proxy für Freshdesk-CDN-URLs
+  //     Browser kann attachment_url meistens nicht direkt fetchen (CORS-Block
+  //     bei Freshdesk-CDN/-attachment-Hosts). Der Proxy schleust GET-Requests
+  //     durch und gibt CORS-Header zurück — limitiert auf Freshdesk-Domains.
+  if (path === "attachment-proxy" && req.method === "GET") {
+    const targetUrl = url.searchParams.get("url");
+    if (!targetUrl) return jsonResponse({ error: "url param fehlt" }, 400);
+    let u: URL;
+    try { u = new URL(targetUrl); }
+    catch (_) { return jsonResponse({ error: "Ungültige URL" }, 400); }
+    // Whitelist: nur Freshdesk-Hosts erlauben (verhindert SSRF)
+    const host = u.hostname.toLowerCase();
+    const freshdeskHosts = /(^|\\.)freshdesk\\.com$|(^|\\.)freshdesk-attachment\\.com$|^attachment\\.freshdesk\\.com$|^cdn\\.freshdesk\\.com$|^attachments\\.freshdesk\\.com$|^s3.*\\.amazonaws\\.com$|^attachment\\.freshdeskusercontent\\.com$/i;
+    if (!freshdeskHosts.test(host)) {
+      return jsonResponse({ error: "Domain nicht erlaubt: " + host }, 403);
+    }
+    const upstream = await fetch(targetUrl);
+    if (!upstream.ok) {
+      return jsonResponse({ error: "Upstream " + upstream.status }, upstream.status);
+    }
+    const buf = await upstream.arrayBuffer();
+    return new Response(buf, {
+      status: 200,
+      headers: {
+        "content-type": upstream.headers.get("content-type") || "application/octet-stream",
+        "content-length": String(buf.byteLength),
+        "cache-control": "private, max-age=300",
         "access-control-allow-origin": "*"
       }
     });
