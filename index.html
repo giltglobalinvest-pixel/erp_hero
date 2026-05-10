@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.37';
+const APP_VERSION = 'v3.38';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1238,12 +1238,7 @@ async function loadFreshdeskTicketsPreview() {
       ? ' AND (' + types.map(t => `type:'${t.replace(/'/g, "")}'`).join(' OR ') + ')'
       : '';
     const query = `"(group_id:${groupId}) AND (status:2 OR status:3)${typeFilter}"`;
-    // Parallel: Hauptsuche + zweite Suche nach Tickets mit AI-Tag (für Badge-Anzeige).
-    // Letztere ist nötig, weil Freshdesk's Search-API keine Tags in Results liefert.
-    const [data] = await Promise.all([
-      freshdeskFetch('search/tickets?query=' + encodeURIComponent(query)),
-      _refreshAiSummaryTicketIds(groupId)
-    ]);
+    const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
     const tickets = data.results || [];
     _inquiriesLastLoadedAt = Date.now();
     _renderInquiriesFreshness();
@@ -1263,17 +1258,17 @@ async function loadFreshdeskTicketsPreview() {
           const ticketNo = 'FT-' + t.id;
           const dt = t.updated_at ? new Date(t.updated_at).toLocaleString('de-DE') : '';
           const tType = t.type ? escapeHtml(t.type) : '';
-          const hasAiSummary = _fdAiSummaryTicketIds.has(t.id);
+          // Cache-Treffer schon mal initial einsetzen (z.B. nach Refresh) — sonst leerer Slot
+          const cached = _fdAiSummaryCache.get(t.id);
+          const initialAi = cached && cached.updated_at === t.updated_at ? !!cached.aiNote : false;
           return `
-            <div onclick="openFreshdeskTicket(${t.id})" class="px-2 py-2.5 hover:bg-ink-50 rounded cursor-pointer transition group">
+            <div data-ticket-id="${t.id}" onclick="openFreshdeskTicket(${t.id})" class="px-2 py-2.5 hover:bg-ink-50 rounded cursor-pointer transition group">
               <div class="flex items-baseline justify-between gap-2 mb-0.5">
                 <div class="flex items-baseline gap-2 flex-wrap min-w-0">
                   <span class="text-xs font-mono text-ink-500">${escapeHtml(ticketNo)}</span>
                   <span class="font-medium text-ink-900 truncate group-hover:text-brand-700">${escapeHtml(subject)}</span>
                   ${tType ? `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-medium">${tType}</span>` : ''}
-                  ${hasAiSummary ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen">
-                    <i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI
-                  </button>` : ''}
+                  <span class="ai-badge-slot inline-flex">${initialAi ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>` : ''}</span>
                 </div>
                 <span class="text-[10px] uppercase tracking-wider ${statusColor(t.status)} px-1.5 py-0.5 rounded font-medium shrink-0">${escapeHtml(statusLabel(t.status))}</span>
               </div>
@@ -1283,6 +1278,25 @@ async function loadFreshdeskTicketsPreview() {
         }).join('')}
       </div>
     `;
+    if (window.lucide) lucide.createIcons();
+    // Im Hintergrund: pro Ticket prüfen ob letzte Notiz eine KI-Zusammenfassung ist.
+    // Cache-aware: Tickets mit unverändertem updated_at brauchen keinen API-Call.
+    // Concurrency-Limit 5, damit Freshdesk-Rate-Limits nicht angetastet werden.
+    const tasks = tickets.map(t => async () => {
+      const ai = await _checkLastNoteAiSummary(t);
+      // Nur DOM patchen, wenn die Liste noch sichtbar ist
+      const row = document.querySelector('[data-ticket-id="' + t.id + '"]');
+      if (!row) return;
+      const slot = row.querySelector('.ai-badge-slot');
+      if (!slot) return;
+      if (ai) {
+        slot.innerHTML = `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>`;
+        if (window.lucide) lucide.createIcons();
+      } else {
+        slot.innerHTML = '';
+      }
+    });
+    _runWithLimit(tasks, 5).catch(() => {});
   } catch (err) {
     wrap.innerHTML = `
       <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-900">
@@ -1627,36 +1641,57 @@ ${fullText}`;
   }
 }
 
-// Tag-Name, an dem die Übersicht erkennt, dass es eine KI-Zusammenfassung gibt
-const FD_AI_SUMMARY_TAG = 'ki-zusammenfassung';
-// Marker im Notiz-Body, an dem wir die KI-Note in den Conversations finden
+// Marker im Notiz-Body, an dem wir die KI-Note in den Conversations erkennen.
 const FD_AI_SUMMARY_MARKER = '🤖 KI-Zusammenfassung';
-// Set von Ticket-IDs, die das Tag haben — wird parallel zur Hauptsuche gefüllt,
-// weil die Freshdesk Search-Tickets-API leider keine Tags zurückliefert.
-let _fdAiSummaryTicketIds = new Set();
 
-async function _refreshAiSummaryTicketIds(groupId) {
-  if (!groupId) { _fdAiSummaryTicketIds = new Set(); return; }
-  // Zwei Syntax-Varianten probieren, falls Freshdesk auf single/double quotes
-  // unterschiedlich reagiert. Erste, die ein Ergebnis liefert, gewinnt.
-  const queries = [
-    `"(group_id:${groupId}) AND (tag:'${FD_AI_SUMMARY_TAG}')"`,
-    `"(group_id:${groupId}) AND (tag:\\"${FD_AI_SUMMARY_TAG}\\")"`,
-  ];
-  for (const query of queries) {
-    try {
-      const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
-      const ids = (data && Array.isArray(data.results)) ? data.results.map(t => t.id) : [];
-      console.log('[AI-Summary-Lookup] query=' + query + ' → ' + ids.length + ' Treffer', ids);
-      // Bestehende manuelle Adds (z.B. nach Save) erhalten — wir mergen statt zu ersetzen.
-      const merged = new Set(_fdAiSummaryTicketIds);
-      ids.forEach(id => merged.add(id));
-      _fdAiSummaryTicketIds = merged;
-      if (ids.length > 0) return; // erste erfolgreiche Variante reicht
-    } catch (e) {
-      console.warn('[AI-Summary-Lookup] failed:', query, e.message);
+// Cache: ticket_id → { updated_at, aiNote: <Conversation-Object>|null }
+//   - aiNote != null  : letzte private Notiz IST eine KI-Zusammenfassung
+//   - aiNote === null : letzte Notiz ist keine (oder gar keine Notizen vorhanden)
+//   - updated_at      : wenn Tickets unverändert sind, kein neuer Lookup nötig
+const _fdAiSummaryCache = new Map();
+
+// Holt die Conversations eines Tickets, prüft die letzte (chronologisch) auf
+// den AI-Marker. Liefert das Note-Objekt oder null.
+async function _fetchLastAiSummaryNote(ticketId) {
+  const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+  const list = (Array.isArray(conv) ? conv : []).slice()
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  const last = list[0];
+  if (last && last.private) {
+    const raw = String(last.body || last.body_text || '');
+    if (raw.includes(FD_AI_SUMMARY_MARKER)) return last;
+  }
+  return null;
+}
+
+// Cache-aware Check: liefert die KI-Zusammenfassung der letzten Notiz, falls
+// vorhanden — sonst null. Nutzt updated_at als Cache-Key, damit bei Refresh
+// nur neu/geänderte Tickets erneut Conversations laden müssen.
+async function _checkLastNoteAiSummary(ticket) {
+  const cached = _fdAiSummaryCache.get(ticket.id);
+  if (cached && cached.updated_at === ticket.updated_at) return cached.aiNote;
+  let aiNote = null;
+  try {
+    aiNote = await _fetchLastAiSummaryNote(ticket.id);
+  } catch (e) {
+    return cached ? cached.aiNote : null;
+  }
+  _fdAiSummaryCache.set(ticket.id, { updated_at: ticket.updated_at, aiNote });
+  return aiNote;
+}
+
+// Concurrency-Limit für parallele Calls (max N gleichzeitig).
+async function _runWithLimit(taskFns, limit) {
+  const results = new Array(taskFns.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < taskFns.length) {
+      const idx = cursor++;
+      try { results[idx] = await taskFns[idx](); } catch (_) { results[idx] = null; }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(limit, taskFns.length) }, worker));
+  return results;
 }
 
 // Speichert die aktuelle Zusammenfassung als private Notiz im Ticket (Freshdesk).
@@ -1669,7 +1704,8 @@ async function saveFreshdeskTicketSummary() {
   _fdTicketState.summarySaving = true;
   _renderFreshdeskTicket();
   try {
-    // 1) Note posten
+    // Note posten — der 🤖-Marker im Body ist der einzige „Tag", den wir brauchen.
+    // Die Übersicht erkennt KI-Zusammenfassungen anhand der LETZTEN privaten Notiz.
     const noteHtml =
       '<p><strong>' + FD_AI_SUMMARY_MARKER + '</strong> · erstellt am ' + escapeHtml(new Date().toLocaleString('de-DE')) +
       (APP_KEYS.user?.name ? ' von ' + escapeHtml(APP_KEYS.user.name) : '') + '</p>' +
@@ -1678,28 +1714,9 @@ async function saveFreshdeskTicketSummary() {
       method: 'POST',
       body: { body: noteHtml, private: true }
     });
-    // 2) Tag setzen (wenn nicht schon vorhanden), damit die Übersicht es erkennt
-    const currentTags = Array.isArray(t.tags) ? t.tags.slice() : [];
-    let tagSet = currentTags.includes(FD_AI_SUMMARY_TAG);
-    if (!tagSet) {
-      const newTags = currentTags.concat([FD_AI_SUMMARY_TAG]);
-      try {
-        await proxyFetch('freshdesk/api/v2/tickets/' + t.id, {
-          method: 'PUT',
-          body: { tags: newTags }
-        });
-        t.tags = newTags;
-        tagSet = true;
-      } catch (e) {
-        // Note ist trotzdem da, aber Badge erscheint nicht — User darüber informieren.
-        console.warn('Tag konnte nicht gesetzt werden:', e.message);
-        toast('Notiz gespeichert, aber Tag-Setzen fehlgeschlagen: ' + e.message, 'warn', 8000);
-      }
-    } else {
-      tagSet = true;
-    }
-    // In-memory Cache nur pflegen, wenn Tag tatsächlich gesetzt ist
-    if (tagSet) _fdAiSummaryTicketIds.add(t.id);
+    // Cache für dieses Ticket invalidieren — beim nächsten Refresh / Quick-View
+    // wird die Notiz frisch ermittelt und das Badge erscheint automatisch.
+    _fdAiSummaryCache.delete(t.id);
     toast('Zusammenfassung als private Notiz gespeichert', 'success', 3500);
     // Conversations invalidieren + ggf. neu laden, damit die Notiz auftaucht
     _fdTicketState.summary = null;
