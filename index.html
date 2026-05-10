@@ -582,7 +582,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.29';
+const APP_VERSION = 'v3.30';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -634,7 +634,9 @@ const APP_KEYS = {
   // liegt in Val.town als env var). Legacy-Felder bleiben für Migration.
   freshdeskProxyUrl: null,
   freshdeskProxyToken: null,
-  freshdeskSalesGroupId: null
+  freshdeskSalesGroupId: null,
+  // Komma-getrennte Ticket-Typen-Liste, leer = alle Typen
+  freshdeskTicketTypes: null
 };
 
 /* ============================================================
@@ -694,6 +696,7 @@ async function loadProjectKeys() {
         if (f.key_name === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl      = f.key_value;
         if (f.key_name === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken    = f.key_value;
         if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
+        if (f.key_name === 'freshdeskTicketTypes')   APP_KEYS.freshdeskTicketTypes   = f.key_value;
       });
     }
   } catch (_) {}
@@ -1212,7 +1215,13 @@ async function loadFreshdeskTicketsPreview() {
   try {
     const groupId = APP_KEYS.freshdeskSalesGroupId;
     // Status 2 = Open, 3 = Pending. Search-API beschränkt auf 30 Ergebnisse pro Seite.
-    const query = `"(group_id:${groupId}) AND (status:2 OR status:3)"`;
+    // Optional: Filter nach Ticket-Typ (Komma-getrennte Liste in freshdeskTicketTypes)
+    const types = String(APP_KEYS.freshdeskTicketTypes || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const typeFilter = types.length
+      ? ' AND (' + types.map(t => `type:'${t.replace(/'/g, "")}'`).join(' OR ') + ')'
+      : '';
+    const query = `"(group_id:${groupId}) AND (status:2 OR status:3)${typeFilter}"`;
     const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
     const tickets = data.results || [];
     _inquiriesLastLoadedAt = Date.now();
@@ -3326,6 +3335,8 @@ async function renderAdminSettings() {
   const proxyUrl     = proxyRec?.fields?.key_value || '';
   const salesRec     = byName['freshdeskSalesGroupId'];
   const salesGroupId = salesRec?.fields?.key_value || '';
+  const typesRec     = byName['freshdeskTicketTypes'];
+  const ticketTypes  = typesRec?.fields?.key_value || '';
 
   const isProxySet = !!proxyUrl;
   const envVars = _valtownEnvVars();
@@ -3485,6 +3496,25 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
+      <!-- ============ STEP 6 ============ -->
+      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+        ${stepHeader(6, 'Ticket-Typen filtern (optional)', ticketTypes ? statusBadge(true, ticketTypes.split(',').filter(Boolean).length + ' Typen') : statusBadge(false, 'alle'))}
+        <div class="pl-11">
+          <p class="text-sm text-ink-700 mb-2">Standardmäßig werden alle offenen / ausstehenden Sales-Tickets angezeigt. Wenn du nur bestimmte Tickettypen sehen willst (z.B. „Question", „Refund Request"), wähle sie hier aus. Leer = alle Typen.</p>
+          <div class="flex gap-2 flex-wrap mb-2">
+            <input type="text" id="settingsTicketTypes" value="${escapeHtml(ticketTypes)}" placeholder="z.B. Question, Refund Request" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm">
+            <button type="button" onclick="saveTicketTypes()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+              <i data-lucide="save" class="w-4 h-4"></i> Speichern
+            </button>
+          </div>
+          <p class="text-[11px] text-ink-500 mb-3">Komma-getrennt. Du kennst die Typen nicht? → Helper:</p>
+          <button type="button" onclick="loadFreshdeskTicketTypes()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-1.5 text-xs font-medium hover:bg-ink-50 flex items-center gap-1.5">
+            <i data-lucide="list" class="w-3.5 h-3.5"></i> Verfügbare Typen aus Freshdesk laden
+          </button>
+          <div id="ticketTypesHelperWrap" class="mt-3"></div>
+        </div>
+      </div>
+
       <!-- Legacy Master-Base Keys (collapsed) -->
       <details class="bg-ink-50 border border-ink-200 rounded-2xl p-4 mb-4 group">
         <summary class="cursor-pointer text-sm font-medium text-ink-700 flex items-center gap-2"><i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition"></i> Erweitert: alle Master-Base Keys ansehen</summary>
@@ -3561,6 +3591,88 @@ async function saveSalesGroupId() {
   } catch (e) {
     toast(e.message, 'error', 7000);
   }
+}
+
+async function saveTicketTypes() {
+  const inp = document.getElementById('settingsTicketTypes');
+  if (!inp) return;
+  // Eingabe normalisieren: Whitespace trimmen, leere Einträge raus, Komma-getrennt
+  const val = String(inp.value || '')
+    .split(',').map(s => s.trim()).filter(Boolean).join(', ');
+  try {
+    const keys = await _fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'freshdeskTicketTypes');
+    if (val) {
+      await _writeMasterBaseKey('freshdeskTicketTypes', val, existing?.id || null);
+      APP_KEYS.freshdeskTicketTypes = val;
+      toast('Ticket-Typen-Filter gespeichert', 'success');
+    } else if (existing) {
+      // Leerer Wert + bestehender Record → Record löschen (= alle Typen)
+      await _deleteMasterBaseKey(existing.id);
+      APP_KEYS.freshdeskTicketTypes = null;
+      toast('Filter entfernt — alle Tickettypen', 'success');
+    } else {
+      toast('Kein Filter (alle Tickettypen)', 'info', 1500);
+    }
+    renderAdminSettings();
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+  }
+}
+
+// Lädt alle Tickettypen aus Freshdesk und zeigt sie als anklickbare Chips.
+// Klick auf einen Chip togglet ihn in der Ticket-Typen-Liste.
+async function loadFreshdeskTicketTypes() {
+  const wrap = document.getElementById('ticketTypesHelperWrap');
+  if (!wrap) return;
+  wrap.innerHTML = '<p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade Typen aus Freshdesk…</p>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    // Freshdesk: GET /api/v2/ticket_fields → Liste aller Felder. Das Feld
+    // mit type='default_ticket_type' enthält in choices[] die verfügbaren Typen.
+    const fields = await freshdeskFetch('ticket_fields');
+    const typeField = (Array.isArray(fields) ? fields : []).find(
+      f => f && (f.type === 'default_ticket_type' || f.name === 'ticket_type' || f.name === 'type')
+    );
+    let choices = [];
+    if (typeField && typeField.choices) {
+      // choices kann ein Array oder ein Objekt sein, je nach Freshdesk-Version
+      if (Array.isArray(typeField.choices)) {
+        choices = typeField.choices.map(c => Array.isArray(c) ? c[0] : (c.value || c.label || c)).filter(Boolean);
+      } else if (typeof typeField.choices === 'object') {
+        choices = Object.keys(typeField.choices);
+      }
+    }
+    if (choices.length === 0) {
+      wrap.innerHTML = '<p class="text-xs text-amber-700 italic">Keine Tickettypen gefunden — manuell eingeben.</p>';
+      return;
+    }
+    const inp = document.getElementById('settingsTicketTypes');
+    const current = String(inp?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+    const currentSet = new Set(current);
+    wrap.innerHTML = `
+      <p class="text-[11px] text-ink-500 mb-2">${choices.length} Typen — Klick zum An-/Abwählen, dann oben „Speichern":</p>
+      <div class="flex gap-1.5 flex-wrap">
+        ${choices.map(c => {
+          const active = currentSet.has(c);
+          return `<button type="button" onclick="toggleTicketTypeChip('${escapeHtml(c).replace(/'/g, "\\'")}')" class="text-xs px-2.5 py-1 rounded-full border transition ${active ? 'bg-brand-500 text-white border-brand-600' : 'bg-white text-ink-700 border-ink-200 hover:bg-ink-50'}">${escapeHtml(c)}</button>`;
+        }).join('')}
+      </div>`;
+  } catch (e) {
+    wrap.innerHTML = `<p class="text-xs text-red-700 italic">Fehler: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+// Togglet einen Tickettyp im Eingabefeld + re-render der Chips
+function toggleTicketTypeChip(typeName) {
+  const inp = document.getElementById('settingsTicketTypes');
+  if (!inp) return;
+  const current = String(inp.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const idx = current.indexOf(typeName);
+  if (idx >= 0) current.splice(idx, 1); else current.push(typeName);
+  inp.value = current.join(', ');
+  // Chips neu rendern (Active-State aktualisieren)
+  loadFreshdeskTicketTypes();
 }
 
 async function testProxyConnection() {
@@ -5323,7 +5435,7 @@ async function renderInquiries() {
       <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
           <h2 class="text-xl font-bold text-ink-900">Anfragen</h2>
-          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (Sales · offen/ausstehend)</p>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (Sales · offen/ausstehend${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <span id="inqFreshness" class="text-[11px] text-ink-500 italic"></span>
