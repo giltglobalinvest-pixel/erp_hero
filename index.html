@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.73';
+const APP_VERSION = 'v3.74';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3524,7 +3524,15 @@ let _voiceState = {
   manualItems: [],      // [{article_id, qty, sku, name}] — manuell ausgewählte Artikel
   articlePickerOpen: false,
   articleSearch: '',
-  customFieldValues: {} // { fieldName: value } — von KI extrahiert + manuell editierbar
+  customFieldValues: {}, // { fieldName: value } — von KI extrahiert + manuell editierbar
+  // Edit-Block (analog _fdTicketState) — Kunde + Kontakt + 3 Textfelder
+  editFields: {
+    customer_id: '', contact_id: '',
+    ticket_number: '', customer_reference: '', lieferzeit: ''
+  },
+  extracted: null,      // KI-extrahierte Customer-Daten wenn nicht im ERP gefunden
+  match: null,          // gefundener Customer-Match (z.B. via Email)
+  customerActionLoading: false
 };
 
 function setVoiceMode(mode) {
@@ -3615,7 +3623,14 @@ function openVoiceAssistant() {
     recognition: null, recording: false, interim: '',
     history: [], lastResponse: null, processing: false,
     context: null, ttsEnabled: true, ttsSpeaking: false,
-    handsFree: true, manualItems: [], articlePickerOpen: false, articleSearch: ''
+    handsFree: true, manualItems: [], articlePickerOpen: false, articleSearch: '',
+    customFieldValues: {},
+    editFields: {
+      customer_id: '', contact_id: '',
+      ticket_number: '', customer_reference: '', lieferzeit: ''
+    },
+    extracted: null, match: null, customerActionLoading: false,
+    mode: (typeof localStorage !== 'undefined' && localStorage.getItem('voice_mode')) || 'voice'
   };
   openModal(`<div id="voiceAssistantWrap" class="p-4 sm:p-6"></div>`, { maxWidth: 'max-w-2xl' });
   _renderVoiceAssistant();
@@ -3745,6 +3760,10 @@ function _renderVoiceAssistant() {
         </div>
       </div>
     `}
+
+    ${_renderVoiceEditableFieldsBlock()}
+
+    ${_renderVoiceCustomerBlock()}
 
     ${_renderManualItemsBlock()}
 
@@ -3877,11 +3896,185 @@ function _renderArticlePickerBlock() {
 }
 
 // "Bereit"-Block: zeigt Anlegen-Button wenn Customer da + mind. 1 Item (KI oder manuell)
+/* ========== Edit-Block + Customer-Block (analog Ticket-Flow) ========== */
+
+function _renderVoiceEditableFieldsBlock() {
+  // Sichtbar wenn entweder eine KI-Antwort vorhanden ist ODER manuelle Items / Custom Fields aktiv sind.
+  const hasResponse = !!_voiceState.lastResponse;
+  const hasManual = (_voiceState.manualItems || []).length > 0;
+  if (!hasResponse && !hasManual) return '';
+  const ef = _voiceState.editFields || {};
+  const ctx = _voiceState.context || { customers: [], contacts: [] };
+  const customerItems = (ctx.customers || []).map(c => ({
+    id: c.id,
+    label: c.fields.name1 || '–',
+    secondary: [c.fields.customer_no, c.fields.city].filter(Boolean).join(' · ')
+  }));
+  const contactItems = !ef.customer_id ? [] : (ctx.contacts || [])
+    .filter(c => (c.fields.customer_id || []).includes(ef.customer_id))
+    .map(c => ({
+      id: c.id,
+      label: contactDisplayName(c.fields),
+      secondary: [c.fields.role, c.fields.email].filter(Boolean).join(' · ')
+    }));
+  return `
+    <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-3">
+      <p class="text-xs font-semibold text-blue-900 mb-2 flex items-center gap-1.5">
+        <i data-lucide="edit-3" class="w-4 h-4"></i> Editierbare Angebot-Daten — vor Anlegen prüfen / korrigieren
+      </p>
+      <!-- Customer + Contact -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Kunde</label>
+          ${renderCombobox({ id: 'voice_customer', name: '', items: customerItems, current: ef.customer_id, placeholder: 'Kunde suchen…', onChange: '_onVoiceCustomerChange' })}
+        </div>
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Ansprechpartner</label>
+          ${renderCombobox({ id: 'voice_contact', name: '', items: contactItems, current: ef.contact_id, placeholder: ef.customer_id ? 'Kontakt suchen…' : 'Erst Kunden wählen', onChange: '_onVoiceContactChange' })}
+        </div>
+      </div>
+      <!-- Edit-Felder -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Ticketnummer</label>
+          <input type="text" value="${escapeHtml(ef.ticket_number || '')}" oninput="_setVoiceEditField('ticket_number', this.value)" placeholder="optional — z.B. FT-…" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+        </div>
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Kundenreferenz</label>
+          <input type="text" value="${escapeHtml(ef.customer_reference || '')}" oninput="_setVoiceEditField('customer_reference', this.value)" placeholder="Bestellnr. / Auftragsnr." class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+        </div>
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Lieferzeit</label>
+          <input type="text" value="${escapeHtml(ef.lieferzeit || '')}" oninput="_setVoiceEditField('lieferzeit', this.value)" placeholder="z.B. 2 Wochen / KW 24" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _renderVoiceCustomerBlock() {
+  const ef = _voiceState.editFields || {};
+  const ext = _voiceState.extracted;
+  // Nur anzeigen, wenn KI Daten extrahiert hat UND noch kein Kunde ausgewählt ist
+  if (!ext || ef.customer_id) return '';
+  const loading = _voiceState.customerActionLoading;
+  return `
+    <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-3">
+      <p class="text-xs font-semibold text-amber-900 mb-2 flex items-center gap-1.5">
+        <i data-lucide="user-plus" class="w-4 h-4"></i> Kunde nicht im ERP — KI hat Daten extrahiert
+      </p>
+      <div class="bg-white border border-amber-100 rounded-lg p-2.5 mb-2">
+        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold">Firma</p>
+        <p class="text-sm font-medium text-ink-900">${escapeHtml(ext.company_name || '—')}</p>
+        ${(ext.street || ext.zip || ext.city) ? `<p class="text-xs text-ink-700">${escapeHtml(ext.street || '')}</p><p class="text-xs text-ink-700">${escapeHtml([ext.zip, ext.city].filter(Boolean).join(' '))}</p>` : ''}
+      </div>
+      ${(ext.contact_name || ext.email || ext.phone) ? `
+        <div class="bg-white border border-amber-100 rounded-lg p-2.5 mb-2">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold">Kontakt</p>
+          ${ext.contact_name ? `<p class="text-sm font-medium text-ink-900">${escapeHtml(ext.contact_name)}</p>` : ''}
+          ${ext.email ? `<p class="text-xs text-ink-700">${escapeHtml(ext.email)}</p>` : ''}
+          ${ext.phone ? `<p class="text-xs text-ink-700">Tel: ${escapeHtml(ext.phone)}</p>` : ''}
+        </div>` : ''}
+      <button type="button" onclick="_voiceCreateAndSelectExtractedCustomer()" ${loading ? 'disabled' : ''} class="w-full bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-3 py-2 text-sm font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-50">
+        ${loading
+          ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege an…'
+          : '<i data-lucide="user-plus" class="w-4 h-4"></i> Diesen Kunden anlegen + im Edit-Block auswählen'}
+      </button>
+    </div>
+  `;
+}
+
+function _setVoiceEditField(name, value) {
+  _voiceState.editFields = _voiceState.editFields || {};
+  _voiceState.editFields[name] = value;
+}
+
+function _onVoiceCustomerChange(value) {
+  _voiceState.editFields = _voiceState.editFields || {};
+  _voiceState.editFields.customer_id = value || '';
+  // Wenn Kunde geändert wird, Kontakt ggf. zurücksetzen (alter Kontakt passt nicht mehr)
+  const ctx = _voiceState.context || { contacts: [] };
+  const cur = _voiceState.editFields.contact_id;
+  if (cur) {
+    const stillValid = (ctx.contacts || []).some(c =>
+      c.id === cur && (c.fields.customer_id || []).includes(value)
+    );
+    if (!stillValid) _voiceState.editFields.contact_id = '';
+  }
+  // Extracted-Block ausblenden, wenn ERP-Kunde gewählt
+  if (value) _voiceState.extracted = null;
+  _renderVoiceAssistant();
+}
+
+function _onVoiceContactChange(value) {
+  _voiceState.editFields = _voiceState.editFields || {};
+  _voiceState.editFields.contact_id = value || '';
+}
+
+// Legt Customer + ggf. Contact aus den KI-extrahierten Daten an und wählt sie
+// im Edit-Block aus. Variante des Ticket-Flows (`_aiCreateCustomerAndContactFromExtracted`)
+// auf Voice-State-Basis.
+async function _voiceCreateAndSelectExtractedCustomer() {
+  const ext = _voiceState.extracted;
+  if (!ext || !ext.company_name) { toast('Keine extrahierten Daten', 'error'); return; }
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Mandant fehlt', 'error'); return; }
+  _voiceState.customerActionLoading = true;
+  _renderVoiceAssistant();
+  try {
+    const customerFields = {
+      name1: ext.company_name,
+      company_id: [cur.id],
+      status: 'aktiv'
+    };
+    if (ext.street) customerFields.street = ext.street;
+    if (ext.zip)    customerFields.zip    = ext.zip;
+    if (ext.city)   customerFields.city   = ext.city;
+    const customer = await writeData('Customer', customerFields);
+    let contactId = '';
+    if (ext.contact_name || ext.email || ext.phone) {
+      const parts = (ext.contact_name || '').trim().split(/\s+/);
+      const first = parts.length > 1 ? parts.slice(0, -1).join(' ') : (parts[0] || '');
+      const last  = parts.length > 1 ? parts[parts.length - 1] : '';
+      const contactFields = {
+        customer_id: [customer.id],
+        company_id: [cur.id],
+        status: 'aktiv'
+      };
+      if (first) contactFields.first_name = first;
+      if (last)  contactFields.last_name  = last;
+      if (ext.email) contactFields.email = ext.email;
+      if (ext.phone) contactFields.phone = ext.phone;
+      const contact = await writeData('Contact', contactFields);
+      contactId = contact.id;
+    }
+    // Context refresh, damit Combobox den neuen Kunden findet
+    try {
+      const [allCustomers, allContacts] = await Promise.all([
+        readData('Customer').catch(() => []),
+        readData('Contact').catch(() => [])
+      ]);
+      _voiceState.context = _voiceState.context || {};
+      _voiceState.context.customers = allCustomers.filter(c => (c.fields.company_id || []).includes(cur.id) && c.fields.status !== 'archiviert');
+      _voiceState.context.contacts  = allContacts;
+    } catch (_) {}
+    _voiceState.editFields = _voiceState.editFields || {};
+    _voiceState.editFields.customer_id = customer.id;
+    if (contactId) _voiceState.editFields.contact_id = contactId;
+    _voiceState.extracted = null;
+    toast('Kunde angelegt + ausgewählt', 'success');
+  } catch (e) {
+    toast('Fehler: ' + (e.message || e), 'error', 6000);
+  } finally {
+    _voiceState.customerActionLoading = false;
+    _renderVoiceAssistant();
+  }
+}
+
 function _renderReadyBlock() {
-  const r = _voiceState.lastResponse;
-  const customerOk = !!(r && r.matched && r.matched.customer_id);
-  const aiItems = (r?.matched?.items || []).filter(i => i.article_id);
-  const totalItems = aiItems.length + (_voiceState.manualItems?.length || 0);
+  const ef = _voiceState.editFields || {};
+  const customerOk = !!ef.customer_id;
+  const totalItems = (_voiceState.manualItems?.length || 0);
   const ready = customerOk && totalItems > 0;
   if (!ready) return '';
   return `
@@ -4124,6 +4317,33 @@ async function processVoiceInput(userText) {
         if (typeof v === 'string' && v.trim()) _voiceState.customFieldValues[k] = v.trim();
       }
     }
+    // Edit-Block vorbelegen: Kunde + Kontakt + Standardfelder
+    // (nur wenn Felder noch leer sind — der User soll seine Korrekturen behalten)
+    const ef = _voiceState.editFields = _voiceState.editFields || { customer_id:'', contact_id:'', ticket_number:'', customer_reference:'', lieferzeit:'' };
+    const m = response?.matched || {};
+    if (m.customer_id && !ef.customer_id) ef.customer_id = m.customer_id;
+    if (m.contact_id  && !ef.contact_id)  ef.contact_id  = m.contact_id;
+    const cfs = m.custom_fields || {};
+    if (!ef.ticket_number      && cfs.ticketnummer)    ef.ticket_number      = String(cfs.ticketnummer).trim();
+    if (!ef.customer_reference && cfs.kundenreferenz)  ef.customer_reference = String(cfs.kundenreferenz).trim();
+    if (!ef.lieferzeit         && cfs.lieferzeit)      ef.lieferzeit         = String(cfs.lieferzeit).trim();
+    // Extracted-Customer-Daten (für "Kunde nicht im ERP"-Block) falls vom KI mitgegeben
+    if (m.customer_id) {
+      _voiceState.extracted = null;
+    } else if (m.customer_extracted && typeof m.customer_extracted === 'object') {
+      _voiceState.extracted = {
+        company_name: (m.customer_extracted.company_name || m.customer_name_spoken || '').toString().trim(),
+        street: (m.customer_extracted.street || '').toString().trim(),
+        zip: (m.customer_extracted.zip || '').toString().trim(),
+        city: (m.customer_extracted.city || '').toString().trim(),
+        contact_name: (m.customer_extracted.contact_name || '').toString().trim(),
+        email: (m.customer_extracted.email || '').toString().trim(),
+        phone: (m.customer_extracted.phone || '').toString().trim()
+      };
+    } else if (m.customer_name_spoken && !ef.customer_id) {
+      // Mindest-Fallback: nur Name vorhanden
+      _voiceState.extracted = { company_name: String(m.customer_name_spoken).trim() };
+    }
     const speech = (response.speech || '').trim() || '(keine Antwort)';
     _voiceState.history.push({ role: 'assistant', content: speech });
     // TTS + Auto-Listen nur im Voice-Modus
@@ -4213,6 +4433,15 @@ Antworte AUSSCHLIESSLICH mit einem JSON-Objekt (keine Code-Fences, keine Erklär
     "customer_id": "Airtable-record_id des erkannten Kunden, ODER null",
     "customer_name_spoken": "wie der Mitarbeiter den Kunden genannt hat",
     "customer_alternatives": [{"id":"...","name":"...","reason":"..."}],
+    "customer_extracted": {
+      "company_name": "Firmenname falls genannt (nur ausfüllen wenn customer_id == null)",
+      "street": "Straße + Nr falls genannt",
+      "zip": "PLZ falls genannt",
+      "city": "Ort falls genannt",
+      "contact_name": "Vor- und Nachname des Ansprechpartners falls genannt",
+      "email": "E-Mail falls genannt",
+      "phone": "Telefon falls genannt"
+    },
     "contact_id": "Airtable-record_id des Kontakts, ODER null",
     "items": [
       {
@@ -4224,13 +4453,17 @@ Antworte AUSSCHLIESSLICH mit einem JSON-Objekt (keine Code-Fences, keine Erklär
       }
     ],
     "custom_fields": {
-      "<feldname>": "<Wert wenn vom Mitarbeiter genannt, sonst Eintrag weglassen>"
+      "ticketnummer": "<falls genannt>",
+      "kundenreferenz": "<Bestell-/Auftragsnr falls genannt>",
+      "lieferzeit": "<Lieferzeit-Angabe falls genannt>",
+      "<weitere_feldname>": "<Wert wenn vom Mitarbeiter genannt, sonst Eintrag weglassen>"
     }
   }
 }
 
 REGELN:
 - "ready" NUR wenn customer_id != null UND mindestens ein Item mit article_id != null gesetzt ist
+  (Hinweis: Der Mitarbeiter kann fehlende Kunden im Edit-Block manuell wählen oder neu anlegen — fülle in dem Fall customer_extracted)
 - Bei unklarem Kunden: customer_id=null, customer_alternatives mit max 3 Vorschlägen, status=needs_input
 - Bei unklarem Artikel: article_id=null, alternatives mit max 3 Vorschlägen
 - Bei mehreren Artikeln im selben Satz mehrere items[]-Einträge erzeugen
@@ -4307,6 +4540,13 @@ function resetVoiceConversation() {
   _voiceState.interim = '';
   _voiceState.manualItems = [];
   _voiceState.customFieldValues = {};
+  _voiceState.editFields = {
+    customer_id: '', contact_id: '',
+    ticket_number: '', customer_reference: '', lieferzeit: ''
+  };
+  _voiceState.extracted = null;
+  _voiceState.match = null;
+  _voiceState.customerActionLoading = false;
   if ('speechSynthesis' in window) try { window.speechSynthesis.cancel(); } catch (_) {}
   _renderVoiceAssistant();
 }
@@ -4314,10 +4554,13 @@ function resetVoiceConversation() {
 // Legt Quote + QuoteItems aus dem letzten KI-Response-Set + manuell ausgewählten Items an
 async function prepareQuoteFromVoice() {
   const r = _voiceState.lastResponse;
+  const ef = _voiceState.editFields || {};
   const cur = getCurrentCompany();
   if (!cur) { toast('Mandant fehlt', 'error'); return; }
-  const m = r?.matched || {};
-  if (!m.customer_id) { toast('Kunde nicht erkannt — bitte per Sprache nennen', 'error'); return; }
+  // Edit-Block ist jetzt "Source of Truth" für Kunde/Kontakt — nicht mehr matched.customer_id
+  const customerId = ef.customer_id;
+  const contactId  = ef.contact_id || '';
+  if (!customerId) { toast('Bitte Kunde im Edit-Block auswählen', 'error'); return; }
   // Items: NUR manualItems verwenden — high-confidence KI-Items wurden bereits
   // via _autoAddHighConfidenceItems dorthin verschoben. Low/guess-Items sollten
   // vom User explizit per Picker bestätigt werden, nicht automatisch landen.
@@ -4350,23 +4593,26 @@ async function prepareQuoteFromVoice() {
     const fields = {
       quote_no: quoteNo,
       company_id: [cur.id],
-      customer_id: [m.customer_id],
+      customer_id: [customerId],
       date: iso(today),
       valid_until: iso(validUntil),
       status: 'Entwurf',
       ai_summary: 'Per Sprache vorbereitet:\n' + userTurns + manualNote
     };
-    if (m.contact_id) fields.contact_id = [m.contact_id];
+    if (contactId) fields.contact_id = [contactId];
     // Stammdaten aus dem Kunden ziehen (Zahlungsziel, Lieferbedingungen)
-    const terms = await getCustomerTerms(m.customer_id);
+    const terms = await getCustomerTerms(customerId);
     if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
     if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
-    // Custom Fields (vom User editiert + von KI vorausgefüllt) als JSON in custom_values
-    const cfValues = _voiceState.customFieldValues || {};
+    // Custom Fields zusammenstellen: Edit-Block-Felder + KI-Custom-Fields (Edit-Block hat Vorrang)
     const cfClean = {};
+    const cfValues = _voiceState.customFieldValues || {};
     for (const [k, v] of Object.entries(cfValues)) {
       if (typeof v === 'string' && v.trim()) cfClean[k] = v.trim();
     }
+    if ((ef.ticket_number      || '').trim()) cfClean.ticketnummer    = ef.ticket_number.trim();
+    if ((ef.customer_reference || '').trim()) cfClean.kundenreferenz  = ef.customer_reference.trim();
+    if ((ef.lieferzeit         || '').trim()) cfClean.lieferzeit      = ef.lieferzeit.trim();
     if (Object.keys(cfClean).length > 0) fields.custom_values = JSON.stringify(cfClean);
     // Standard-Bundle anhand der Artikel ermitteln (Doc-Typ: Angebot)
     const bundlePick = await pickBundleForItems(allItems, 'Angebot');
@@ -4408,11 +4654,17 @@ async function prepareQuoteFromVoice() {
     if (_voiceState.recognition) try { _voiceState.recognition.abort(); } catch (_) {}
     _voiceState.recording = false;
     _voiceState.ttsSpeaking = false;
-    // Manual-Items + Custom-Fields resetten, damit nichts beim nächsten Vorbereiten klebt
+    // Manual-Items + Custom-Fields + Edit-Block resetten, damit nichts beim nächsten Vorbereiten klebt
     _voiceState.manualItems = [];
     _voiceState.lastResponse = null;
     _voiceState.history = [];
     _voiceState.customFieldValues = {};
+    _voiceState.editFields = {
+      customer_id: '', contact_id: '',
+      ticket_number: '', customer_reference: '', lieferzeit: ''
+    };
+    _voiceState.extracted = null;
+    _voiceState.match = null;
     toast('Angebot ' + quoteNo + ' angelegt — öffne Editor', 'success', 3500);
     // Wichtig: erst zum Top scrollen, sonst sieht man das Modal nicht (Welcome-Seite ist gescrollt)
     window.scrollTo({ top: 0 });
