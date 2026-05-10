@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.78';
+const APP_VERSION = 'v3.79';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3403,6 +3403,28 @@ const AI_PRICING_USD_PER_1M = {
 };
 const AI_PRICING_FALLBACK = { input: 3.00, output: 15.00 }; // Sonnet-Tier
 
+// Schema für die AiUsageLog-Tabelle. Airtable Meta-API erwartet vollständige
+// Options bei dateTime + number — ohne die schlägt das Anlegen still fehl.
+const AI_USAGE_LOG_SCHEMA = [
+  { name: 'created_at', type: 'dateTime', options: {
+      dateFormat: { name: 'iso' },
+      timeFormat: { name: '24hour' },
+      timeZone: 'client'
+    } },
+  { name: 'user_id',                     type: 'singleLineText' },
+  { name: 'user_name',                   type: 'singleLineText' },
+  { name: 'company_id',                  type: 'singleLineText' },
+  { name: 'company_name',                type: 'singleLineText' },
+  { name: 'model',                       type: 'singleLineText' },
+  { name: 'purpose',                     type: 'singleLineText' },
+  { name: 'input_tokens',                type: 'number', options: { precision: 0 } },
+  { name: 'output_tokens',               type: 'number', options: { precision: 0 } },
+  { name: 'cache_creation_input_tokens', type: 'number', options: { precision: 0 } },
+  { name: 'cache_read_input_tokens',     type: 'number', options: { precision: 0 } },
+  { name: 'cost_usd',                    type: 'number', options: { precision: 6 } },
+  { name: 'request_id',                  type: 'singleLineText' }
+];
+
 function _aiPricingFor(model) {
   if (!model) return AI_PRICING_FALLBACK;
   if (AI_PRICING_USD_PER_1M[model]) return AI_PRICING_USD_PER_1M[model];
@@ -3439,22 +3461,9 @@ async function _logAiUsage(data, opts) {
     const usage = data.usage || {};
     const cost = _aiCalcCost(usage, model);
     const now = new Date();
-    // Tabelle lazy anlegen (idempotent)
-    await ensureTable('AiUsageLog', [
-      { name: 'created_at',                 type: 'dateTime' },
-      { name: 'user_id',                    type: 'singleLineText' },
-      { name: 'user_name',                  type: 'singleLineText' },
-      { name: 'company_id',                 type: 'singleLineText' },
-      { name: 'company_name',               type: 'singleLineText' },
-      { name: 'model',                      type: 'singleLineText' },
-      { name: 'purpose',                    type: 'singleLineText' },
-      { name: 'input_tokens',               type: 'number' },
-      { name: 'output_tokens',              type: 'number' },
-      { name: 'cache_creation_input_tokens',type: 'number' },
-      { name: 'cache_read_input_tokens',    type: 'number' },
-      { name: 'cost_usd',                   type: 'number' },
-      { name: 'request_id',                 type: 'singleLineText' }
-    ]).catch(()=>{});
+    // Tabelle lazy anlegen (idempotent) — Fehler stumm (Logging darf den
+    // eigentlichen AI-Call nicht stören; Admin-Dashboard zeigt den Fehler später)
+    await ensureTable('AiUsageLog', AI_USAGE_LOG_SCHEMA).catch(()=>{});
     await writeData('AiUsageLog', {
       created_at: now.toISOString(),
       user_id: userId,
@@ -6901,34 +6910,57 @@ async function renderAdminAiCosts() {
   }
 
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Logs…</p>';
-  // Tabelle anlegen falls noch nicht da, dann einlesen
-  await ensureTable('AiUsageLog', [
-    { name: 'created_at',                 type: 'dateTime' },
-    { name: 'user_id',                    type: 'singleLineText' },
-    { name: 'user_name',                  type: 'singleLineText' },
-    { name: 'company_id',                 type: 'singleLineText' },
-    { name: 'company_name',               type: 'singleLineText' },
-    { name: 'model',                      type: 'singleLineText' },
-    { name: 'purpose',                    type: 'singleLineText' },
-    { name: 'input_tokens',               type: 'number' },
-    { name: 'output_tokens',              type: 'number' },
-    { name: 'cache_creation_input_tokens',type: 'number' },
-    { name: 'cache_read_input_tokens',    type: 'number' },
-    { name: 'cost_usd',                   type: 'number' },
-    { name: 'request_id',                 type: 'singleLineText' }
-  ]).catch(()=>{});
+  // Tabelle anlegen falls noch nicht da. Fehler diesmal NICHT stummschalten —
+  // im Admin-Dashboard wollen wir den Grund sehen (z.B. fehlende Schema-Rechte).
+  let ensureErr = null;
+  try {
+    await ensureTable('AiUsageLog', AI_USAGE_LOG_SCHEMA);
+  } catch (e) {
+    ensureErr = e.message || String(e);
+  }
 
   let logs = [];
   try {
     logs = await readData('AiUsageLog', null, { sort: [{ field: 'created_at', direction: 'desc' }] });
   } catch (e) {
+    const msg = e.message || String(e);
+    // Wenn Tabelle nicht existiert (403/404), zeige eine erklärende Anleitung
+    const looksMissing = /403|404|NOT_FOUND|TABLE_NOT_FOUND/i.test(msg);
     document.getElementById('pageContent').innerHTML = `
-      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Fehler beim Laden: ${escapeHtml(e.message)}</div></div>`;
+      <div class="max-w-3xl mx-auto">
+        <div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">
+          <p class="font-semibold mb-2 flex items-center gap-2">
+            <i data-lucide="alert-triangle" class="w-5 h-5"></i>
+            ${looksMissing ? 'Tabelle „AiUsageLog" existiert noch nicht in der Airtable-Base' : 'Fehler beim Laden'}
+          </p>
+          <p class="text-sm mb-3">${escapeHtml(msg)}</p>
+          ${ensureErr ? `<p class="text-xs italic mb-3">Auto-Anlegen ist gescheitert: ${escapeHtml(ensureErr)}</p>` : ''}
+          <p class="text-xs mb-3">
+            Die Tabelle wird normalerweise automatisch angelegt, wenn die App den ersten KI-Call protokolliert.
+            Klicke auf den Button unten, um sie jetzt manuell zu erzeugen — danach erscheint das Dashboard
+            und fängt ab dem nächsten KI-Call mit dem Logging an.
+          </p>
+          <button type="button" onclick="_createAiUsageLogTableManually()" class="bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-4 py-2 text-sm font-medium inline-flex items-center gap-2">
+            <i data-lucide="plus-square" class="w-4 h-4"></i> Tabelle jetzt anlegen
+          </button>
+        </div>
+      </div>`;
+    if (window.lucide) lucide.createIcons();
     return;
   }
   _aiCostsState.rows = logs.map(r => r.fields || {});
   _aiCostsState.loaded = true;
   _renderAdminAiCosts();
+}
+
+async function _createAiUsageLogTableManually() {
+  try {
+    await ensureTable('AiUsageLog', AI_USAGE_LOG_SCHEMA);
+    toast('Tabelle erfolgreich angelegt', 'success');
+    renderAdminAiCosts();
+  } catch (e) {
+    toast('Anlegen fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+  }
 }
 
 function _renderAdminAiCosts() {
