@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.47';
+const APP_VERSION = 'v3.48';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2565,6 +2565,22 @@ function _renderVoiceAssistant() {
       ${_voiceState.interim ? `<p class="text-xs text-ink-500 italic mt-2 px-2">„${escapeHtml(_voiceState.interim)}"</p>` : ''}
     </div>
 
+    <!-- Texteingabe-Fallback für Codes, die schlecht erkannt werden -->
+    <div class="mb-3">
+      <div class="flex gap-2">
+        <input type="text" id="voiceTextInput" onkeydown="_voiceTextInputKey(event)"
+               placeholder="…oder eintippen (z.B. Artikel-Code V3F16L)"
+               class="flex-1 px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 font-mono"
+               ${_voiceState.processing ? 'disabled' : ''}>
+        <button type="button" onclick="submitVoiceTextInput()" ${_voiceState.processing ? 'disabled' : ''} class="bg-ink-700 hover:bg-ink-900 text-white rounded-lg px-3 py-2 text-sm disabled:opacity-50 inline-flex items-center gap-1.5">
+          <i data-lucide="send" class="w-4 h-4"></i> Senden
+        </button>
+      </div>
+      <p class="text-[11px] text-ink-500 mt-1.5">
+        💡 Tipp: Bei alphanumerischen Codes funktioniert <strong>Buchstabieralphabet</strong> per Sprache am besten — z.B. „V wie Viktor, drei, F wie Friedrich, sechzehn, L wie Ludwig". Oder einfach hier eintippen.
+      </p>
+    </div>
+
     ${_voiceState.lastResponse?.status === 'ready' ? `
       <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4">
         <p class="text-xs font-semibold text-emerald-900 mb-1 flex items-center gap-1.5">
@@ -2615,17 +2631,27 @@ function startVoiceRecording() {
   const recognition = new SR();
   recognition.lang = 'de-DE';
   recognition.interimResults = true;
-  recognition.continuous = false; // single-shot, simpler State
+  recognition.continuous = false;
+  // Mehrere Hypothesen pro Audio-Segment — hilft bei alphanumerischen Codes,
+  // wo die Engine oft die falsche zuerst rät. Wir geben alle an die KI weiter.
+  try { recognition.maxAlternatives = 3; } catch (_) {}
   let finalText = '';
+  let altText = []; // [['alt1','alt2','alt3'], ...] pro abgeschlossenem Segment
   recognition.onresult = (e) => {
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const r = e.results[i];
-      if (r.isFinal) finalText += r[0].transcript + ' ';
-      else interim += r[0].transcript;
+      if (r.isFinal) {
+        finalText += r[0].transcript + ' ';
+        // Bis zu 3 Alternativen je Segment einsammeln
+        const alts = [];
+        for (let j = 0; j < r.length && j < 3; j++) alts.push(r[j].transcript);
+        altText.push(alts);
+      } else {
+        interim += r[0].transcript;
+      }
     }
     _voiceState.interim = (finalText + interim).trim();
-    // Nur den interim-Text-Selektor updaten (vermeidet komplettes Re-Render)
     const interimP = document.querySelector('#voiceAssistantWrap p.italic');
     if (interimP) interimP.textContent = '„' + _voiceState.interim + '"';
     else _renderVoiceAssistant();
@@ -2637,11 +2663,16 @@ function startVoiceRecording() {
   };
   recognition.onend = () => {
     _voiceState.recognition = null;
-    if (!_voiceState.recording) return; // wurde manuell via stopVoiceRecording beendet
+    if (!_voiceState.recording) return;
     _voiceState.recording = false;
     const text = (finalText.trim() || _voiceState.interim || '').trim();
-    if (text) processVoiceInput(text);
-    else _renderVoiceAssistant();
+    if (text) {
+      // Pro-Segment-Alternativen flachklopfen + zur primären Hypothese mitschicken
+      _voiceState.lastAlternatives = altText;
+      processVoiceInput(text);
+    } else {
+      _renderVoiceAssistant();
+    }
   };
   _voiceState.recognition = recognition;
   _voiceState.recording = true;
@@ -2652,6 +2683,23 @@ function startVoiceRecording() {
     _voiceState.recording = false;
   }
   _renderVoiceAssistant();
+}
+
+// Texteingabe-Fallback: User tippt statt zu sprechen (für Codes, die schlecht erkannt werden)
+function submitVoiceTextInput() {
+  const inp = document.getElementById('voiceTextInput');
+  if (!inp) return;
+  const text = (inp.value || '').trim();
+  if (!text) return;
+  inp.value = '';
+  // Im History anzeigen wie eine Voice-Eingabe
+  processVoiceInput(text);
+}
+function _voiceTextInputKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submitVoiceTextInput();
+  }
 }
 
 function stopVoiceRecording() {
@@ -2705,6 +2753,14 @@ function _voiceBuildPrompt(userText) {
   const historyTxt = _voiceState.history.slice(-10).map(m =>
     (m.role === 'user' ? 'Mitarbeiter' : 'Du') + ': ' + m.content
   ).join('\n\n');
+  // Alternative Speech-Recognition-Hypothesen mitschicken — hilft bei alphanumerischen Codes
+  let altsBlock = '';
+  if (Array.isArray(_voiceState.lastAlternatives) && _voiceState.lastAlternatives.length > 0) {
+    const flat = _voiceState.lastAlternatives.map(seg => seg.join(' | ')).join('\n');
+    altsBlock = `\nALTERNATIVE HYPOTHESEN DER SPRACHERKENNUNG (zur Robustheit, primäre Hypothese ist im Eingabefeld oben):\n${flat}\n`;
+  }
+  // Alternativen nach diesem Turn invalidieren
+  _voiceState.lastAlternatives = null;
 
   return `Du bist KI-Sales-Assistent bei FLP Lift Parts (Aufzugsersatzteile, Reparatur Frequenzumrichter). Aufgabe: Aus Spracheingaben eines Mitarbeiters auf Deutsch ein Angebot vorbereiten.
 
@@ -2719,11 +2775,22 @@ ${historyTxt || '(neu)'}
 
 NEUE EINGABE DES MITARBEITERS:
 "${userText}"
+${altsBlock}
+WICHTIG — SPRACHERKENNUNG VON ARTIKEL-CODES:
+Browser-Spracherkennung verzerrt alphanumerische Codes wie "V3F16L" oft stark, z.B. zu:
+  "feif drei eff sechzehn ähl" / "v drei eff sechzehn el" / "freitag sechzehn ähl"
+Mappe phonetische Aussprachen aktiv zurück:
+  - Zahlwörter: null/eins/zwei/drei/.../zehn/elf/zwölf/dreizehn/.../zwanzig → 0..20
+  - Buchstaben: "ähl/ehl/L wie Ludwig" → L; "äff/ehf/F wie Friedrich" → F; "fau/V wie Viktor" → V; "be/B wie Berta" → B; "ge/G wie Gustav" → G; usw.
+  - Buchstabier-Wendungen "X wie Y" → einfach X
+  - Wenn ein Token wie "freitag", "sechzehn", "drei" vorkommt + Artikel-Codes existieren, die diese Buchstaben/Zahlen enthalten, prüfe Fuzzy-Match aggressiv
+  - Vergleiche IMMER mit der Artikelliste oben (sku-Spalte) — zähl Buchstaben/Ziffern und matche Pattern, nicht Wortlaut
+  - Bei mehreren plausiblen SKUs (z.B. V3F16L vs V3F18L): article_id=null, alternatives setzen, status=needs_input und in speech eine konkrete Rückfrage mit 2-3 Optionen
 
 Antworte AUSSCHLIESSLICH mit einem JSON-Objekt (keine Code-Fences, keine Erklärung davor/danach) genau in diesem Schema:
 
 {
-  "speech": "Kurze freundliche Rückmeldung an den Mitarbeiter (max 2-3 kurze Sätze, deutsch). Bestätige was du verstanden hast oder frage gezielt nach was fehlt.",
+  "speech": "Kurze freundliche Rückmeldung an den Mitarbeiter (max 2-3 kurze Sätze, deutsch). Bestätige was du verstanden hast oder frage gezielt nach was fehlt. Wenn Artikel-Code unklar: nenne die Top-Treffer als Buchstaben einzeln, z.B. 'Meintest du V wie Viktor 3 F 16 L?'",
   "status": "ready" wenn alle Daten für ein Angebot komplett sind, sonst "needs_input",
   "missing": ["Liste was noch fehlt — leer wenn ready"],
   "matched": {
@@ -2735,8 +2802,8 @@ Antworte AUSSCHLIESSLICH mit einem JSON-Objekt (keine Code-Fences, keine Erklär
       {
         "article_id": "Airtable-record_id ODER null wenn unklar",
         "qty": 1,
-        "name_spoken": "wie der Mitarbeiter den Artikel genannt hat",
-        "alternatives": [{"id":"...","name":"...","reason":"..."}],
+        "name_spoken": "wie der Mitarbeiter den Artikel genannt hat (oder reconstructed Code, z.B. 'V3F16L')",
+        "alternatives": [{"id":"...","name":"...","reason":"phonetisch sehr nah / 1 Zeichen Unterschied / etc"}],
         "match_confidence": "high|low|guess"
       }
     ]
@@ -2748,10 +2815,9 @@ REGELN:
 - Bei unklarem Kunden: customer_id=null, customer_alternatives mit max 3 Vorschlägen, status=needs_input
 - Bei unklarem Artikel: article_id=null, alternatives mit max 3 Vorschlägen
 - Bei mehreren Artikeln im selben Satz mehrere items[]-Einträge erzeugen
-- speech: SEHR KURZ. Beispiele: "Angebot für Mustermann GmbH mit ABB ACS580. Welche Menge?" / "Ich finde zwei Müller — Müller Aufzüge in Berlin oder Müller Service in Hamburg?" / "Verstanden, Angebot bereit. Tippe auf 'Vorbereiten'."
 - Verwende NUR record_ids, die in den obigen Listen vorkommen
 - Mengen-Defaults: wenn nicht genannt, qty=1
-- Berücksichtige die KONVERSATION BISHER — der Mitarbeiter ergänzt schrittweise`;
+- Berücksichtige die KONVERSATION BISHER — der Mitarbeiter ergänzt schrittweise und korrigiert Codes per Buchstabieralphabet`;
 }
 
 async function _voiceCallAi(userText) {
