@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.87';
+const APP_VERSION = 'v3.88';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2666,8 +2666,143 @@ async function saveFreshdeskTicketSummary(opts) {
 // Quick-View: zeigt nur die letzte KI-Zusammenfassung des Tickets in einem
 // kleinen Modal, ohne das volle Detail-Modal zu öffnen. Aufruf vom KI-Badge
 // in der Tickets-Übersicht.
+// State für die Quick-Notiz im KI-Zusammenfassungs-Modal
+let _quickNoteState = { ticketId: null, recognition: null, recording: false, interim: '', saving: false };
+
+function _qnHasSpeechApi() {
+  return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function _qnToggleMic(ticketId) {
+  if (_quickNoteState.recording) {
+    _qnStopRecording();
+  } else {
+    _qnStartRecording(ticketId);
+  }
+}
+
+function _qnStartRecording(ticketId) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { toast('Spracherkennung in diesem Browser nicht verfügbar', 'error'); return; }
+  const recognition = new SR();
+  recognition.lang = 'de-DE';
+  recognition.interimResults = true;
+  recognition.continuous = true; // Längere Diktate erlauben (User stoppt manuell)
+  let acc = '';
+  recognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) acc += r[0].transcript + ' ';
+      else interim += r[0].transcript;
+    }
+    _quickNoteState.interim = (acc + interim).trim();
+    const status = document.getElementById('qnStatus');
+    if (status) status.textContent = '🎤 ' + (_quickNoteState.interim || '…');
+  };
+  recognition.onerror = (e) => {
+    if (e.error !== 'no-speech' && e.error !== 'aborted') {
+      toast('Spracherkennung-Fehler: ' + e.error, 'error', 4000);
+    }
+  };
+  recognition.onend = () => {
+    _quickNoteState.recording = false;
+    _quickNoteState.recognition = null;
+    // Erkannten Text ans Ende der Textarea hängen
+    const ta = document.getElementById('qnText');
+    if (ta && acc.trim()) {
+      const cur = (ta.value || '').trim();
+      ta.value = (cur ? cur + ' ' : '') + acc.trim();
+    }
+    _quickNoteState.interim = '';
+    _qnRenderControls();
+  };
+  _quickNoteState.recognition = recognition;
+  _quickNoteState.recording = true;
+  _quickNoteState.ticketId = ticketId;
+  try { recognition.start(); }
+  catch (e) {
+    toast('Mikro konnte nicht gestartet werden: ' + e.message, 'error', 5000);
+    _quickNoteState.recording = false;
+    _quickNoteState.recognition = null;
+  }
+  _qnRenderControls();
+}
+
+function _qnStopRecording() {
+  if (_quickNoteState.recognition) {
+    try { _quickNoteState.recognition.stop(); } catch (_) {}
+  }
+}
+
+function _qnRenderControls() {
+  const btn = document.getElementById('qnMicBtn');
+  const status = document.getElementById('qnStatus');
+  if (btn) {
+    btn.innerHTML = _quickNoteState.recording
+      ? '<i data-lucide="square" class="w-4 h-4"></i> Stop'
+      : '<i data-lucide="mic" class="w-4 h-4"></i> Sprachnotiz';
+    btn.className = _quickNoteState.recording
+      ? 'bg-red-500 hover:bg-red-600 text-white rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5 animate-pulse'
+      : 'bg-purple-100 text-purple-700 border border-purple-300 hover:bg-purple-200 rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5';
+    if (window.lucide) lucide.createIcons();
+  }
+  if (status && !_quickNoteState.recording) status.textContent = '';
+}
+
+async function _qnSave(ticketId) {
+  // Falls noch aufnahme läuft, stoppen und Recognition komplett abwarten
+  if (_quickNoteState.recording) {
+    _qnStopRecording();
+    await new Promise(r => setTimeout(r, 350));
+  }
+  const ta = document.getElementById('qnText');
+  const text = (ta?.value || '').trim();
+  if (!text) {
+    toast('Bitte erst eine Notiz eingeben oder diktieren', 'warn');
+    ta?.focus();
+    return;
+  }
+  if (_quickNoteState.saving) return;
+  _quickNoteState.saving = true;
+  _qnRenderSaveBtn();
+  try {
+    const author = APP_KEYS.user?.name ? ' — ' + APP_KEYS.user.name : '';
+    const html = '<p><strong>📝 Interne Notiz</strong>' + escapeHtml(author) + '</p>' +
+                 '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
+    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', {
+      method: 'POST',
+      body: { body: html, private: true }
+    });
+    toast('Notiz im Ticket gespeichert', 'success', 2500);
+    // Sauber aufräumen + zurück zur Übersicht
+    _quickNoteState = { ticketId: null, recognition: null, recording: false, interim: '', saving: false };
+    closeModal();
+    // Liste neu laden — KI-Cache invalidieren, damit aktuelle Notiz-Marker stimmen
+    _fdAiSummaryCache.delete(ticketId);
+    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+  } catch (e) {
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+  } finally {
+    _quickNoteState.saving = false;
+    _qnRenderSaveBtn();
+  }
+}
+
+function _qnRenderSaveBtn() {
+  const btn = document.getElementById('qnSaveBtn');
+  if (!btn) return;
+  btn.disabled = _quickNoteState.saving;
+  btn.innerHTML = _quickNoteState.saving
+    ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'
+    : '<i data-lucide="send" class="w-4 h-4"></i> Speichern + zurück zur Übersicht';
+  if (window.lucide) lucide.createIcons();
+}
+
 async function showAiSummaryQuickView(ticketId) {
   if (!ticketId) return;
+  _quickNoteState = { ticketId, recognition: null, recording: false, interim: '', saving: false };
+  const hasMic = _qnHasSpeechApi();
   openModal(`
     <div class="p-6">
       <div class="flex items-center justify-between mb-4">
@@ -2682,7 +2817,25 @@ async function showAiSummaryQuickView(ticketId) {
       <div id="aiSummaryQuickContent">
         <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade…</p>
       </div>
-      <div class="mt-4 flex justify-between gap-2 flex-wrap">
+
+      <!-- Quick-Notiz-Section -->
+      <div class="mt-5 border-t border-ink-100 pt-4 bg-amber-50/30 -mx-6 px-6 -mb-2 py-3 rounded-b-xl">
+        <p class="text-xs font-semibold text-amber-900 mb-2 flex items-center gap-1.5">
+          <i data-lucide="message-square-plus" class="w-3.5 h-3.5"></i> Interne Notiz für Mitarbeiter ${hasMic ? '— Text oder Sprache' : '(Text)'}
+        </p>
+        <textarea id="qnText" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 resize-y bg-white" placeholder="${hasMic ? 'Schreibe oder klick auf Sprachnotiz…' : 'Schreibe deine Notiz hier…'}"></textarea>
+        <div class="flex gap-2 mt-2 flex-wrap items-center">
+          ${hasMic ? `<button id="qnMicBtn" type="button" onclick="_qnToggleMic(${ticketId})" class="bg-purple-100 text-purple-700 border border-purple-300 hover:bg-purple-200 rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5">
+            <i data-lucide="mic" class="w-4 h-4"></i> Sprachnotiz
+          </button>` : ''}
+          <button id="qnSaveBtn" type="button" onclick="_qnSave(${ticketId})" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-1.5 flex-1 min-w-[200px] justify-center">
+            <i data-lucide="send" class="w-4 h-4"></i> Speichern + zurück zur Übersicht
+          </button>
+        </div>
+        <p id="qnStatus" class="text-[11px] text-ink-500 mt-1 min-h-[14px]"></p>
+      </div>
+
+      <div class="mt-3 flex justify-between gap-2 flex-wrap">
         <button type="button" onclick="closeModal();openFreshdeskTicket(${ticketId})" class="text-sm text-brand-600 hover:text-brand-700 inline-flex items-center gap-1.5">
           <i data-lucide="external-link" class="w-4 h-4"></i> Vollständiges Ticket öffnen
         </button>
