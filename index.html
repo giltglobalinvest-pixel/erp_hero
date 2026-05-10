@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.89';
+const APP_VERSION = 'v3.90';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -681,7 +681,10 @@ const APP_KEYS = {
   // Werden in Master-Base abgelegt und sind auch über die Airtable-API lesbar
   // (Maintenance-Updates aus dem Chat heraus ohne Copy-Paste möglich).
   valtownKey: null,
-  valtownValId: null
+  valtownValId: null,
+  // Freshsales-CRM: Subdomain (z.B. "gilt" für gilt.myfreshworks.com)
+  // + API-Key liegt in Val.town als env var, NICHT im Browser
+  freshsalesSubdomain: null
 };
 
 // Liefert die direkte Freshdesk-UI-URL eines Tickets, oder null wenn Domain nicht konfiguriert.
@@ -762,6 +765,7 @@ async function loadProjectKeys() {
         if (f.key_name === 'freshdeskDomain')        APP_KEYS.freshdeskDomain        = f.key_value;
         if (f.key_name === 'valtownKey')             APP_KEYS.valtownKey             = f.key_value;
         if (f.key_name === 'valtownValId')           APP_KEYS.valtownValId           = f.key_value;
+        if (f.key_name === 'freshsalesSubdomain')    APP_KEYS.freshsalesSubdomain    = f.key_value;
       });
     }
   } catch (_) {}
@@ -1300,6 +1304,82 @@ async function updateTicketStatus(ticketId, statusCode) {
   }
 }
 
+// Cache aller Freshdesk-Agenten (id → {id, name, email})
+// Wird einmalig pro Sitzung geladen, danach für Bearbeiter-Anzeige + Dropdown wiederverwendet.
+let _fdAgentsCache = null;
+let _fdAgentsLoading = null;
+async function _loadFdAgents(force) {
+  if (!force && _fdAgentsCache) return _fdAgentsCache;
+  if (_fdAgentsLoading) return _fdAgentsLoading;
+  _fdAgentsLoading = (async () => {
+    try {
+      // GET /api/v2/agents — Freshdesk liefert pro Agent ein contact-Sub-Object
+      const list = await freshdeskFetch('agents?per_page=100');
+      const arr = Array.isArray(list) ? list : [];
+      _fdAgentsCache = arr.map(a => ({
+        id: a.id,
+        name: a.contact?.name || a.contact?.email || ('Agent ' + a.id),
+        email: a.contact?.email || ''
+      })).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'de'));
+    } catch (e) {
+      console.warn('[Agents] Laden fehlgeschlagen:', e.message);
+      _fdAgentsCache = [];
+    } finally {
+      _fdAgentsLoading = null;
+    }
+    return _fdAgentsCache;
+  })();
+  return _fdAgentsLoading;
+}
+function _fdAgentName(id) {
+  if (id == null) return '';
+  const a = (_fdAgentsCache || []).find(x => x.id === id);
+  return a ? a.name : ('Agent ' + id);
+}
+
+// Bearbeiter (responder_id) eines Tickets via PUT ändern
+async function updateTicketResponder(ticketId, responderId) {
+  // Menü schließen
+  document.getElementById('ticketResponderMenu_' + ticketId)?.classList.add('hidden');
+  if (!APP_KEYS.proxyV2) {
+    return toast('Bearbeiter-Wechsel benötigt Val.town-Proxy v2', 'error', 7000);
+  }
+  try {
+    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, {
+      method: 'PUT',
+      body: { responder_id: responderId === null || responderId === '' ? null : Number(responderId) }
+    });
+    toast(responderId ? 'Bearbeiter gesetzt: ' + _fdAgentName(Number(responderId)) : 'Bearbeiter entfernt', 'success', 2500);
+    _fdAiSummaryCache.delete(ticketId);
+    loadFreshdeskTicketsPreview();
+  } catch (e) {
+    toast('Fehler beim Bearbeiter-Wechsel: ' + e.message, 'error', 6000);
+  }
+}
+
+function _toggleTicketResponderMenu(ticketId) {
+  // Andere offene Menüs schließen
+  document.querySelectorAll('[id^="ticketResponderMenu_"]').forEach(el => {
+    if (el.id !== 'ticketResponderMenu_' + ticketId) el.classList.add('hidden');
+  });
+  document.querySelectorAll('[id^="ticketStatusMenu_"]').forEach(el => el.classList.add('hidden'));
+  const menu = document.getElementById('ticketResponderMenu_' + ticketId);
+  if (!menu) return;
+  menu.classList.toggle('hidden');
+  if (!menu.classList.contains('hidden')) {
+    // Klick außerhalb → schließen (einmalig)
+    setTimeout(() => {
+      const handler = (e) => {
+        if (!e.target.closest('#ticketResponderMenu_' + ticketId) && !e.target.closest('[onclick*="_toggleTicketResponderMenu(' + ticketId + ')"]')) {
+          menu.classList.add('hidden');
+          document.removeEventListener('click', handler);
+        }
+      };
+      document.addEventListener('click', handler);
+    }, 50);
+  }
+}
+
 async function loadFreshdeskTicketsPreview() {
   const wrap = document.getElementById('freshdeskTicketsWrap');
   if (!wrap) return;
@@ -1337,7 +1417,10 @@ async function loadFreshdeskTicketsPreview() {
     const statusQuery = _inquiriesStatusFilterQuery();
     const statusPart = statusQuery ? ' AND ' + statusQuery : '';
     const query = `"(group_id:${groupId})${statusPart}${typeFilter}"`;
+    // Agents im Hintergrund laden (parallel zum Ticket-Search), damit Bearbeiter-Names beim Render bereits da sind
+    const agentsPromise = _loadFdAgents();
     const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
+    await agentsPromise; // warten, damit der erste Render mit Names ist
     let tickets = data.results || [];
     // Client-side Doppel-Filter: Freshdesks Search-Index hat 1–10 Sek Lag bei
     // Status-Änderungen, daher kann ein gerade geschlossenes Ticket noch in der
@@ -1442,8 +1525,20 @@ async function loadFreshdeskTicketsPreview() {
                 <span class="own-note-slot inline-flex">${initialOwn ? `<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5" title="Du hast eine eigene Notiz an diesem Ticket"><i data-lucide="message-square" class="w-2.5 h-2.5"></i> Notiz</span>` : ''}</span>
                 ${quoteBadges}
               </div>
-              <!-- Zeile 4: Datum + Prio -->
-              <p class="text-xs text-ink-500">${escapeHtml(dt)}${t.priority ? ' · Prio ' + t.priority : ''}</p>
+              <!-- Zeile 4: Bearbeiter (statt Datum/Prio) -->
+              <div class="relative text-xs" onclick="event.stopPropagation()">
+                <button type="button" onclick="_toggleTicketResponderMenu(${t.id})" class="inline-flex items-center gap-1 text-ink-500 hover:text-ink-900 hover:bg-ink-50 rounded px-1.5 py-0.5 -ml-1.5 transition" title="Bearbeiter ändern">
+                  <i data-lucide="user" class="w-3 h-3 shrink-0"></i>
+                  <span class="ticket-responder-label">${t.responder_id ? escapeHtml(_fdAgentName(t.responder_id)) : '<span class="italic text-ink-400">Nicht zugewiesen</span>'}</span>
+                  <i data-lucide="chevron-down" class="w-2.5 h-2.5 shrink-0"></i>
+                </button>
+                <div id="ticketResponderMenu_${t.id}" class="hidden absolute left-0 bottom-full mb-1 z-30 bg-white border border-ink-200 rounded-lg shadow-lg overflow-hidden min-w-[200px] max-h-[260px] overflow-y-auto">
+                  <button type="button" onclick="updateTicketResponder(${t.id}, '')" class="w-full text-left px-3 py-2 text-xs hover:bg-ink-50 italic text-ink-600 ${t.responder_id == null ? 'bg-ink-50 font-semibold' : ''}">— Nicht zugewiesen</button>
+                  ${(_fdAgentsCache || []).map(a => `
+                    <button type="button" onclick="updateTicketResponder(${t.id}, ${a.id})" class="w-full text-left px-3 py-2 text-xs hover:bg-ink-50 ${t.responder_id === a.id ? 'bg-ink-50 font-semibold' : ''}">${escapeHtml(a.name)}</button>
+                  `).join('') || '<p class="px-3 py-2 text-xs text-ink-500 italic">Agenten werden geladen…</p>'}
+                </div>
+              </div>
             </div>
           `;
         }).join('')}
@@ -4015,8 +4110,9 @@ async function valtownAutoSetup({ token, onProgress }) {
     { k: 'AIRTABLE_READ_KEY', v: APP_CONFIG.AIRTABLE_READ_KEY, d: 'Read-Token für App-Base' },
     { k: 'AIRTABLE_BASE_ID',  v: APP_CONFIG.APP_BASE_ID,       d: 'App-Base-ID' }
   ];
-  if (APP_KEYS.anthropicKey)    envs.push({ k: 'ANTHROPIC_API_KEY', v: APP_KEYS.anthropicKey, d: 'Anthropic-Key für KI-Calls' });
-  if (APP_KEYS.freshdeskDomain) envs.push({ k: 'FRESHDESK_DOMAIN',  v: APP_KEYS.freshdeskDomain, d: 'Freshdesk-Subdomain (z.B. flpliftparts)' });
+  if (APP_KEYS.anthropicKey)        envs.push({ k: 'ANTHROPIC_API_KEY',    v: APP_KEYS.anthropicKey,        d: 'Anthropic-Key für KI-Calls' });
+  if (APP_KEYS.freshdeskDomain)     envs.push({ k: 'FRESHDESK_DOMAIN',     v: APP_KEYS.freshdeskDomain,     d: 'Freshdesk-Subdomain (z.B. flpliftparts)' });
+  if (APP_KEYS.freshsalesSubdomain) envs.push({ k: 'FRESHSALES_SUBDOMAIN', v: APP_KEYS.freshsalesSubdomain, d: 'Freshsales-Subdomain (z.B. gilt)' });
   for (const env of envs) {
     log('Setze ENV ' + env.k + '…');
     try {
@@ -7422,6 +7518,39 @@ export default async function (req: Request): Promise<Response> {
     });
   }
 
+  // 5) Freshsales / Freshworks-CRM — Routet /freshsales/api/... an
+  //    https://<subdomain>.myfreshworks.com/crm/sales/api/...
+  //    Auth: "Token token=API_TOKEN" Header. Subdomain + Key kommen aus env vars.
+  if (path.startsWith("freshsales/")) {
+    const fsPath = path.replace(/^freshsales\\//, "");
+    let subdomain = (Deno.env.get("FRESHSALES_SUBDOMAIN") || "").trim()
+      .replace(/^https?:\\/\\//i, "")
+      .replace(/\\.myfreshworks\\.com\\/?.*$/i, "")
+      .replace(/\\/+$/, "");
+    if (!subdomain) return jsonResponse({ error: "FRESHSALES_SUBDOMAIN env var fehlt in Val.town" }, 500);
+    const fsKey = Deno.env.get("FRESHSALES_API_KEY");
+    if (!fsKey) return jsonResponse({ error: "FRESHSALES_API_KEY env var fehlt in Val.town" }, 500);
+    const target = \`https://\${subdomain}.myfreshworks.com/crm/sales/\${fsPath}\${url.search}\`;
+    const init: RequestInit = {
+      method: req.method,
+      headers: {
+        "Authorization": \`Token token=\${fsKey}\`,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      }
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
+    const upstream = await fetch(target, init);
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") || "application/json",
+        "access-control-allow-origin": "*"
+      }
+    });
+  }
+
   return jsonResponse({ error: \`Route nicht gefunden: \${path}\` }, 404);
 }
 `;
@@ -7435,7 +7564,9 @@ function _valtownEnvVars() {
     { name: 'AIRTABLE_BASE_ID',   hint: 'App-Base-ID — wo die User-Tabelle liegt:', value: APP_CONFIG.APP_BASE_ID, secret: false, required: true },
     { name: 'ANTHROPIC_API_KEY',  hint: 'Anthropic Console → API Keys → Create. Beginnt mit sk-ant-...', value: '', secret: true, required: true },
     { name: 'FRESHDESK_DOMAIN',   hint: 'Subdomain ohne .freshdesk.com (z.B. wenn URL flpliftparts.freshdesk.com → "flpliftparts")', value: '', secret: false, required: true },
-    { name: 'FRESHDESK_API_KEY',  hint: 'OPTIONAL — Fallback-Key. Wird nur verwendet, wenn ein User keinen eigenen Freshdesk-Key in seinem Profil hat. Empfehlung: leer lassen und stattdessen pro Mitarbeiter den persönlichen Key in Admin → Benutzer eintragen.', value: '', secret: true, required: false }
+    { name: 'FRESHDESK_API_KEY',  hint: 'OPTIONAL — Fallback-Key. Wird nur verwendet, wenn ein User keinen eigenen Freshdesk-Key in seinem Profil hat. Empfehlung: leer lassen und stattdessen pro Mitarbeiter den persönlichen Key in Admin → Benutzer eintragen.', value: '', secret: true, required: false },
+    { name: 'FRESHSALES_SUBDOMAIN', hint: 'OPTIONAL — Subdomain ohne .myfreshworks.com (z.B. "gilt" wenn deine URL gilt.myfreshworks.com lautet). Nur nötig wenn du Kunden ins Freshsales-CRM syncen willst.', value: '', secret: false, required: false },
+    { name: 'FRESHSALES_API_KEY',   hint: 'OPTIONAL — API-Token aus Freshsales: in der CRM-UI oben rechts Profil → "Settings" → "API Settings" → Token kopieren.', value: '', secret: true, required: false }
   ];
 }
 
@@ -8079,6 +8210,33 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
+      <!-- ============ STEP 9 — Freshsales-CRM (optional) ============ -->
+      ${(() => {
+        const fsDomain = APP_KEYS.freshsalesSubdomain || '';
+        return `
+        <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+          ${stepHeader(9, 'Freshsales-CRM-Sync (optional)', fsDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
+          <div class="pl-11">
+            <p class="text-sm text-ink-700 mb-2">Wenn du dein Kunden-Stammdaten auch in Freshsales/Freshworks CRM pflegen willst, kann die App Firmen (und später Kontakte) per Button-Klick dorthin syncen.</p>
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 mb-3 text-[11px] text-blue-900">
+              <strong>So funktioniert's:</strong> Subdomain hier eintragen, API-Token nur in Val.town (Env-Var <code>FRESHSALES_API_KEY</code>) — der Token bleibt damit serverside.
+              Token holen: in Freshsales oben rechts <strong>Profil → Settings → API Settings → Token kopieren</strong>.
+            </div>
+            <label class="block text-xs font-medium text-ink-700 mb-1">Subdomain</label>
+            <div class="flex gap-2 flex-wrap mb-2">
+              <input type="text" id="settingsFsDomain" value="${escapeHtml(fsDomain)}" placeholder="z.B. gilt (ohne .myfreshworks.com)" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
+              <button type="button" onclick="saveFreshsalesSubdomain()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+                <i data-lucide="save" class="w-4 h-4"></i> Speichern
+              </button>
+            </div>
+            <p class="text-[11px] text-ink-500 mb-3">Beispiel: wenn die Freshsales-URL <code>https://gilt.myfreshworks.com/crm/sales</code> ist → eintragen: <code>gilt</code></p>
+            ${fsDomain ? `<button type="button" onclick="testFreshsalesConnection(this)" class="text-xs px-3 py-1.5 border border-ink-200 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5">
+              <i data-lucide="activity" class="w-3.5 h-3.5"></i> Verbindung testen
+            </button>` : ''}
+          </div>
+        </div>`;
+      })()}
+
       <!-- ============ SCHNELL-SETUP (Auto via Val.town API) ============ -->
       ${(() => {
         const isProxySet = !!APP_KEYS.apiProxyUrl;
@@ -8192,6 +8350,45 @@ async function saveSalesGroupId() {
     renderAdminSettings();
   } catch (e) {
     toast(e.message, 'error', 7000);
+  }
+}
+
+async function saveFreshsalesSubdomain() {
+  const inp = document.getElementById('settingsFsDomain');
+  if (!inp) return;
+  const val = (inp.value || '').trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\.myfreshworks\.com\/?.*$/i, '')
+    .replace(/\/+$/, '');
+  try {
+    const keys = await _fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'freshsalesSubdomain');
+    if (val) {
+      await _writeMasterBaseKey('freshsalesSubdomain', val, existing?.id || null);
+      APP_KEYS.freshsalesSubdomain = val;
+      toast('Freshsales-Subdomain gespeichert', 'success');
+    } else if (existing) {
+      await _deleteMasterBaseKey(existing.id);
+      APP_KEYS.freshsalesSubdomain = null;
+      toast('Subdomain entfernt', 'success');
+    }
+    renderAdminSettings();
+  } catch (e) { toast(e.message, 'error', 7000); }
+}
+
+async function testFreshsalesConnection(btnEl) {
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Teste…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // Selectors-Endpoint ist leichtgewichtig + benötigt nur Read-Permission
+    const res = await proxyFetch('freshsales/api/selector/sales_accounts');
+    // Bei Erfolg liefert Freshsales ein Objekt mit "sales_accounts" o.ä.
+    if (res) toast('✓ Freshsales erreichbar — Auth + Subdomain OK', 'success', 4000);
+    else toast('Antwort war leer — Token-Permissions prüfen', 'warn', 5000);
+  } catch (e) {
+    toast('Verbindung fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  } finally {
+    if (btnEl) { btnEl.disabled = false; if (origHtml) btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
 }
 
@@ -9038,6 +9235,11 @@ function customerRow(rec, primary) {
 async function openCustomerModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  // Schema-Erweiterung für CRM-Sync-IDs (idempotent — werden nur beim ersten Aufruf erzeugt)
+  await ensureFields('Customer', [
+    { name: 'freshdesk_company_id',  type: 'singleLineText' },
+    { name: 'freshsales_account_id', type: 'singleLineText' }
+  ]).catch(()=>{});
   let f = {};
   let contacts = [];
   let addresses = [];
@@ -9060,10 +9262,28 @@ async function openCustomerModal(id) {
   }
   openModal(`
     <form onsubmit="saveCustomer(event, '${id || ''}')" class="p-6">
-      <div class="flex items-baseline justify-between mb-4">
+      <div class="flex items-baseline justify-between mb-4 flex-wrap gap-2">
         <h3 class="text-lg font-bold text-ink-900">${id ? 'Kunde bearbeiten' : 'Neuer Kunde'}</h3>
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
+      ${id ? `
+        <!-- CRM-Sync-Block -->
+        <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-4">
+          <p class="text-xs font-semibold text-ink-700 mb-2 flex items-center gap-1.5">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> CRM-Sync (Firma)
+          </p>
+          <div class="flex flex-wrap gap-2 items-center">
+            <button type="button" onclick="syncCustomerToFreshdesk('${id}', this)" class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-3 py-1.5 text-xs font-medium inline-flex items-center gap-1.5">
+              <i data-lucide="headphones" class="w-3.5 h-3.5"></i> ${(f.freshdesk_company_id || '').trim() ? 'Freshdesk aktualisieren' : 'Zu Freshdesk syncen'}
+            </button>
+            ${(f.freshdesk_company_id || '').trim() ? `<span class="text-[11px] text-ink-500 font-mono">FD-ID: ${escapeHtml(String(f.freshdesk_company_id).slice(0, 12))}…</span>` : '<span class="text-[11px] text-ink-500 italic">noch nicht in Freshdesk</span>'}
+            <button type="button" onclick="syncCustomerToFreshsales('${id}', this)" class="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-3 py-1.5 text-xs font-medium inline-flex items-center gap-1.5">
+              <i data-lucide="trending-up" class="w-3.5 h-3.5"></i> ${(f.freshsales_account_id || '').trim() ? 'Freshsales aktualisieren' : 'Zu Freshsales syncen'}
+            </button>
+            ${(f.freshsales_account_id || '').trim() ? `<span class="text-[11px] text-ink-500 font-mono">FS-ID: ${escapeHtml(String(f.freshsales_account_id).slice(0, 12))}…</span>` : '<span class="text-[11px] text-ink-500 italic">noch nicht in Freshsales</span>'}
+          </div>
+        </div>
+      ` : ''}
 
       <div class="grid grid-cols-2 gap-3">
         <div class="col-span-2">
@@ -9190,6 +9410,153 @@ async function toggleCustomerArchive(id, archive) {
     renderCustomers();
     toast(archive ? 'Archiviert' : 'Reaktiviert', 'success');
   } catch (err) { toast(err.message, 'error'); }
+}
+
+/* ============================================================
+   CRM-SYNC: Kunde (Firma) → Freshdesk / Freshsales
+   ============================================================
+   Schreibt die Customer-Stammdaten in das jeweilige CRM:
+   - Freshdesk Companies (POST/PUT /api/v2/companies)
+   - Freshsales Sales Accounts (POST/PUT /api/sales_accounts)
+   Die jeweilige Remote-ID wird zurück in den Customer-Record geschrieben,
+   damit nachfolgende Updates statt einer doppelten Anlage einen Update-Call machen.
+*/
+function _buildCustomerSyncPayload(f) {
+  // Gemeinsame Felder, die wir in beide CRMs schicken
+  const out = {
+    name: (f.name1 || '').trim(),
+    website: (f.website || '').trim() || null,
+    phone: (f.phone || '').trim() || null
+  };
+  const addressParts = [f.street, [f.zip, f.city].filter(Boolean).join(' '), f.country].filter(Boolean);
+  if (addressParts.length) out.address = addressParts.join('\n');
+  const noteParts = [];
+  if (f.customer_no) noteParts.push('Kunden-Nr: ' + f.customer_no);
+  if (f.vat_id)      noteParts.push('USt-IdNr: ' + f.vat_id);
+  if (f.notes)       noteParts.push(f.notes);
+  if (noteParts.length) out.note = noteParts.join('\n');
+  // E-Mail-Domain für Freshdesk-Domain-Match (auto-Zuordnung künftiger Tickets)
+  if (f.email) {
+    const dom = (String(f.email).match(/@([^@\s]+)$/) || [])[1];
+    if (dom) out.domains = [dom.toLowerCase()];
+  }
+  return out;
+}
+
+async function syncCustomerToFreshdesk(customerId, btnEl) {
+  if (!_proxyBase()) return toast('API-Proxy nicht konfiguriert', 'error');
+  if (!APP_KEYS.proxyV2) return toast('Sync benötigt Val.town-Proxy v2 — bitte Setup aktualisieren', 'error', 8000);
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Sync…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // Aktuelle Customer-Daten frisch lesen
+    const all = await readData('Customer');
+    const rec = all.find(r => r.id === customerId);
+    if (!rec) throw new Error('Kunde nicht gefunden');
+    const f = rec.fields || {};
+    if (!(f.name1 || '').trim()) throw new Error('Name (Zeile 1) ist leer');
+    const payload = _buildCustomerSyncPayload(f);
+    const existingFdId = (f.freshdesk_company_id || '').trim();
+    let result;
+    if (existingFdId) {
+      // PUT /api/v2/companies/{id}
+      result = await proxyFetch('freshdesk/api/v2/companies/' + existingFdId, {
+        method: 'PUT', body: payload
+      });
+      toast('Freshdesk-Firma aktualisiert: ' + (result?.name || f.name1), 'success', 3500);
+    } else {
+      // POST /api/v2/companies — könnte 409 zurückgeben bei Name-Duplikat
+      try {
+        result = await proxyFetch('freshdesk/api/v2/companies', {
+          method: 'POST', body: payload
+        });
+        toast('In Freshdesk angelegt: ' + (result?.name || f.name1), 'success', 3500);
+      } catch (e1) {
+        if (/already exist|409|duplicate/i.test(e1.message)) {
+          // Suche nach existierender Firma per Name, dann Update
+          try {
+            const search = await proxyFetch('freshdesk/api/v2/companies/autocomplete?name=' + encodeURIComponent(payload.name));
+            const hit = (search?.companies || [])[0] || (Array.isArray(search) ? search[0] : null);
+            if (hit?.id) {
+              result = await proxyFetch('freshdesk/api/v2/companies/' + hit.id, {
+                method: 'PUT', body: payload
+              });
+              toast('Existierende Freshdesk-Firma aktualisiert: ' + (result?.name || f.name1), 'success', 3500);
+            } else {
+              throw e1;
+            }
+          } catch (e2) {
+            throw new Error('Duplikat-Erkennung fehlgeschlagen: ' + (e2.message || e2));
+          }
+        } else {
+          throw e1;
+        }
+      }
+    }
+    // Remote-ID zurück in Customer-Record schreiben
+    if (result?.id) {
+      await updateData('Customer', customerId, { freshdesk_company_id: String(result.id) });
+    }
+    // Modal neu laden, damit der Status-Block aktualisiert ist
+    closeModal();
+    setTimeout(() => openCustomerModal(customerId), 100);
+  } catch (e) {
+    toast('Sync fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+    if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
+async function syncCustomerToFreshsales(customerId, btnEl) {
+  if (!_proxyBase()) return toast('API-Proxy nicht konfiguriert', 'error');
+  if (!APP_KEYS.proxyV2) return toast('Sync benötigt Val.town-Proxy v2 — bitte Setup aktualisieren', 'error', 8000);
+  if (!APP_KEYS.freshsalesSubdomain) {
+    return toast('Freshsales nicht konfiguriert — Admin → Einstellungen → Step 9 (Freshsales-Setup)', 'error', 8000);
+  }
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Sync…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    const all = await readData('Customer');
+    const rec = all.find(r => r.id === customerId);
+    if (!rec) throw new Error('Kunde nicht gefunden');
+    const f = rec.fields || {};
+    if (!(f.name1 || '').trim()) throw new Error('Name (Zeile 1) ist leer');
+    const base = _buildCustomerSyncPayload(f);
+    // Freshsales-Schema: sales_account hat name, website, phone, address, city, zipcode, country
+    const fs = {
+      name: base.name,
+      website: base.website,
+      phone: base.phone,
+      address: (f.street || '').trim() || undefined,
+      city: (f.city || '').trim() || undefined,
+      zipcode: (f.zip || '').trim() || undefined,
+      country: (f.country || '').trim() || undefined,
+      industry_type_id: undefined  // bleibt leer — User kann später in Freshsales setzen
+    };
+    // Sauber: undefined-Werte raus
+    Object.keys(fs).forEach(k => fs[k] === undefined && delete fs[k]);
+    const existingFsId = (f.freshsales_account_id || '').trim();
+    let result;
+    if (existingFsId) {
+      // PUT /api/sales_accounts/{id}
+      result = await proxyFetch('freshsales/api/sales_accounts/' + existingFsId, {
+        method: 'PUT', body: { sales_account: fs }
+      });
+      toast('Freshsales-Account aktualisiert: ' + (result?.sales_account?.name || fs.name), 'success', 3500);
+    } else {
+      // POST /api/sales_accounts
+      result = await proxyFetch('freshsales/api/sales_accounts', {
+        method: 'POST', body: { sales_account: fs }
+      });
+      toast('In Freshsales angelegt: ' + (result?.sales_account?.name || fs.name), 'success', 3500);
+    }
+    const newId = result?.sales_account?.id || result?.id;
+    if (newId) await updateData('Customer', customerId, { freshsales_account_id: String(newId) });
+    closeModal();
+    setTimeout(() => openCustomerModal(customerId), 100);
+  } catch (e) {
+    toast('Sync fehlgeschlagen: ' + (e.message || e), 'error', 9000);
+    if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
+  }
 }
 
 /* ============================================================
