@@ -609,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.58';
+const APP_VERSION = 'v3.59';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1328,9 +1328,11 @@ let _fdTicketState = {
   id: null, ticket: null, requester: null, conversations: null, showHistory: false,
   summary: null, summaryLoading: false, summarySaving: false,
   // Vom KI-Call extrahierte strukturierte Daten + Match-Ergebnis aus ERP
-  extracted: null,        // { company: {...}, contact: {...} }
+  extracted: null,        // { company, contact, items, ticket_number, customer_reference, lieferzeit }
   match: null,            // { customer, contact } | null wenn kein Match
-  customerActionLoading: false
+  customerActionLoading: false,
+  // editierbare Felder (von KI gefüllt, vom User anpassbar)
+  editFields: { ticket_number: '', customer_reference: '', lieferzeit: '' }
 };
 
 function _fdStatusLabel(s) { return s === 2 ? 'Offen' : s === 3 ? 'Ausstehend' : s === 4 ? 'Gelöst' : s === 5 ? 'Geschlossen' : ('Status ' + s); }
@@ -1377,7 +1379,8 @@ async function openFreshdeskTicket(ticketId) {
   _fdTicketState = {
     id: ticketId, ticket: null, requester: null, conversations: null, showHistory: false,
     summary: null, summaryLoading: false, summarySaving: false,
-    extracted: null, match: null, customerActionLoading: false
+    extracted: null, match: null, customerActionLoading: false,
+    editFields: { ticket_number: 'FT-' + ticketId, customer_reference: '', lieferzeit: '' }
   };
   // Modal mit Loading-Indicator zeigen
   openModal(`
@@ -1507,6 +1510,7 @@ function _renderFreshdeskTicket() {
               </div>
               <div class="text-sm text-ink-800 whitespace-pre-wrap leading-relaxed">${escapeHtml(_fdTicketState.summary)}</div>
             </div>
+            ${_renderAiEditableFieldsBlock()}
             ${_renderAiCustomerBlock()}`;
           }
           return `<button type="button" onclick="generateFreshdeskTicketSummary()" class="bg-purple-600 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-purple-700 flex items-center gap-2">
@@ -1635,7 +1639,25 @@ async function generateFreshdeskTicketSummary() {
     }
     const fullText = parts.join('\n');
 
+    // Article-Liste vorladen (gefiltert auf aktuellen Mandanten) — als Kontext für die KI
+    const cur = getCurrentCompany();
+    let articleSummary = '';
+    try {
+      const allArticles = await readData('Article');
+      const articles = allArticles.filter(a =>
+        (a.fields.company_id || []).includes(cur?.id) &&
+        a.fields.status !== 'archiviert'
+      ).slice(0, 300);
+      articleSummary = articles.map(a => {
+        const f = a.fields || {};
+        return [a.id, f.article_no || '–', f.name1 || '', f.name2 || '', f.manufacturer_no || '', f.sales_price || ''].join(' | ');
+      }).join('\n');
+    } catch (_) {}
+
     const prompt = `Du bist Support-Mitarbeiter bei FLP Lift Parts (Aufzugsersatzteile, Reparatur von Frequenzumrichtern). Analysiere das folgende Freshdesk-Ticket auf Deutsch.
+
+VERFÜGBARE ARTIKEL IM ERP (record_id | art_nr | name1 | name2 | hersteller_nr | vk_preis):
+${articleSummary || '(keine)'}
 
 Antworte AUSSCHLIESSLICH mit einem gültigen JSON-Objekt in genau diesem Schema (keine Code-Fences, keine Erklärung davor/danach):
 
@@ -1655,17 +1677,26 @@ Antworte AUSSCHLIESSLICH mit einem gültigen JSON-Objekt in genau diesem Schema 
     "phone": "Festnetz (oder leer)",
     "mobile": "Mobilnummer (oder leer)",
     "role": "Funktion/Rolle wie 'Einkauf' (oder leer)"
-  }
+  },
+  "items": [
+    {
+      "article_id": "Airtable-record_id wenn eindeutig matchbar, sonst null",
+      "qty": 1,
+      "name_spoken": "wie der Kunde den Artikel im Ticket nennt (Code, Bezeichnung, Hersteller-Nr)",
+      "match_confidence": "high|low|guess"
+    }
+  ],
+  "ticket_number": "Externe/Kunden-Ticketnummer (z.B. AB-12345 wenn der Kunde einen eigenen Ticket-Code nennt) — leer wenn keine erkennbar. Nicht die Freshdesk-Nummer.",
+  "customer_reference": "Kunden-Bestellnummer / Auftragsnummer / Anfrage-Referenz, falls genannt — sonst leer",
+  "lieferzeit": "Gewünschte oder genannte Lieferzeit (z.B. 'KW 24', '2 Wochen', 'Sofort') — sonst leer"
 }
 
-Hinweise zur summary:
-- Kompakt, max. ca. 8 Zeilen, keine Floskeln, keine Anrede
-- Format mit den drei fettgedruckten Labels wie oben
-
-Hinweise zur Datenextraktion:
-- Suche in der Ticket-Beschreibung + im gesamten Verlauf nach Signaturen, Adressen, Telefonnummern
-- Wenn ein Wert nicht klar erkennbar ist, gib einen leeren String "" zurück (NICHT raten)
-- Setze first_name/last_name nur, wenn klar zuordenbar (z.B. aus Signatur oder Begrüßung)
+Hinweise:
+- summary: Kompakt, max. ca. 8 Zeilen, keine Floskeln, keine Anrede. Format mit drei fettgedruckten Labels wie oben.
+- Datenextraktion: leere Strings statt raten. first_name/last_name nur bei klarer Zuordnung (Signatur, Begrüßung).
+- items: NUR Artikel die der Kunde tatsächlich anfragt/braucht (nicht z.B. erwähnte aber nicht angefragte). Match gegen die Artikelliste oben — wenn klar (Code, Hersteller-Nr, Name passt) match_confidence='high' und article_id setzen. Bei Mehrdeutigkeit article_id=null.
+- ticket_number: ist meist eine Referenz die der KUNDE nennt, nicht die Freshdesk-eigene FT-Nr. Beispiel: "Bezug nehmen auf Ihre Anfrage AN-2024-1234".
+- customer_reference: Bestellnummer, Vorgangsnummer, Auftragsnummer aus Kundensicht.
 
 --- Ticket-Inhalt ---
 ${fullText}`;
@@ -1685,15 +1716,27 @@ ${fullText}`;
         company: parsed.company || {},
         contact: {
           ...(parsed.contact || {}),
-          // Email kommt zuverlässig aus dem Ticket-Requester, nicht aus KI-Extraktion
           email: _fdTicketState.requester?.email || ''
-        }
+        },
+        items: Array.isArray(parsed.items) ? parsed.items : []
+      };
+      // Editierbare Felder befüllen — Ticketnummer initial = FT-Nr, von KI evtl. überschrieben
+      _fdTicketState.editFields = {
+        ticket_number:      String(parsed.ticket_number || '').trim() || ('FT-' + _fdTicketState.id),
+        customer_reference: String(parsed.customer_reference || '').trim(),
+        lieferzeit:         String(parsed.lieferzeit || '').trim()
       };
     } else {
       _fdTicketState.summary = String(raw || '').trim() || '(KI-Antwort war leer)';
       _fdTicketState.extracted = {
         company: {},
-        contact: { email: _fdTicketState.requester?.email || '' }
+        contact: { email: _fdTicketState.requester?.email || '' },
+        items: []
+      };
+      _fdTicketState.editFields = {
+        ticket_number: 'FT-' + _fdTicketState.id,
+        customer_reference: '',
+        lieferzeit: ''
       };
     }
     // Im ERP nach Email matchen — parallel zur UI-Anzeige (best-effort)
@@ -1925,6 +1968,66 @@ function discardFreshdeskTicketSummary() {
    Zeigt Match-Ergebnis (vorhandener Kunde im ERP) oder von der KI
    extrahierte Daten + Buttons zum Anlegen + Angebot erzeugen.
    ============================================================ */
+// Block mit editierbaren Feldern für Quote-Anlage (Ticketnummer, Kundenreferenz, Lieferzeit)
+// + erkannte Artikel als Vorschau
+function _renderAiEditableFieldsBlock() {
+  const ext = _fdTicketState.extracted;
+  if (!ext) return '';
+  const ef = _fdTicketState.editFields || {};
+  const items = Array.isArray(ext.items) ? ext.items : [];
+  return `
+    <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 mt-3">
+      <p class="text-xs font-semibold text-blue-900 mb-2 flex items-center gap-1.5">
+        <i data-lucide="edit-3" class="w-4 h-4"></i> Editierbare Angebot-Daten
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Ticketnummer</label>
+          <input type="text" value="${escapeHtml(ef.ticket_number || '')}" oninput="_setFdEditField('ticket_number', this.value)" placeholder="FT-... oder Kunden-Ref" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+        </div>
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Kundenreferenz</label>
+          <input type="text" value="${escapeHtml(ef.customer_reference || '')}" oninput="_setFdEditField('customer_reference', this.value)" placeholder="Bestellnr. / Auftragsnr." class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+        </div>
+        <div>
+          <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Lieferzeit</label>
+          <input type="text" value="${escapeHtml(ef.lieferzeit || '')}" oninput="_setFdEditField('lieferzeit', this.value)" placeholder="z.B. 2 Wochen / KW 24" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+        </div>
+      </div>
+      ${items.length > 0 ? `
+        <div>
+          <p class="text-[11px] uppercase tracking-wider text-ink-500 mb-1.5 font-semibold flex items-center gap-1.5">
+            <i data-lucide="package" class="w-3 h-3"></i> KI-erkannte Artikel (${items.length})
+          </p>
+          <div class="space-y-1">
+            ${items.map((it, idx) => {
+              const matched = !!it.article_id && it.match_confidence === 'high';
+              return `
+                <div class="flex items-center gap-2 bg-white rounded-lg px-2 py-1.5 border ${matched ? 'border-emerald-200' : 'border-amber-200'}">
+                  <span class="text-[10px] uppercase tracking-wider px-1 py-0.5 rounded font-semibold ${matched ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${matched ? 'erkannt' : (it.match_confidence || '?')}</span>
+                  <span class="text-xs text-ink-900 flex-1 truncate">${escapeHtml(it.name_spoken || '–')}</span>
+                  <input type="number" min="1" value="${Math.max(1, Number(it.qty) || 1)}" onchange="_setFdItemQty(${idx}, this.value)" class="w-12 px-1 py-0.5 border border-ink-200 rounded text-xs text-center">
+                  ${matched ? '' : '<span class="text-[10px] text-amber-700 italic">ggf. im Editor anpassen</span>'}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function _setFdEditField(name, value) {
+  _fdTicketState.editFields = _fdTicketState.editFields || {};
+  _fdTicketState.editFields[name] = value;
+}
+function _setFdItemQty(idx, value) {
+  if (!_fdTicketState.extracted || !Array.isArray(_fdTicketState.extracted.items)) return;
+  const it = _fdTicketState.extracted.items[idx];
+  if (it) it.qty = Math.max(1, Number(value) || 1);
+}
+
 function _renderAiCustomerBlock() {
   const ext = _fdTicketState.extracted;
   const match = _fdTicketState.match;
@@ -2143,8 +2246,7 @@ async function _aiCreateQuoteSkeleton(customerId, contactId) {
     if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
     if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
   }
-  // Verknüpfung zum Freshdesk-Ticket + Zusammenfassung am Quote ablegen,
-  // damit der User später im Quote-Modal direkt darauf zugreifen kann.
+  // Verknüpfung zum Freshdesk-Ticket + Zusammenfassung am Quote ablegen
   if (_fdTicketState.id) {
     fields.freshdesk_ticket_id = String(_fdTicketState.id);
     fields.description = 'Quelle: Freshdesk-Ticket FT-' + _fdTicketState.id;
@@ -2152,8 +2254,28 @@ async function _aiCreateQuoteSkeleton(customerId, contactId) {
   if (_fdTicketState.summary) {
     fields.ai_summary = String(_fdTicketState.summary);
   }
+  // Editierbare Felder (ticketnummer/kundenreferenz/lieferzeit) als custom_values JSON
+  const ef = _fdTicketState.editFields || {};
+  const cfClean = {};
+  if ((ef.ticket_number      || '').trim()) cfClean.ticketnummer    = ef.ticket_number.trim();
+  if ((ef.customer_reference || '').trim()) cfClean.kundenreferenz  = ef.customer_reference.trim();
+  if ((ef.lieferzeit         || '').trim()) cfClean.lieferzeit      = ef.lieferzeit.trim();
+  if (Object.keys(cfClean).length > 0) fields.custom_values = JSON.stringify(cfClean);
+  // Bundle aus den extrahierten Items ableiten (KI-Items)
+  const fdItems = (_fdTicketState.extracted?.items || []).filter(it => it.article_id);
+  if (fdItems.length > 0) {
+    const bundlePick = await pickBundleForItems(fdItems, 'Angebot');
+    let chosenBundleId = bundlePick.bundleId;
+    if (bundlePick.conflict) {
+      chosenBundleId = await showBundleConflictPicker(bundlePick.candidates, 'Angebot');
+      if (chosenBundleId === null) {
+        // User hat abgebrochen
+        throw new Error('Anlage abgebrochen');
+      }
+    }
+    if (chosenBundleId) fields.bundle_id = chosenBundleId;
+  }
   // Schema sicherstellen, falls Quote-Tabelle die Felder noch nicht hat
-  // (idempotent — silent fail, falls Permissions o.ä. blockieren).
   try {
     await ensureFields('Quote', [
       { name: 'freshdesk_ticket_id', type: 'singleLineText' },
@@ -2161,6 +2283,20 @@ async function _aiCreateQuoteSkeleton(customerId, contactId) {
     ]);
   } catch (_) {}
   const created = await writeData('Quote', fields);
+  // QuoteItems aus den KI-erkannten Artikeln anlegen
+  if (fdItems.length > 0) {
+    for (const it of fdItems) {
+      try {
+        await writeData('QuoteItem', {
+          quote_id: [created.id],
+          article_id: [it.article_id],
+          qty: Math.max(1, Number(it.qty) || 1)
+        });
+      } catch (e) {
+        console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message);
+      }
+    }
+  }
   return created;
 }
 
@@ -2582,13 +2718,14 @@ let _voiceState = {
   history: [],          // [{role:'user'|'assistant', content:'...'}]
   lastResponse: null,   // letzte parsed JSON-Antwort
   processing: false,
-  context: null,        // { customers, articles, contacts }
+  context: null,        // { customers, articles, contacts, customFields }
   ttsEnabled: true,
   ttsSpeaking: false,
   handsFree: true,
   manualItems: [],      // [{article_id, qty, sku, name}] — manuell ausgewählte Artikel
   articlePickerOpen: false,
-  articleSearch: ''
+  articleSearch: '',
+  customFieldValues: {} // { fieldName: value } — von KI extrahiert + manuell editierbar
 };
 
 function setVoiceMode(mode) {
@@ -2690,15 +2827,21 @@ async function _loadVoiceContext() {
   const cur = getCurrentCompany();
   if (!cur) return;
   try {
-    const [customers, contacts, articles] = await Promise.all([
+    const [customers, contacts, articles, customFields] = await Promise.all([
       readData('Customer').catch(() => []),
       readData('Contact').catch(() => []),
-      readData('Article').catch(() => [])
+      readData('Article').catch(() => []),
+      readData('CustomField').catch(() => [])
     ]);
     _voiceState.context = {
       customers: customers.filter(c => (c.fields.company_id || []).includes(cur.id) && c.fields.status !== 'archiviert'),
       contacts:  contacts,
-      articles:  articles.filter(a => (a.fields.company_id || []).includes(cur.id) && a.fields.status !== 'archiviert')
+      articles:  articles.filter(a => (a.fields.company_id || []).includes(cur.id) && a.fields.status !== 'archiviert'),
+      customFields: customFields.filter(cf =>
+        (cf.fields.company_id || []).includes(cur.id) &&
+        cf.fields.doc_type === 'Angebot' &&
+        (cf.fields.status || 'aktiv') === 'aktiv'
+      ).sort((a,b) => (a.fields.label || a.fields.name || '').localeCompare(b.fields.label || b.fields.name || '', 'de'))
     };
   } catch (e) {
     console.warn('Voice-Context-Loading failed:', e.message);
@@ -2807,6 +2950,8 @@ function _renderVoiceAssistant() {
     ${_renderManualItemsBlock()}
 
     ${_renderArticlePickerBlock()}
+
+    ${_renderCustomFieldsBlock()}
 
     ${_renderReadyBlock()}
 
@@ -3002,6 +3147,44 @@ function clearManualItems() {
   _renderVoiceAssistant();
 }
 
+// Editierbare Custom Fields (aus CustomField-Tabelle, doc_type=Angebot)
+// Werte werden zuerst von KI gefüllt, danach kann der User sie inline anpassen.
+function _renderCustomFieldsBlock() {
+  const ctx = _voiceState.context || { customFields: [] };
+  const defs = ctx.customFields || [];
+  if (defs.length === 0) return ''; // keine konfiguriert → kein Block
+  const values = _voiceState.customFieldValues || {};
+  const anyFilled = Object.values(values).some(v => (v || '').trim());
+  return `
+    <div class="bg-white border border-ink-200 rounded-xl p-3 mb-3">
+      <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-2 font-semibold flex items-center gap-1.5">
+        <i data-lucide="form-input" class="w-3.5 h-3.5"></i> Individuelle Felder
+        ${anyFilled ? '<span class="text-emerald-700 normal-case">· KI hat ausgefüllt — editierbar</span>' : '<span class="text-ink-400 normal-case">· kannst du auch per Sprache/Text nennen</span>'}
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        ${defs.map(cf => {
+          const f = cf.fields || {};
+          const name = f.name || '';
+          const label = f.label || name;
+          const val = values[name] || '';
+          return `
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">${escapeHtml(label)} <span class="text-ink-400 font-mono">{{${escapeHtml(name)}}}</span></label>
+              <input type="text" value="${escapeHtml(val)}" oninput="_setCustomFieldValue('${escapeHtml(name).replace(/'/g, "\\'")}', this.value)" class="w-full px-2 py-1.5 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30">
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function _setCustomFieldValue(name, value) {
+  _voiceState.customFieldValues = _voiceState.customFieldValues || {};
+  _voiceState.customFieldValues[name] = value;
+  // Kein Re-Render — Input behält Fokus selbst
+}
+
 function startVoiceRecording() {
   // iOS-Warmup: einmal pro Session aus User-Click triggern, sonst schweigt Safari
   _ttsWarmup();
@@ -3119,6 +3302,13 @@ async function processVoiceInput(userText) {
     _voiceState.lastResponse = response;
     // Eindeutig erkannte Artikel automatisch in manualItems übernehmen
     _autoAddHighConfidenceItems(response);
+    // Custom Fields aus KI-Response in State mergen (überschreibt nur explizit genannte)
+    if (response?.matched?.custom_fields && typeof response.matched.custom_fields === 'object') {
+      _voiceState.customFieldValues = _voiceState.customFieldValues || {};
+      for (const [k, v] of Object.entries(response.matched.custom_fields)) {
+        if (typeof v === 'string' && v.trim()) _voiceState.customFieldValues[k] = v.trim();
+      }
+    }
     const speech = (response.speech || '').trim() || '(keine Antwort)';
     _voiceState.history.push({ role: 'assistant', content: speech });
     // TTS + Auto-Listen nur im Voice-Modus
@@ -3143,7 +3333,7 @@ async function processVoiceInput(userText) {
 // ⚙️ PROMPT-ITERATION GESCHIEHT HIER:
 // Diesen String iterativ schärfen (Beispiele, Regeln, Ausgabe-Schema).
 function _voiceBuildPrompt(userText) {
-  const ctx = _voiceState.context || { customers: [], articles: [], contacts: [] };
+  const ctx = _voiceState.context || { customers: [], articles: [], contacts: [], customFields: [] };
   const customerSummary = ctx.customers.slice(0, 200).map(c => {
     const f = c.fields || {};
     return [c.id, f.customer_no || '–', f.name1 || '', f.city || ''].join(' | ');
@@ -3152,6 +3342,11 @@ function _voiceBuildPrompt(userText) {
     const f = a.fields || {};
     // Schema: article_no | name1 | name2 | manufacturer_no | sales_price
     return [a.id, f.article_no || '–', f.name1 || '', f.name2 || '', f.manufacturer_no || '', f.sales_price || ''].join(' | ');
+  }).join('\n');
+  // Custom-Field-Definitionen für Angebote — KI soll erkannte Werte ausfüllen
+  const cfDefs = (ctx.customFields || []).map(cf => {
+    const f = cf.fields || {};
+    return `- ${f.name} (Label: "${f.label || f.name}")`;
   }).join('\n');
   const historyTxt = _voiceState.history.slice(-10).map(m =>
     (m.role === 'user' ? 'Mitarbeiter' : 'Du') + ': ' + m.content
@@ -3172,6 +3367,9 @@ ${customerSummary || '(keine)'}
 
 VERFÜGBARE ARTIKEL (record_id | art_nr | name1 | name2 | hersteller_nr | vk_preis):
 ${articleSummary || '(keine)'}
+
+INDIVIDUELLE FELDER FÜR DAS ANGEBOT (zu befüllen wenn vom Mitarbeiter genannt):
+${cfDefs || '(keine konfiguriert)'}
 
 KONVERSATION BISHER:
 ${historyTxt || '(neu)'}
@@ -3209,7 +3407,10 @@ Antworte AUSSCHLIESSLICH mit einem JSON-Objekt (keine Code-Fences, keine Erklär
         "alternatives": [{"id":"...","name":"...","reason":"phonetisch sehr nah / 1 Zeichen Unterschied / etc"}],
         "match_confidence": "high|low|guess"
       }
-    ]
+    ],
+    "custom_fields": {
+      "<feldname>": "<Wert wenn vom Mitarbeiter genannt, sonst Eintrag weglassen>"
+    }
   }
 }
 
@@ -3289,6 +3490,8 @@ function resetVoiceConversation() {
   _voiceState.history = [];
   _voiceState.lastResponse = null;
   _voiceState.interim = '';
+  _voiceState.manualItems = [];
+  _voiceState.customFieldValues = {};
   if ('speechSynthesis' in window) try { window.speechSynthesis.cancel(); } catch (_) {}
   _renderVoiceAssistant();
 }
@@ -3341,6 +3544,13 @@ async function prepareQuoteFromVoice() {
     const terms = await getCustomerTerms(m.customer_id);
     if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
     if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
+    // Custom Fields (vom User editiert + von KI vorausgefüllt) als JSON in custom_values
+    const cfValues = _voiceState.customFieldValues || {};
+    const cfClean = {};
+    for (const [k, v] of Object.entries(cfValues)) {
+      if (typeof v === 'string' && v.trim()) cfClean[k] = v.trim();
+    }
+    if (Object.keys(cfClean).length > 0) fields.custom_values = JSON.stringify(cfClean);
     // Standard-Bundle anhand der Artikel ermitteln (Doc-Typ: Angebot)
     const bundlePick = await pickBundleForItems(allItems, 'Angebot');
     let chosenBundleId = bundlePick.bundleId;
@@ -3372,10 +3582,11 @@ async function prepareQuoteFromVoice() {
     if (_voiceState.recognition) try { _voiceState.recognition.abort(); } catch (_) {}
     _voiceState.recording = false;
     _voiceState.ttsSpeaking = false;
-    // Manual-Items resetten, damit nicht doppelt beim nächsten Vorbereiten verwendet
+    // Manual-Items + Custom-Fields resetten, damit nichts beim nächsten Vorbereiten klebt
     _voiceState.manualItems = [];
     _voiceState.lastResponse = null;
     _voiceState.history = [];
+    _voiceState.customFieldValues = {};
     toast('Angebot ' + quoteNo + ' angelegt — öffne Editor', 'success', 3500);
     // Wichtig: erst zum Top scrollen, sonst sieht man das Modal nicht (Welcome-Seite ist gescrollt)
     window.scrollTo({ top: 0 });
