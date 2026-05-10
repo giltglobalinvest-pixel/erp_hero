@@ -382,13 +382,13 @@
       class="fixed lg:static inset-y-0 left-0 z-40 w-72 bg-brand-500 text-white flex flex-col
              -translate-x-full lg:translate-x-0 transition-transform duration-300 pt-safe pb-safe">
 
-      <!-- Logo -->
+      <!-- Logo (klickbar → zur Übersicht) -->
       <div class="px-5 pt-5 pb-3 flex items-center justify-between">
-        <div class="flex items-center gap-1 select-none">
+        <button type="button" onclick="goToHome()" class="flex items-center gap-1 select-none hover:opacity-90 active:scale-[0.98] transition" title="Zur Übersicht">
           <div class="bg-white px-2 py-1.5 rounded">
             <svg class="h-6 block" style="aspect-ratio:320/74" aria-label="FLP Lift Parts"><use href="#flp-logo"/></svg>
           </div>
-        </div>
+        </button>
         <!-- Close (mobile) -->
         <button onclick="closeDrawer()" class="lg:hidden p-2 -mr-2 text-white/90 hover:text-white">
           <i data-lucide="x" class="w-5 h-5"></i>
@@ -409,6 +409,14 @@
 
       <!-- Nav -->
       <nav class="flex-1 overflow-y-auto px-3 scrollbar-thin">
+        <!-- Übersicht (Home) -->
+        <div class="mb-3">
+          <button type="button" onclick="goToHome()" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/40 transition">
+            <i data-lucide="home" class="w-4 h-4"></i>
+            <span class="text-sm font-semibold tracking-wide">Übersicht</span>
+          </button>
+        </div>
+
         <!-- Stammdaten -->
         <div class="mb-1">
           <button class="nav-section w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-section="stammdaten">
@@ -547,6 +555,9 @@
           <button onclick="openDrawer()" class="lg:hidden -ml-2 p-2 rounded-lg text-ink-700 hover:bg-ink-100">
             <i data-lucide="menu" class="w-5 h-5"></i>
           </button>
+          <button onclick="goToHome()" class="h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 inline-flex items-center justify-center shrink-0" title="Zur Übersicht">
+            <i data-lucide="home" class="w-4 h-4"></i>
+          </button>
           <h1 id="pageTitle" class="text-lg lg:text-xl font-semibold text-ink-900 flex-1 truncate">Übersicht</h1>
           <span id="topbarVersion" class="inline-flex font-mono text-[10px] sm:text-[11px] text-ink-500 bg-ink-100 rounded px-1.5 sm:px-2 py-1 shrink-0" title="App-Version"></span>
           <button onclick="location.reload()" class="h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 inline-flex items-center justify-center" title="Seite neu laden">
@@ -598,7 +609,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.56';
+const APP_VERSION = 'v3.57';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2433,6 +2444,21 @@ function initNavSections() {
 
 function setPageTitle(t) { document.getElementById('pageTitle').textContent = t; }
 
+// Zur Übersicht zurückkehren — schließt mobile Drawer, deselect Nav, rendert Welcome
+function goToHome() {
+  // Falls ein Modal offen ist, erst schließen
+  try { if (typeof closeModal === 'function') closeModal(); } catch (_) {}
+  try { if (typeof closeModal2 === 'function') closeModal2(); } catch (_) {}
+  // Drawer auf Mobile schließen
+  try { if (typeof closeDrawer === 'function') closeDrawer(); } catch (_) {}
+  // Aktive Nav-Markierung entfernen
+  document.querySelectorAll('.nav-item.active').forEach(el => el.classList.remove('active', 'bg-brand-600/40'));
+  // Welcome rendern
+  if (typeof renderWelcome === 'function') renderWelcome();
+  // Nach oben scrollen
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 function renderWelcome() {
   setPageTitle('Übersicht');
   const u = APP_KEYS.user || {};
@@ -3346,8 +3372,16 @@ async function prepareQuoteFromVoice() {
     if (_voiceState.recognition) try { _voiceState.recognition.abort(); } catch (_) {}
     _voiceState.recording = false;
     _voiceState.ttsSpeaking = false;
+    // Manual-Items resetten, damit nicht doppelt beim nächsten Vorbereiten verwendet
+    _voiceState.manualItems = [];
+    _voiceState.lastResponse = null;
+    _voiceState.history = [];
     toast('Angebot ' + quoteNo + ' angelegt — öffne Editor', 'success', 3500);
-    setTimeout(() => openQuoteModal(created.id), 200);
+    // Wichtig: erst zum Top scrollen, sonst sieht man das Modal nicht (Welcome-Seite ist gescrollt)
+    window.scrollTo({ top: 0 });
+    // Quote-Editor öffnen — kurzer Delay, damit Toast + Scroll abgeschlossen sind
+    await new Promise(r => setTimeout(r, 150));
+    await openQuoteModal(created.id);
   } catch (e) {
     toast('Fehler beim Anlegen: ' + e.message, 'error', 7000);
   }
