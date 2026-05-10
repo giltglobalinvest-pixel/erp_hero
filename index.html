@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.80';
+const APP_VERSION = 'v3.81';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1327,20 +1327,27 @@ async function loadFreshdeskTicketsPreview() {
   if (window.lucide) lucide.createIcons();
   try {
     const groupId = APP_KEYS.freshdeskSalesGroupId;
-    // Status 2 = Open, 3 = Pending. Search-API beschränkt auf 30 Ergebnisse pro Seite.
-    // Optional: Filter nach Ticket-Typ (Komma-getrennte Liste in freshdeskTicketTypes)
+    // Status-Filter (siehe _inquiriesStatusFilterQuery) + optional Typ-Filter.
+    // Search-API beschränkt auf 30 Ergebnisse pro Seite.
     const types = String(APP_KEYS.freshdeskTicketTypes || '')
       .split(',').map(s => s.trim()).filter(Boolean);
     const typeFilter = types.length
       ? ' AND (' + types.map(t => `type:'${t.replace(/'/g, "")}'`).join(' OR ') + ')'
       : '';
-    const query = `"(group_id:${groupId}) AND (status:2 OR status:3)${typeFilter}"`;
+    const statusQuery = _inquiriesStatusFilterQuery();
+    const statusPart = statusQuery ? ' AND ' + statusQuery : '';
+    const query = `"(group_id:${groupId})${statusPart}${typeFilter}"`;
     const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
-    const tickets = data.results || [];
+    let tickets = data.results || [];
+    // Client-side Doppel-Filter: Freshdesks Search-Index hat 1–10 Sek Lag bei
+    // Status-Änderungen, daher kann ein gerade geschlossenes Ticket noch in der
+    // Antwort stehen. Hier filtern wir gegen den lokal bekannten Status nochmal.
+    const allowed = _inquiriesStatusFilterAllowedSet();
+    if (allowed) tickets = tickets.filter(t => allowed.has(t.status));
     _inquiriesLastLoadedAt = Date.now();
     _renderInquiriesFreshness();
     if (tickets.length === 0) {
-      wrap.innerHTML = '<p class="text-xs text-ink-500 italic">Keine offenen / ausstehenden Tickets der Sales-Gruppe.</p>';
+      wrap.innerHTML = `<p class="text-xs text-ink-500 italic">Keine Tickets im Filter „${escapeHtml(_inquiriesStatusFilterLabel())}".</p>`;
       return;
     }
     const statusLabel = (s) =>
@@ -9525,6 +9532,57 @@ let _inquiriesRefreshTimer = null;
 let _inquiriesRefreshIntervalSec = 60;
 let _inquiriesLastLoadedAt = 0;
 let _inquiriesTickerTimer = null;
+// Status-Filter (Freshdesk-Statuscodes):
+//   'open'     → status:2 OR status:3                 — Default
+//   'active'   → status:2 OR status:3 OR status:6 OR status:7  (alles außer gelöst/geschlossen)
+//   'resolved' → status:4                              — nur gelöst
+//   'closed'   → status:5                              — nur geschlossen
+//   'all'      → kein Status-Filter
+let _inquiriesStatusFilter = (typeof localStorage !== 'undefined' && localStorage.getItem('inquiriesStatusFilter')) || 'open';
+
+function _inquiriesStatusFilterQuery() {
+  switch (_inquiriesStatusFilter) {
+    case 'open':     return '(status:2 OR status:3)';
+    case 'active':   return '(status:2 OR status:3 OR status:6 OR status:7)';
+    case 'resolved': return '(status:4)';
+    case 'closed':   return '(status:5)';
+    case 'all':      return null; // kein Filter
+    default:         return '(status:2 OR status:3)';
+  }
+}
+
+function _inquiriesStatusFilterAllowedSet() {
+  // Client-side Doppel-Filter (Search-API hat ein paar Sekunden Lag bei
+  // Status-Änderungen → wir blenden veraltete Tickets gleich aus).
+  switch (_inquiriesStatusFilter) {
+    case 'open':     return new Set([2, 3]);
+    case 'active':   return new Set([2, 3, 6, 7]);
+    case 'resolved': return new Set([4]);
+    case 'closed':   return new Set([5]);
+    case 'all':      return null;
+    default:         return new Set([2, 3]);
+  }
+}
+
+function _inquiriesStatusFilterLabel() {
+  return {
+    open:     'Offen & Ausstehend',
+    active:   'Alle aktiven',
+    resolved: 'Gelöst',
+    closed:   'Geschlossen',
+    all:      'Alle Tickets'
+  }[_inquiriesStatusFilter] || 'Offen & Ausstehend';
+}
+
+function setInquiriesStatusFilter(value) {
+  if (!value) return;
+  _inquiriesStatusFilter = value;
+  localStorage.setItem('inquiriesStatusFilter', value);
+  // Header-Titel sofort updaten, Liste neu laden
+  const titleEl = document.getElementById('inqHeaderTitle');
+  if (titleEl) titleEl.textContent = 'Freshdesk · Sales · ' + _inquiriesStatusFilterLabel();
+  loadFreshdeskTicketsPreview();
+}
 
 function _stopInquiriesAutoRefresh() {
   if (_inquiriesRefreshTimer) { clearInterval(_inquiriesRefreshTimer); _inquiriesRefreshTimer = null; }
@@ -9595,7 +9653,7 @@ async function renderInquiries() {
       <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
           <h2 class="text-xl font-bold text-ink-900">Anfragen</h2>
-          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (Sales · offen/ausstehend${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (Sales · ${escapeHtml(_inquiriesStatusFilterLabel().toLowerCase())}${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <span id="inqFreshness" class="text-[11px] text-ink-500 italic"></span>
@@ -9627,11 +9685,20 @@ async function renderInquiries() {
 
       <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="px-4 py-3 border-b border-ink-100 flex items-center justify-between gap-3 flex-wrap">
-          <div class="flex items-center gap-2">
-            <i data-lucide="inbox" class="w-4 h-4 text-brand-600"></i>
-            <h3 class="font-semibold text-ink-900 text-sm">Freshdesk · Sales · Offen &amp; Ausstehend</h3>
+          <div class="flex items-center gap-2 min-w-0">
+            <i data-lucide="inbox" class="w-4 h-4 text-brand-600 shrink-0"></i>
+            <h3 id="inqHeaderTitle" class="font-semibold text-ink-900 text-sm truncate">Freshdesk · Sales · ${escapeHtml(_inquiriesStatusFilterLabel())}</h3>
           </div>
-          <span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-medium">read-only Vorschau</span>
+          <div class="flex items-center gap-2 flex-wrap">
+            <select onchange="setInquiriesStatusFilter(this.value)" class="text-xs border border-ink-200 rounded-lg px-2 py-1 bg-white" title="Status-Filter">
+              <option value="open"     ${_inquiriesStatusFilter==='open'?'selected':''}>Offen + Ausstehend</option>
+              <option value="active"   ${_inquiriesStatusFilter==='active'?'selected':''}>Alle aktiven</option>
+              <option value="resolved" ${_inquiriesStatusFilter==='resolved'?'selected':''}>Gelöst</option>
+              <option value="closed"   ${_inquiriesStatusFilter==='closed'?'selected':''}>Geschlossen</option>
+              <option value="all"      ${_inquiriesStatusFilter==='all'?'selected':''}>Alle</option>
+            </select>
+            <span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-medium">read-only</span>
+          </div>
         </div>
         <div id="freshdeskTicketsWrap" class="p-4">
           <p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade…</p>
