@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.35';
+const APP_VERSION = 'v3.36';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1238,7 +1238,12 @@ async function loadFreshdeskTicketsPreview() {
       ? ' AND (' + types.map(t => `type:'${t.replace(/'/g, "")}'`).join(' OR ') + ')'
       : '';
     const query = `"(group_id:${groupId}) AND (status:2 OR status:3)${typeFilter}"`;
-    const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
+    // Parallel: Hauptsuche + zweite Suche nach Tickets mit AI-Tag (für Badge-Anzeige).
+    // Letztere ist nötig, weil Freshdesk's Search-API keine Tags in Results liefert.
+    const [data] = await Promise.all([
+      freshdeskFetch('search/tickets?query=' + encodeURIComponent(query)),
+      _refreshAiSummaryTicketIds(groupId)
+    ]);
     const tickets = data.results || [];
     _inquiriesLastLoadedAt = Date.now();
     _renderInquiriesFreshness();
@@ -1258,7 +1263,7 @@ async function loadFreshdeskTicketsPreview() {
           const ticketNo = 'FT-' + t.id;
           const dt = t.updated_at ? new Date(t.updated_at).toLocaleString('de-DE') : '';
           const tType = t.type ? escapeHtml(t.type) : '';
-          const hasAiSummary = Array.isArray(t.tags) && t.tags.includes(FD_AI_SUMMARY_TAG);
+          const hasAiSummary = _fdAiSummaryTicketIds.has(t.id);
           return `
             <div onclick="openFreshdeskTicket(${t.id})" class="px-2 py-2.5 hover:bg-ink-50 rounded cursor-pointer transition group">
               <div class="flex items-baseline justify-between gap-2 mb-0.5">
@@ -1626,6 +1631,22 @@ ${fullText}`;
 const FD_AI_SUMMARY_TAG = 'ki-zusammenfassung';
 // Marker im Notiz-Body, an dem wir die KI-Note in den Conversations finden
 const FD_AI_SUMMARY_MARKER = '🤖 KI-Zusammenfassung';
+// Set von Ticket-IDs, die das Tag haben — wird parallel zur Hauptsuche gefüllt,
+// weil die Freshdesk Search-Tickets-API leider keine Tags zurückliefert.
+let _fdAiSummaryTicketIds = new Set();
+
+async function _refreshAiSummaryTicketIds(groupId) {
+  if (!groupId) { _fdAiSummaryTicketIds = new Set(); return; }
+  try {
+    const query = `"(group_id:${groupId}) AND (tag:'${FD_AI_SUMMARY_TAG}')"`;
+    const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
+    const ids = (data && Array.isArray(data.results)) ? data.results.map(t => t.id) : [];
+    _fdAiSummaryTicketIds = new Set(ids);
+  } catch (e) {
+    // best-effort: bei Fehler nicht crashen, Badges fehlen einfach
+    console.warn('AI-Summary-Tag-Lookup failed:', e.message);
+  }
+}
 
 // Speichert die aktuelle Zusammenfassung als private Notiz im Ticket (Freshdesk).
 // Setzt zusätzlich ein Tag aufs Ticket, damit die Übersicht es schnell erkennt.
@@ -1661,6 +1682,8 @@ async function saveFreshdeskTicketSummary() {
         console.warn('Tag konnte nicht gesetzt werden:', e.message);
       }
     }
+    // In-memory Cache pflegen, damit Badge ohne Re-Search erscheint
+    _fdAiSummaryTicketIds.add(t.id);
     toast('Zusammenfassung als private Notiz gespeichert', 'success', 3500);
     // Conversations invalidieren + ggf. neu laden, damit die Notiz auftaucht
     _fdTicketState.summary = null;
