@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.81';
+const APP_VERSION = 'v3.82';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1770,11 +1770,23 @@ function _renderFreshdeskTicket() {
 
       <!-- Description (als lesbarer Text) -->
       <div>
-        <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1.5 font-semibold">Erste Nachricht</p>
+        <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1.5 font-semibold">Erste Nachricht${Array.isArray(t.attachments) && t.attachments.length > 0 ? ` <span class="ml-1 normal-case text-ink-400">· ${t.attachments.length} Anhang${t.attachments.length===1?'':'änge'}</span>` : ''}</p>
         <div class="bg-white border border-ink-200 rounded-xl p-3 text-sm text-ink-800 max-h-[40vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">${(() => {
           const txt = _fdHtmlToText(t.description_html || t.description || '');
           return txt ? escapeHtml(txt) : '<span class="text-ink-500 italic">Keine Beschreibung</span>';
         })()}</div>
+        ${Array.isArray(t.attachments) && t.attachments.length > 0 ? `
+          <div class="mt-2 flex flex-wrap gap-1.5">
+            ${t.attachments.map(a => {
+              const isImg = /^image\//i.test(a.content_type || '');
+              const sz = a.size ? Math.round(a.size/1024) + ' kB' : '';
+              return `<a href="${escapeHtml(a.attachment_url || '#')}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-ink-200 rounded-full bg-white hover:bg-ink-50 max-w-[220px]">
+                <i data-lucide="${isImg ? 'image' : 'paperclip'}" class="w-3 h-3 shrink-0"></i>
+                <span class="truncate">${escapeHtml(a.name || '(unbenannt)')}</span>
+                ${sz ? `<span class="text-ink-400 shrink-0">${sz}</span>` : ''}
+              </a>`;
+            }).join('')}
+          </div>` : ''}
       </div>
 
       ${_renderFdLinkedQuotesBlock()}
@@ -1859,6 +1871,21 @@ function _renderFreshdeskTicket() {
                           const txt = _fdHtmlToText(c.body || c.body_text || '');
                           return txt ? escapeHtml(txt) : '<span class="text-ink-500 italic">(leer)</span>';
                         })()}</div>
+                        ${Array.isArray(c.attachments) && c.attachments.length > 0 ? `
+                          <div class="mt-2 pt-2 border-t border-ink-100">
+                            <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">Anhänge (${c.attachments.length})</p>
+                            <div class="flex flex-wrap gap-1.5">
+                              ${c.attachments.map(a => {
+                                const isImg = /^image\//i.test(a.content_type || '');
+                                const sz = a.size ? Math.round(a.size/1024) + ' kB' : '';
+                                return `<a href="${escapeHtml(a.attachment_url || '#')}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 border border-ink-200 rounded-full bg-white hover:bg-ink-50 max-w-[200px]">
+                                  <i data-lucide="${isImg ? 'image' : 'paperclip'}" class="w-3 h-3 shrink-0"></i>
+                                  <span class="truncate">${escapeHtml(a.name || '(unbenannt)')}</span>
+                                  ${sz ? `<span class="text-ink-400 shrink-0">${sz}</span>` : ''}
+                                </a>`;
+                              }).join('')}
+                            </div>
+                          </div>` : ''}
                       </div>
                     `;
                   }).join('')}
@@ -1895,6 +1922,59 @@ async function toggleFreshdeskTicketHistory() {
     }
   }
   _renderFreshdeskTicket();
+}
+
+/* ============================================================
+   FRESHDESK ATTACHMENTS — Sammeln + Base64-Download für KI-Vision
+   ============================================================
+   Sammelt alle Anhänge aus dem Haupt-Ticket + allen Conversations.
+   Bilder werden für die Vision-API in base64 umgewandelt. Bei großen
+   Bildern (>5MB) oder Download-Fehlern wird das Bild ausgelassen,
+   damit die KI-Analyse nicht crasht.
+*/
+function _collectFreshdeskAttachments() {
+  const out = [];
+  const t = _fdTicketState.ticket || {};
+  if (Array.isArray(t.attachments)) {
+    for (const a of t.attachments) out.push({ ...a, origin: 'Erste Nachricht', conv_date: t.created_at });
+  }
+  const convs = _fdTicketState.conversations || [];
+  for (const c of convs) {
+    if (Array.isArray(c.attachments)) {
+      for (const a of c.attachments) out.push({
+        ...a,
+        origin: c.private ? 'Private Notiz' : (c.incoming ? 'Eingehende E-Mail' : 'Ausgehende E-Mail'),
+        conv_date: c.created_at
+      });
+    }
+  }
+  return out;
+}
+
+async function _downloadAttachmentAsBase64(att) {
+  // Anthropic Vision: max 5MB pro Bild, max 5 Bilder pro Request (wir limitieren konservativ).
+  const MAX_SIZE = 5 * 1024 * 1024;
+  if (!att.attachment_url) return null;
+  if (att.size && att.size > MAX_SIZE) return null;
+  try {
+    const res = await fetch(att.attachment_url);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (blob.size > MAX_SIZE) return null;
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const str = String(reader.result || '');
+        const i = str.indexOf(',');
+        resolve(i >= 0 ? str.slice(i + 1) : null);
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch (_) {
+    // CORS oder Netzwerkfehler — Bild wird einfach ausgelassen
+    return null;
+  }
 }
 
 // Lädt sicher die Conversations falls noch nicht da (für KI-Kontext)
@@ -1945,7 +2025,62 @@ async function generateFreshdeskTicketSummary() {
         parts.push(_fdHtmlToText(c.body || c.body_text || '') || '(leer)');
       }
     }
+
+    // === Anhänge sammeln + Bilder als base64 für Vision laden ===
+    const allAttachments = _collectFreshdeskAttachments();
+    const imageAttachments = allAttachments.filter(a => /^image\//i.test(a.content_type || ''));
+    const otherAttachments = allAttachments.filter(a => !/^image\//i.test(a.content_type || ''));
+    // Max 5 Bilder pro Request (Anthropic-Limit + Performance)
+    const MAX_IMAGES = 5;
+    const imageContents = [];
+    const imageNamesInOrder = [];
+    for (const att of imageAttachments.slice(0, MAX_IMAGES)) {
+      const b64 = await _downloadAttachmentAsBase64(att);
+      if (b64) {
+        imageContents.push({ mediaType: att.content_type, data: b64 });
+        imageNamesInOrder.push(att.name || '(unbenannt)');
+      }
+    }
+    if (allAttachments.length > 0) {
+      parts.push('');
+      parts.push('--- Anhänge (' + allAttachments.length + ' insgesamt, ' + imageContents.length + ' Bild(er) der KI mitgegeben) ---');
+      for (const a of allAttachments) {
+        const sizeStr = a.size ? Math.round(a.size / 1024) + ' kB' : '?';
+        const dateStr = a.conv_date ? _fdFmtDate(a.conv_date) : '';
+        const note = /^image\//i.test(a.content_type || '')
+          ? (imageNamesInOrder.includes(a.name) ? ' [BILD AN KI ÜBERGEBEN]' : ' [Bild nicht geladen — ggf. zu groß oder CORS]')
+          : '';
+        parts.push(`• ${a.name || '(unbenannt)'} (${a.content_type || '?'}, ${sizeStr})${note} · ${a.origin}${dateStr ? ' · ' + dateStr : ''}`);
+      }
+    }
+
     const fullText = parts.join('\n');
+
+    const imagePromptHint = imageContents.length > 0 ? `
+
+WICHTIG — BILDANHÄNGE WERDEN MITGESENDET:
+${imageContents.length} Bild(er) sind diesem Prompt beigefügt (Reihenfolge oben): ${imageNamesInOrder.join(', ')}.
+Wenn die Anfrage auf "Foto im Anhang", "siehe Bild", "anbei das Typenschild" o.ä. verweist, ist das die Quelle.
+Typische Inhalte und was zu extrahieren ist:
+- TYPENSCHILD (Frequenzumrichter, Steuerungen, Motoren, Türantriebe etc.) → Hersteller, Typ-Bezeichnung, Modell-Nummer, Serien-Nr, Spannung, Leistung, Frequenz, Baujahr
+- DEFEKT-FOTO → kurze Beschreibung des sichtbaren Schadens / Brandspuren / aufgequollene Kondensatoren etc.
+- MASSZEICHNUNG / DATENBLATT → erkennbare Hauptmaße, Modellbezeichnung, Code
+- BESTELLLISTE / DOKUMENT-SCAN → Artikel-Liste extrahieren
+- SCREENSHOT EINES FEHLERCODES → Fehlercode + Bedeutung wenn ableitbar
+
+Trage die Erkenntnisse in den summary-Text als eigenen Abschnitt **"Erkenntnisse aus Bildanhang:"** ein — kurz und konkret.
+
+WENN aus dem Bild ein Hersteller-Code oder Typ-Bezeichnung ablesbar ist:
+1. Versuche zuerst, dies in der Artikelliste oben (VERFÜGBARE ARTIKEL IM ERP) zu matchen
+2. Bei eindeutigem Match → setze items[].article_id + match_confidence='high'
+3. Bei plausiblem aber unsicherem Match → article_id=null, match_confidence='low', name_spoken=erkannter-Code
+4. Wenn gar nicht in der Liste → article_id=null, name_spoken=erkannter-Code` : '';
+
+    const otherAttachHint = otherAttachments.length > 0 ? `
+
+NICHT-BILD-ANHÄNGE (nicht analysierbar — nur kurz erwähnen):
+${otherAttachments.map(a => '- ' + (a.name || '(unbenannt)') + ' (' + (a.content_type || '?') + ')').join('\n')}
+Erwähne diese kurz im summary unter **"Weitere Anhänge:"** — Mitarbeiter muss ggf. manuell prüfen.` : '';
 
     // Caches laden (Customers + Contacts + Articles) für Comboboxen, Picker, KI-Kontext
     const cur = getCurrentCompany();
@@ -2009,16 +2144,20 @@ Antworte AUSSCHLIESSLICH mit einem gültigen JSON-Objekt in genau diesem Schema 
 }
 
 Hinweise:
-- summary: Kompakt, max. ca. 8 Zeilen, keine Floskeln, keine Anrede. Format mit drei fettgedruckten Labels wie oben.
+- summary: Kompakt, max. ca. 10 Zeilen, keine Floskeln, keine Anrede. Format mit fettgedruckten Labels wie oben. Bei Bildanhängen + Nicht-Bild-Anhängen die entsprechenden zusätzlichen Abschnitte ergänzen (siehe unten).
 - Datenextraktion: leere Strings statt raten. first_name/last_name nur bei klarer Zuordnung (Signatur, Begrüßung).
-- items: NUR Artikel die der Kunde tatsächlich anfragt/braucht (nicht z.B. erwähnte aber nicht angefragte). Match gegen die Artikelliste oben — wenn klar (Code, Hersteller-Nr, Name passt) match_confidence='high' und article_id setzen. Bei Mehrdeutigkeit article_id=null.
+- items: NUR Artikel die der Kunde tatsächlich anfragt/braucht (nicht z.B. erwähnte aber nicht angefragte). Match gegen die Artikelliste oben — wenn klar (Code, Hersteller-Nr, Name passt) match_confidence='high' und article_id setzen. Bei Mehrdeutigkeit article_id=null. BILDANHÄNGE NUTZEN: wenn ein Typenschild oder Artikel-Code im Bild erkennbar ist, das ist oft der zuverlässigste Match.
 - ticket_number: ist meist eine Referenz die der KUNDE nennt, nicht die Freshdesk-eigene FT-Nr. Beispiel: "Bezug nehmen auf Ihre Anfrage AN-2024-1234".
-- customer_reference: Bestellnummer, Vorgangsnummer, Auftragsnummer aus Kundensicht.
+- customer_reference: Bestellnummer, Vorgangsnummer, Auftragsnummer aus Kundensicht.${imagePromptHint}${otherAttachHint}
 
 --- Ticket-Inhalt ---
 ${fullText}`;
 
-    const raw = await askAI(prompt, { maxTokens: 1500, purpose: 'freshdesk_ticket_summary' });
+    const raw = await askAI(prompt, {
+      maxTokens: 1800,
+      purpose: 'freshdesk_ticket_summary',
+      images: imageContents
+    });
     // JSON aus der Antwort robust extrahieren (Claude packt manchmal Erklärung drumherum)
     let parsed = null;
     try {
