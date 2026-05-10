@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.33';
+const APP_VERSION = 'v3.34';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1291,7 +1291,10 @@ async function loadFreshdeskTicketsPreview() {
    ============================================================ */
 
 // State pro geöffnetem Ticket — damit der Verlauf-Toggle nicht alles neu lädt
-let _fdTicketState = { id: null, ticket: null, requester: null, conversations: null, showHistory: false };
+let _fdTicketState = {
+  id: null, ticket: null, requester: null, conversations: null, showHistory: false,
+  summary: null, summaryLoading: false, summarySaving: false
+};
 
 function _fdStatusLabel(s) { return s === 2 ? 'Offen' : s === 3 ? 'Ausstehend' : s === 4 ? 'Gelöst' : s === 5 ? 'Geschlossen' : ('Status ' + s); }
 function _fdStatusColor(s) {
@@ -1334,7 +1337,10 @@ function _fdHtmlToText(html) {
 
 async function openFreshdeskTicket(ticketId) {
   if (!ticketId) return;
-  _fdTicketState = { id: ticketId, ticket: null, requester: null, conversations: null, showHistory: false };
+  _fdTicketState = {
+    id: ticketId, ticket: null, requester: null, conversations: null, showHistory: false,
+    summary: null, summaryLoading: false, summarySaving: false
+  };
   // Modal mit Loading-Indicator zeigen
   openModal(`
     <div class="p-6">
@@ -1430,6 +1436,46 @@ function _renderFreshdeskTicket() {
         })()}</div>
       </div>
 
+      <!-- KI-Zusammenfassung -->
+      <div class="border-t border-ink-100 pt-3">
+        ${(() => {
+          if (_fdTicketState.summaryLoading) {
+            return `<div class="bg-purple-50 border border-purple-200 rounded-xl p-3">
+              <p class="text-xs text-purple-900 italic flex items-center gap-2">
+                <i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>
+                KI erstellt Zusammenfassung… (kann ein paar Sekunden dauern)
+              </p>
+            </div>`;
+          }
+          if (_fdTicketState.summary) {
+            return `<div class="bg-purple-50 border border-purple-200 rounded-xl p-3">
+              <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+                <p class="text-xs font-semibold text-purple-900 flex items-center gap-1.5">
+                  <i data-lucide="sparkles" class="w-4 h-4"></i> KI-Zusammenfassung (Vorschau, noch nicht gespeichert)
+                </p>
+                <div class="flex gap-1.5 flex-wrap">
+                  <button type="button" onclick="generateFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2 py-1 border border-purple-300 text-purple-700 hover:bg-purple-100 rounded inline-flex items-center gap-1 disabled:opacity-50">
+                    <i data-lucide="refresh-cw" class="w-3 h-3"></i> Neu
+                  </button>
+                  <button type="button" onclick="saveFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2.5 py-1 bg-purple-600 text-white hover:bg-purple-700 rounded inline-flex items-center gap-1 disabled:opacity-50">
+                    ${_fdTicketState.summarySaving
+                      ? '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Speichere…'
+                      : '<i data-lucide="save" class="w-3 h-3"></i> Als private Notiz im Ticket speichern'}
+                  </button>
+                  <button type="button" onclick="discardFreshdeskTicketSummary()" ${_fdTicketState.summarySaving ? 'disabled' : ''} class="text-xs px-2 py-1 border border-purple-200 text-purple-600 hover:bg-purple-100 rounded disabled:opacity-50">
+                    Verwerfen
+                  </button>
+                </div>
+              </div>
+              <div class="text-sm text-ink-800 whitespace-pre-wrap leading-relaxed">${escapeHtml(_fdTicketState.summary)}</div>
+            </div>`;
+          }
+          return `<button type="button" onclick="generateFreshdeskTicketSummary()" class="bg-purple-600 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-purple-700 flex items-center gap-2">
+            <i data-lucide="sparkles" class="w-4 h-4"></i> KI-Zusammenfassung erstellen
+          </button>`;
+        })()}
+      </div>
+
       <!-- Verlauf-Toggle + Liste -->
       <div class="border-t border-ink-100 pt-3">
         <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
@@ -1501,6 +1547,112 @@ async function toggleFreshdeskTicketHistory() {
       toast('Verlauf-Fehler: ' + e.message, 'error', 5000);
     }
   }
+  _renderFreshdeskTicket();
+}
+
+// Lädt sicher die Conversations falls noch nicht da (für KI-Kontext)
+async function _ensureFreshdeskConversations() {
+  if (_fdTicketState.conversations !== null) return;
+  try {
+    const conv = await freshdeskFetch('tickets/' + _fdTicketState.id + '/conversations');
+    _fdTicketState.conversations = (Array.isArray(conv) ? conv : []).slice().sort(
+      (a, b) => (a.created_at || '').localeCompare(b.created_at || '')
+    );
+  } catch (e) {
+    _fdTicketState.conversations = [];
+  }
+}
+
+// KI generiert eine Zusammenfassung des kompletten Tickets (inkl. Verlauf)
+async function generateFreshdeskTicketSummary() {
+  const t = _fdTicketState.ticket;
+  if (!t) return;
+  if (!_proxyBase()) return toast('KI nicht verfügbar — API-Proxy nicht konfiguriert', 'error');
+  _fdTicketState.summaryLoading = true;
+  _fdTicketState.summary = null;
+  _renderFreshdeskTicket();
+  try {
+    await _ensureFreshdeskConversations();
+    // Volltext fürs Modell zusammenstellen
+    const parts = [];
+    parts.push('Ticket FT-' + t.id + ': ' + (t.subject || '(ohne Betreff)'));
+    parts.push('Erstellt: ' + _fdFmtDate(t.created_at));
+    if (t.type) parts.push('Typ: ' + t.type);
+    if (_fdTicketState.requester?.name)  parts.push('Anfragender: ' + _fdTicketState.requester.name);
+    if (_fdTicketState.requester?.email) parts.push('E-Mail: ' + _fdTicketState.requester.email);
+    parts.push('');
+    parts.push('--- Erste Nachricht ---');
+    parts.push(_fdHtmlToText(t.description_html || t.description || '') || '(leer)');
+    if (Array.isArray(_fdTicketState.conversations) && _fdTicketState.conversations.length > 0) {
+      parts.push('');
+      parts.push('--- Verlauf (chronologisch) ---');
+      for (const c of _fdTicketState.conversations) {
+        const dir = c.incoming ? 'Eingehend' : 'Ausgehend';
+        const note = c.private ? ' [private Notiz]' : '';
+        parts.push('');
+        parts.push('### ' + dir + note + ' · ' + _fdFmtDate(c.created_at) + (c.from_email ? ' · ' + c.from_email : ''));
+        parts.push(_fdHtmlToText(c.body || c.body_text || '') || '(leer)');
+      }
+    }
+    const fullText = parts.join('\n');
+
+    const prompt = `Du bist Support-Mitarbeiter bei FLP Lift Parts (Aufzugsersatzteile, Reparatur von Frequenzumrichtern). Fasse das folgende Freshdesk-Ticket prägnant auf Deutsch zusammen.
+
+Format:
+**Anliegen:** (1–2 Sätze, was will der Kunde / was ist das Problem)
+**Aktueller Stand:** (was wurde bereits getan / wo stehen wir)
+**Offene Punkte:** (was muss noch passieren — Stichpunkte, oder „keine" falls erledigt)
+
+Halte dich kurz: maximal ca. 8 Zeilen gesamt. Keine Floskeln, keine Wiederholungen, keine Anrede. Direkt mit der Zusammenfassung beginnen.
+
+--- Ticket-Inhalt ---
+${fullText}`;
+
+    const summary = await askAI(prompt, { maxTokens: 800 });
+    _fdTicketState.summary = (summary || '').trim() || '(KI-Antwort war leer)';
+  } catch (e) {
+    toast('KI-Fehler: ' + e.message, 'error', 6000);
+  } finally {
+    _fdTicketState.summaryLoading = false;
+    _renderFreshdeskTicket();
+  }
+}
+
+// Speichert die aktuelle Zusammenfassung als private Notiz im Ticket (Freshdesk).
+// Lädt anschließend den Verlauf neu, damit die Notiz angezeigt wird.
+async function saveFreshdeskTicketSummary() {
+  const t = _fdTicketState.ticket;
+  const s = _fdTicketState.summary;
+  if (!t || !s) return;
+  _fdTicketState.summarySaving = true;
+  _renderFreshdeskTicket();
+  try {
+    // Body als HTML mit Header-Tag, damit es in Freshdesk gut sichtbar ist
+    const noteHtml =
+      '<p><strong>🤖 KI-Zusammenfassung</strong> · erstellt am ' + escapeHtml(new Date().toLocaleString('de-DE')) +
+      (APP_KEYS.user?.name ? ' von ' + escapeHtml(APP_KEYS.user.name) : '') + '</p>' +
+      '<p>' + escapeHtml(s).replace(/\n/g, '<br>') + '</p>';
+    await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
+      method: 'POST',
+      body: { body: noteHtml, private: true }
+    });
+    toast('Zusammenfassung als private Notiz gespeichert', 'success', 3500);
+    // Conversations invalidieren + ggf. neu laden, damit die Notiz auftaucht
+    _fdTicketState.summary = null;
+    _fdTicketState.conversations = null;
+    if (_fdTicketState.showHistory) {
+      await _ensureFreshdeskConversations();
+    }
+  } catch (e) {
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  } finally {
+    _fdTicketState.summarySaving = false;
+    _renderFreshdeskTicket();
+  }
+}
+
+function discardFreshdeskTicketSummary() {
+  _fdTicketState.summary = null;
   _renderFreshdeskTicket();
 }
 
