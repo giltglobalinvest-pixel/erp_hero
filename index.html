@@ -598,7 +598,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v3.55';
+const APP_VERSION = 'v3.56';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2031,6 +2031,83 @@ function _setSelectValueWithFallback(sel, value) {
   sel.value = value;
 }
 
+/* ============================================================
+   BUNDLE-AUTO-SELECTION pro Artikel (Quote/Order)
+   Jeder Artikel kann ein Standard-Bundle für Angebote und/oder
+   Aufträge tragen. Beim Anlegen eines Dokuments mit Items werden
+   die Bundles aus den Articles ermittelt:
+   - Alle gleich (oder nur einer hat eins) → automatisch wählen
+   - Mehrere unterschiedliche → User über pickBundleConflict() fragen
+   - Keiner hat ein Bundle → null (oder globaler Default)
+   ============================================================ */
+
+// docType: 'Angebot' oder 'Auftrag'
+async function pickBundleForItems(items, docType) {
+  const result = { bundleId: null, conflict: false, candidates: [] };
+  if (!Array.isArray(items) || items.length === 0) return result;
+  const fieldName = docType === 'Auftrag' ? 'default_bundle_order_id' : 'default_bundle_quote_id';
+  // Article-Daten holen für die referenzierten article_ids
+  let articles = [];
+  try { articles = await readData('Article'); } catch (_) { return result; }
+  const byId = new Map(articles.map(a => [a.id, a]));
+  const seen = new Set();
+  for (const it of items) {
+    const aid = it.article_id;
+    if (!aid) continue;
+    const a = byId.get(aid);
+    if (!a) continue;
+    const bid = (a.fields[fieldName] || '').trim();
+    if (bid) seen.add(bid);
+  }
+  if (seen.size === 0) return result;
+  if (seen.size === 1) { result.bundleId = [...seen][0]; return result; }
+  // Konflikt — Kandidaten als Bundle-Records auflösen
+  let bundles = [];
+  try { bundles = await readData('QuoteBundle'); } catch (_) {}
+  const bundleById = new Map(bundles.map(b => [b.id, b]));
+  result.conflict = true;
+  result.candidates = [...seen].map(id => {
+    const b = bundleById.get(id);
+    return { id, name: b?.fields?.name || '(unbekannt)', isDefault: !!b?.fields?.is_default };
+  });
+  return result;
+}
+
+// Modaler Bundle-Konflikt-Dialog. Liefert ein Promise, das mit einer Bundle-ID
+// (oder null bei Abbruch) resolved.
+function showBundleConflictPicker(candidates, docType) {
+  return new Promise((resolve) => {
+    const list = (candidates || []).map((c, i) => `
+      <button type="button" data-bundle-id="${c.id}" class="w-full text-left bg-white border border-ink-200 rounded-lg px-3 py-2 hover:bg-purple-50 hover:border-purple-300 transition flex items-center gap-2">
+        <span class="w-6 h-6 rounded-full bg-purple-100 text-purple-700 grid place-items-center text-xs font-bold shrink-0">${i+1}</span>
+        <span class="flex-1 text-sm text-ink-900 font-medium">${c.isDefault ? '★ ' : ''}${escapeHtml(c.name)}</span>
+        <i data-lucide="chevron-right" class="w-4 h-4 text-ink-400"></i>
+      </button>
+    `).join('');
+    openModal2(`
+      <div class="p-5">
+        <div class="flex items-center gap-2 mb-3">
+          <i data-lucide="git-merge" class="w-5 h-5 text-purple-600"></i>
+          <h3 class="text-lg font-bold text-ink-900">Mehrere Vorlagenpakete möglich</h3>
+        </div>
+        <p class="text-sm text-ink-600 mb-4">Die ausgewählten Artikel haben unterschiedliche Standard-Pakete für ${escapeHtml(docType)}. Welches möchtest du verwenden?</p>
+        <div id="bundlePickerList" class="space-y-1.5 mb-4">${list}</div>
+        <div class="flex justify-between items-center gap-2">
+          <button type="button" id="bundlePickerNone" class="text-xs text-ink-500 hover:text-ink-900">Kein Paket verwenden</button>
+          <button type="button" id="bundlePickerCancel" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-1.5 hover:bg-ink-50">Abbrechen</button>
+        </div>
+      </div>
+    `);
+    if (window.lucide) lucide.createIcons();
+    const finish = (val) => { closeModal2(); resolve(val); };
+    document.querySelectorAll('#bundlePickerList button[data-bundle-id]').forEach(btn => {
+      btn.addEventListener('click', () => finish(btn.getAttribute('data-bundle-id')));
+    });
+    document.getElementById('bundlePickerNone')?.addEventListener('click', () => finish(''));
+    document.getElementById('bundlePickerCancel')?.addEventListener('click', () => finish(null));
+  });
+}
+
 // Helper: Quote-Skelett anlegen + öffnen, mit voreingestelltem Customer + Contact
 async function _aiCreateQuoteSkeleton(customerId, contactId) {
   const cur = getCurrentCompany();
@@ -3238,6 +3315,19 @@ async function prepareQuoteFromVoice() {
     const terms = await getCustomerTerms(m.customer_id);
     if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
     if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
+    // Standard-Bundle anhand der Artikel ermitteln (Doc-Typ: Angebot)
+    const bundlePick = await pickBundleForItems(allItems, 'Angebot');
+    let chosenBundleId = bundlePick.bundleId;
+    if (bundlePick.conflict) {
+      // User um Auswahl bitten — null bedeutet Abbruch
+      chosenBundleId = await showBundleConflictPicker(bundlePick.candidates, 'Angebot');
+      if (chosenBundleId === null) {
+        // User hat abgebrochen — Anlage stoppen
+        toast('Anlage abgebrochen', 'info', 1500);
+        return;
+      }
+    }
+    if (chosenBundleId) fields.bundle_id = chosenBundleId;
     const created = await writeData('Quote', fields);
     // Items als QuoteItem anlegen — fehlertolerant pro Item
     for (const it of allItems) {
@@ -6869,11 +6959,19 @@ function articleRow(rec, catMap, manMap) {
 async function openArticleModal(id) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
-  let f = {};
-  let allArticles = [], allCategories = [], allManufacturers = [], allArtSuppliers = [];
+  // Schema sicherstellen — Standard-Bundles pro Doc-Typ am Artikel
   try {
-    [allArticles, allCategories, allManufacturers, allArtSuppliers] = await Promise.all([
-      readData('Article'), readData('Category'), readData('Manufacturer'), readData('ArticleSupplier')
+    await ensureFields('Article', [
+      { name: 'default_bundle_quote_id', type: 'singleLineText' },
+      { name: 'default_bundle_order_id', type: 'singleLineText' }
+    ]);
+  } catch (_) {}
+  let f = {};
+  let allArticles = [], allCategories = [], allManufacturers = [], allArtSuppliers = [], allBundles = [];
+  try {
+    [allArticles, allCategories, allManufacturers, allArtSuppliers, allBundles] = await Promise.all([
+      readData('Article'), readData('Category'), readData('Manufacturer'), readData('ArticleSupplier'),
+      readData('QuoteBundle').catch(() => [])
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
 
@@ -6904,6 +7002,15 @@ async function openArticleModal(id) {
     .filter(m => (m.fields.company_id || []).includes(cur.id) && (m.fields.status || 'aktiv') === 'aktiv')
     .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
   const currentManufacturerId = (f.manufacturer_id || [])[0] || '';
+
+  // Bundles für diesen Mandanten + Doc-Typ filtern
+  const bundlesInCompany = allBundles
+    .filter(b => (b.fields.company_id || []).includes(cur.id) && (b.fields.status || 'aktiv') === 'aktiv')
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const bundlesQuote = bundlesInCompany.filter(b => bundleDocType(b) === 'Angebot');
+  const bundlesOrder = bundlesInCompany.filter(b => bundleDocType(b) === 'Auftrag');
+  const currentBundleQuoteId = f.default_bundle_quote_id || '';
+  const currentBundleOrderId = f.default_bundle_order_id || '';
 
   const articleSuppliers = id ? allArtSuppliers.filter(j => (j.fields.article_id || []).includes(id)) : [];
 
@@ -6973,6 +7080,25 @@ async function openArticleModal(id) {
         </div>
       </div>
 
+      <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Standard-Vorlagenpakete</h4>
+      <p class="text-[11px] text-ink-500 -mt-1 mb-2">Wenn dieser Artikel zu einem Angebot/Auftrag hinzugefügt wird, schlägt die App automatisch das passende Vorlagenpaket vor.</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1 flex items-center gap-1.5"><i data-lucide="file-text" class="w-3.5 h-3.5 text-brand-600"></i> Bundle für Angebote</label>
+          <select name="default_bundle_quote_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— kein Standard —</option>
+            ${bundlesQuote.map(b => `<option value="${b.id}" ${currentBundleQuoteId === b.id ? 'selected' : ''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-ink-700 mb-1 flex items-center gap-1.5"><i data-lucide="file-check-2" class="w-3.5 h-3.5 text-blue-600"></i> Bundle für Aufträge</label>
+          <select name="default_bundle_order_id" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <option value="">— kein Standard —</option>
+            ${bundlesOrder.map(b => `<option value="${b.id}" ${currentBundleOrderId === b.id ? 'selected' : ''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+
       <h4 class="mt-5 mb-2 text-xs font-semibold text-ink-500 uppercase tracking-wider">Preise (netto)</h4>
       <div data-keep-mobile-cols class="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div>
@@ -7034,7 +7160,9 @@ async function saveArticle(e, id, keepOpen) {
     manufacturer_no: (fd.get('manufacturer_no') || '').trim(),
     unit:            (fd.get('unit') || '').trim(),
     status:          fd.get('status') || 'aktiv',
-    notes:           (fd.get('notes') || '').trim()
+    notes:           (fd.get('notes') || '').trim(),
+    default_bundle_quote_id: (fd.get('default_bundle_quote_id') || '').trim(),
+    default_bundle_order_id: (fd.get('default_bundle_order_id') || '').trim()
   };
   const sales    = parseDecimal(fd.get('sales_price'));
   const purchase = parseDecimal(fd.get('purchase_price'));
