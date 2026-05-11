@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.02';
+const APP_VERSION = 'v4.03';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -8609,7 +8609,8 @@ async function testFreshsalesConnection(btnEl) {
   try {
     // /lookup ist der schlankste Endpoint und liefert sauberes 200/401/404
     // (im Gegensatz zu /selector/* der 302 Redirects ausspuckt).
-    const res = await proxyFetch('freshsales/api/lookup?q=test&f=sales_account');
+    // f=name = nach Feld "name" suchen, entities=sales_account = in Sales-Accounts
+    const res = await proxyFetch('freshsales/api/lookup?q=test&f=name&entities=sales_account');
     toast('✓ Freshsales-API erreichbar · Auth + Subdomain OK', 'success', 4500);
   } catch (e) {
     const m = e.message || String(e);
@@ -9875,26 +9876,42 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
       });
       if (!silent) toast('Freshsales-Account aktualisiert: ' + (result?.sales_account?.name || fs.name), 'success', 3500);
     } else {
-      // Proaktive Duplikat-Prüfung: erst per Lookup nachsehen, ob die Firma
+      // Proaktive Duplikat-Prüfung: erst per Lookup/Search nachsehen, ob die Firma
       // schon in Freshsales existiert. Wenn ja → PUT auf vorhandene ID
       // (Verknüpfung etablieren). Wenn nein → POST anlegen.
-      // So vermeiden wir Race-Conditions mit dem 400-"Company is not unique".
       let foundId = null;
       let foundName = null;
+      // Variante 1: /api/lookup?q=...&f=name&entities=sales_account
+      // (Schlanker Endpoint, klassisch für Auto-Complete)
       try {
-        const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(fs.name) + '&f=sales_account&entities=sales_account');
-        console.log('[FS Lookup] response shape:', JSON.stringify(lookup).slice(0, 400));
-        // Freshsales-Response kann verschachtelt sein, alle Varianten durchprobieren
+        const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(fs.name) + '&f=name&entities=sales_account');
+        console.log('[FS Lookup] response:', JSON.stringify(lookup).slice(0, 500));
         const candidates =
           (Array.isArray(lookup?.sales_accounts?.sales_accounts) ? lookup.sales_accounts.sales_accounts : null)
           || (Array.isArray(lookup?.sales_accounts) ? lookup.sales_accounts : null)
           || (Array.isArray(lookup?.lookup?.sales_accounts) ? lookup.lookup.sales_accounts : null)
+          || (Array.isArray(lookup) ? lookup : null)
           || [];
         const exact = candidates.find(c => (c.name || '').trim().toLowerCase() === fs.name.toLowerCase());
         const hit = exact || candidates[0];
         if (hit?.id) { foundId = hit.id; foundName = hit.name; }
       } catch (eLookup) {
         console.warn('[FS Lookup] fehlgeschlagen:', eLookup.message);
+      }
+      // Variante 2 (Fallback): /api/search?q=...&include=sales_account
+      // Wird nur versucht, wenn /lookup nichts geliefert hat.
+      if (!foundId) {
+        try {
+          const search = await proxyFetch('freshsales/api/search?q=' + encodeURIComponent(fs.name) + '&include=sales_account');
+          console.log('[FS Search] response:', JSON.stringify(search).slice(0, 500));
+          const list = Array.isArray(search) ? search : (search?.sales_accounts || []);
+          const candidates = list.filter(c => c.type === 'sales_account' || c.type === 'sales_accounts' || c.entity_type === 'SalesAccount' || true);
+          const exact = candidates.find(c => (c.name || c.display_name || '').trim().toLowerCase() === fs.name.toLowerCase());
+          const hit = exact || candidates[0];
+          if (hit?.id) { foundId = hit.id; foundName = hit.name || hit.display_name; }
+        } catch (eSearch) {
+          console.warn('[FS Search] fehlgeschlagen:', eSearch.message);
+        }
       }
 
       if (foundId) {
