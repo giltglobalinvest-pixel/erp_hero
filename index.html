@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.12';
+const APP_VERSION = 'v4.13';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2411,6 +2411,93 @@ ${fullText}${imageHint}${otherHint}`;
   return true;
 }
 
+// Liefert eine deutsche "vor X Min/Std/Tagen"-Bezeichnung für ein Datum.
+// Bei mehr als 7 Tagen wird das absolute Datum (TT.MM.JJ) zurückgegeben.
+function _timeAgo(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  const diff = Date.now() - d.getTime();
+  if (isNaN(diff) || diff < 0) return '';
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60)  return 'gerade';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60)  return 'vor ' + mins + ' Min';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)   return 'vor ' + hrs + ' Std';
+  const days = Math.floor(hrs / 24);
+  if (days < 7)   return 'vor ' + days + ' Tag' + (days === 1 ? '' : 'en');
+  return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' });
+}
+
+// Baut das Markup für das eigene-Notiz-Badge inkl. Zeit-Info
+function _ownNoteBadgeHtml(ticketId, ownNote) {
+  if (!ownNote) return '';
+  const timeStr = _timeAgo(ownNote.created_at);
+  const dateAbs = ownNote.created_at ? new Date(ownNote.created_at).toLocaleString('de-DE') : '';
+  return '<button type="button" onclick="event.stopPropagation();showOwnNoteModal(' + ticketId + ')" '
+    + 'class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 hover:bg-amber-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" '
+    + 'title="Eigene Notiz vom ' + escapeHtml(dateAbs) + ' — klick zum Lesen/Bearbeiten">'
+    + '<i data-lucide="message-square" class="w-2.5 h-2.5"></i> Notiz' + (timeStr ? ' · ' + escapeHtml(timeStr) : '')
+    + '</button>';
+}
+
+// Read/Edit-Modal für die eigene interne Notiz beim Ticket
+async function showOwnNoteModal(ticketId) {
+  if (!ticketId) return;
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5">
+      <div class="flex items-center justify-between mb-3 gap-2">
+        <h3 class="text-base font-bold text-amber-900 flex items-center gap-2">
+          <i data-lucide="message-square" class="w-5 h-5"></i>
+          Deine interne Notiz · FT-${ticketId}
+        </h3>
+        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div id="ownNoteContent">
+        <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade Notiz…</p>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-xl' });
+  if (window.lucide) lucide.createIcons();
+  try {
+    // Cache nutzen falls vorhanden, sonst frischen Scan
+    let ownNote = _fdAiSummaryCache.get(ticketId)?.ownNote || null;
+    if (!ownNote) {
+      const scan = await _fetchTicketPrivateNoteScan(ticketId);
+      ownNote = scan?.ownNote || null;
+    }
+    const wrap = document.getElementById('ownNoteContent');
+    if (!wrap) return;
+    if (!ownNote) {
+      wrap.innerHTML = '<p class="text-sm text-amber-700 italic">Keine eigene Notiz an diesem Ticket gefunden.</p>';
+      return;
+    }
+    const text = _qnExtractTextFromNote(ownNote.body || ownNote.body_text || '');
+    const created = ownNote.created_at ? new Date(ownNote.created_at).toLocaleString('de-DE') : '';
+    const updated = ownNote.updated_at && ownNote.updated_at !== ownNote.created_at
+      ? new Date(ownNote.updated_at).toLocaleString('de-DE') : '';
+    wrap.innerHTML = `
+      <div class="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-ink-800 whitespace-pre-wrap leading-relaxed max-h-[55vh] overflow-y-auto">${escapeHtml(text || '(leer)')}</div>
+      <p class="text-[11px] text-ink-500 italic mt-2">
+        Erstellt: ${escapeHtml(created)}${updated ? ' · zuletzt bearbeitet: ' + escapeHtml(updated) : ''}
+      </p>
+      <div class="mt-4 flex justify-between gap-2 flex-wrap">
+        <button type="button" onclick="closeTopModal();setTimeout(()=>showAiSummaryQuickView(${ticketId}),150)" class="text-sm bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-3 py-2 font-medium inline-flex items-center gap-1.5">
+          <i data-lucide="edit-3" class="w-4 h-4"></i> Bearbeiten
+        </button>
+        <button type="button" onclick="closeTopModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-1.5 hover:bg-ink-50">Schließen</button>
+      </div>
+    `;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    const wrap = document.getElementById('ownNoteContent');
+    if (wrap) wrap.innerHTML = '<p class="text-sm text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
 function _toggleTicketResponderMenu(ticketId) {
   // Andere offene Menüs schließen
   document.querySelectorAll('[id^="ticketResponderMenu_"]').forEach(el => {
@@ -2560,6 +2647,7 @@ async function loadFreshdeskTicketsPreview() {
           const cached = _fdAiSummaryCache.get(t.id);
           const initialAi  = cached && cached.updated_at === t.updated_at ? !!cached.aiNote  : false;
           const initialOwn = cached && cached.updated_at === t.updated_at ? !!cached.ownNote : false;
+          const initialOwnNote = cached && cached.updated_at === t.updated_at ? cached.ownNote : null;
           const linkedQuotes = quotesByTicketId.get(String(t.id)) || [];
           const quoteBadges = linkedQuotes.map(q => {
             const qf = q.fields || {};
@@ -2617,7 +2705,7 @@ async function loadFreshdeskTicketsPreview() {
               <div class="flex items-center gap-1.5 flex-wrap mb-1 empty:hidden">
                 ${tType ? `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-medium">${tType}</span>` : ''}
                 <span class="ai-badge-slot inline-flex">${initialAi ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>` : ''}</span>
-                <span class="own-note-slot inline-flex">${initialOwn ? `<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5" title="Du hast eine eigene Notiz an diesem Ticket"><i data-lucide="message-square" class="w-2.5 h-2.5"></i> Notiz</span>` : ''}</span>
+                <span class="own-note-slot inline-flex">${initialOwn ? _ownNoteBadgeHtml(t.id, initialOwnNote) : ''}</span>
                 ${quoteBadges}
               </div>
               <!-- Zeile 4: Bearbeiter (statt Datum/Prio) -->
@@ -2665,12 +2753,10 @@ async function loadFreshdeskTicketsPreview() {
           ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>`
           : '';
       }
-      // Eigene-Notiz-Badge
+      // Eigene-Notiz-Badge (klickbar, zeigt Zeit + öffnet Notiz-Modal)
       const ownSlot = row.querySelector('.own-note-slot');
       if (ownSlot) {
-        ownSlot.innerHTML = ownNote
-          ? `<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5" title="Du hast eine eigene Notiz an diesem Ticket — Klick auf KI-Badge öffnet das Bearbeiten-Modal"><i data-lucide="message-square" class="w-2.5 h-2.5"></i> Notiz</span>`
-          : '';
+        ownSlot.innerHTML = ownNote ? _ownNoteBadgeHtml(t.id, ownNote) : '';
       }
       if (window.lucide) lucide.createIcons();
     });
