@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.04';
+const APP_VERSION = 'v4.05';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1585,7 +1585,32 @@ async function loadFreshdeskTicketsPreview() {
     const query = `"(group_id:${groupId})${statusPart}${typeFilter}"`;
     // Agents im Hintergrund laden (parallel zum Ticket-Search), damit Bearbeiter-Names beim Render bereits da sind
     const agentsPromise = _loadFdAgents();
-    const data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
+    let data;
+    try {
+      data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
+    } catch (eSearch) {
+      // Wenn Freshdesk-Account nicht alle Status-Codes kennt (z.B. nur 2,3,4,5
+      // statt 2,3,4,5,6,7), gibt's 400 "It should be one of these values: '2,3,4,5'".
+      // Parse die akzeptierten Werte aus der Fehlermeldung und retry.
+      const m = eSearch.message?.match(/one of these values:?\s*'([\d,\s]+)'/i);
+      if (m) {
+        const allowedStatusCodes = m[1].split(',').map(x => parseInt(x.trim(), 10)).filter(Boolean);
+        const wantedSet = _inquiriesStatusFilterAllowedSet();
+        const usableCodes = wantedSet
+          ? allowedStatusCodes.filter(c => wantedSet.has(c))
+          : allowedStatusCodes;
+        if (usableCodes.length > 0) {
+          const retryStatusPart = ' AND (' + usableCodes.map(c => 'status:' + c).join(' OR ') + ')';
+          const retryQuery = `"(group_id:${groupId})${retryStatusPart}${typeFilter}"`;
+          console.warn('[Inquiries] Status-Codes ' + m[1] + ' nur teilweise verfügbar — retry mit', usableCodes);
+          data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(retryQuery));
+        } else {
+          throw eSearch;
+        }
+      } else {
+        throw eSearch;
+      }
+    }
     await agentsPromise; // warten, damit der erste Render mit Names ist
     let tickets = data.results || [];
     // Client-side Doppel-Filter: Freshdesks Search-Index hat 1–10 Sek Lag bei
