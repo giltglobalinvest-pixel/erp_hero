@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.14';
+const APP_VERSION = 'v4.15';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1610,19 +1610,20 @@ function _attachSwipeHandlers(wrapEl) {
     card.style.transform = 'translateX(0)';
     wrapEl.dataset.swipeOpen = '';
   };
-  const openLeft = () => {  // Swipe rechts → öffnet links (Voice-Notiz)
-    card.style.transition = 'transform 0.2s ease-out';
-    card.style.transform = 'translateX(' + SWIPE_OPEN_DISTANCE + 'px)';
-    wrapEl.dataset.swipeOpen = 'left';
-  };
-  const openRight = () => {  // Swipe links → öffnet rechts (Kunde-Info)
-    card.style.transition = 'transform 0.2s ease-out';
-    card.style.transform = 'translateX(-' + SWIPE_OPEN_DISTANCE + 'px)';
-    wrapEl.dataset.swipeOpen = 'right';
-    // Contact lazy laden
-    const ticketId = wrapEl.dataset.ticketId;
-    const requesterId = wrapEl.dataset.requesterId;
-    if (requesterId) _revealSwipeContact(wrapEl, ticketId, requesterId);
+  // Nach erfolgreichem Swipe: kurz „Bestätigung" zeigen, dann Action triggern + Karte zurück.
+  const triggerSwipeAction = (direction) => {
+    const ticketId = Number(wrapEl.dataset.ticketId);
+    if (!ticketId) { reset(); return; }
+    // Kurz visuell „rasten" lassen, dann Action aufrufen + Card zurück
+    card.style.transition = 'transform 0.18s ease-out';
+    card.style.transform = direction === 'left'
+      ? 'translateX(-' + SWIPE_OPEN_DISTANCE + 'px)'
+      : 'translateX(' + SWIPE_OPEN_DISTANCE + 'px)';
+    setTimeout(() => {
+      reset();
+      if (direction === 'left')  openInternalNoteComposer(ticketId);  // Swipe links → Notiz
+      if (direction === 'right') openTicketActionMenu(ticketId);      // Swipe rechts → Aktionen
+    }, 180);
   };
 
   const onTouchStart = (e) => {
@@ -1667,8 +1668,8 @@ function _attachSwipeHandlers(wrapEl) {
     if (!isDragging) return;
     isDragging = false;
     if (axisLocked !== 'x') return;
-    if (currentDelta < -SWIPE_THRESHOLD) openRight();
-    else if (currentDelta > SWIPE_THRESHOLD) openLeft();
+    if (currentDelta < -SWIPE_THRESHOLD)      triggerSwipeAction('left');   // Swipe links → Notiz
+    else if (currentDelta > SWIPE_THRESHOLD)  triggerSwipeAction('right');  // Swipe rechts → Aktionen
     else reset();
     currentDelta = 0;
   };
@@ -2657,18 +2658,18 @@ async function loadFreshdeskTicketsPreview() {
           const fdUrl = freshdeskTicketUrl(t.id);
           return `
             <div class="swipe-card-wrap relative overflow-hidden rounded-xl border border-ink-200" data-ticket-id="${t.id}" data-requester-id="${t.requester_id || ''}" data-swipe-contact-id="${t.requester_id || ''}">
-              <!-- Action-Panel LINKS (sichtbar bei Swipe nach rechts) — Voice-Notiz -->
-              <div class="swipe-action-left absolute inset-y-0 left-0 w-[200px] flex items-center px-3 bg-gradient-to-r from-purple-600 to-purple-700 z-0">
-                <button type="button" onclick="_swipeOpenVoiceNote(${t.id}, event)" class="flex items-center gap-2 text-white">
-                  <i data-lucide="mic" class="w-6 h-6"></i>
-                  <span class="text-sm font-semibold leading-tight">Sprach-<br>Notiz</span>
-                </button>
+              <!-- Hint-Panel LINKS (sichtbar bei Swipe nach RECHTS) — öffnet Action-Menü -->
+              <div class="swipe-action-left absolute inset-y-0 left-0 w-[200px] flex items-center justify-center px-3 bg-gradient-to-r from-blue-600 to-blue-700 z-0">
+                <div class="flex items-center gap-2 text-white">
+                  <i data-lucide="zap" class="w-6 h-6"></i>
+                  <span class="text-sm font-bold">Aktionen</span>
+                </div>
               </div>
-              <!-- Action-Panel RECHTS (sichtbar bei Swipe nach links) — Kunden-Info -->
-              <div class="swipe-action-right absolute inset-y-0 right-0 w-[200px] flex flex-col justify-center px-3 py-2 bg-blue-50 z-0 border-l border-blue-200">
-                <p class="swipe-contact-loading text-[11px] text-ink-500 italic hidden">… lade Anfrager</p>
-                <div class="swipe-contact-data text-xs">
-                  <p class="text-[11px] text-blue-700 italic">← noch nicht geladen</p>
+              <!-- Hint-Panel RECHTS (sichtbar bei Swipe nach LINKS) — öffnet Notiz-Composer -->
+              <div class="swipe-action-right absolute inset-y-0 right-0 w-[200px] flex items-center justify-center px-3 bg-gradient-to-r from-amber-500 to-amber-600 z-0">
+                <div class="flex items-center gap-2 text-white">
+                  <span class="text-sm font-bold text-right leading-tight">Interne<br>Notiz</span>
+                  <i data-lucide="message-square-plus" class="w-6 h-6"></i>
                 </div>
               </div>
               <!-- Main Card (verschiebbar) -->
@@ -2699,6 +2700,14 @@ async function loadFreshdeskTicketsPreview() {
                   </div>
                 </div>
               </div>
+              <!-- Zeile 1.5: Kunde-Vorschau (Name · Firma) — async lazy geladen -->
+              <p class="ticket-customer-slot text-xs text-blue-800 mb-1 truncate empty:hidden">${(() => {
+                const cachedCt = t.requester_id ? _fdContactCache.get(t.requester_id) : null;
+                if (!cachedCt) return '';
+                const nm = cachedCt.name || '';
+                const co = cachedCt.company_name || '';
+                return `<i data-lucide="user" class="inline w-3 h-3 -mt-0.5"></i> ${escapeHtml(nm)}${co ? ' · ' + escapeHtml(co) : ''}`;
+              })()}</p>
               <!-- Zeile 2: Subject groß, 2 Zeilen erlaubt -->
               <p class="text-base font-semibold text-ink-900 group-hover:text-brand-700 leading-snug break-words mb-1.5" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(subject)}</p>
               <!-- Zeile 3: Tags / KI-Badge / Own-Note-Badge / Quote-Badges (Async-Slots werden später befüllt) -->
@@ -2761,6 +2770,22 @@ async function loadFreshdeskTicketsPreview() {
       if (window.lucide) lucide.createIcons();
     });
     _runWithLimit(tasks, 5).catch(() => {});
+    // Kunde-Vorschau auf jeder Karte lazy laden (Concurrency 5, niedrige Priorität)
+    const customerTasks = tickets.map(t => async () => {
+      if (!t.requester_id) return;
+      const c = await _loadFdContact(t.requester_id).catch(()=>null);
+      if (!c) return;
+      const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + t.id + '"]');
+      const slot = row?.querySelector('.ticket-customer-slot');
+      if (!slot) return;
+      const nm = c.name || '';
+      const co = c.company_name || '';
+      if (nm || co) {
+        slot.innerHTML = '<i data-lucide="user" class="inline w-3 h-3 -mt-0.5"></i> ' + escapeHtml(nm) + (co ? ' · ' + escapeHtml(co) : '');
+        if (window.lucide) lucide.createIcons();
+      }
+    });
+    _runWithLimit(customerTasks, 5).catch(() => {});
     // Hinweis: Auto-KI-Analyse beim Laden ist abgeschaltet — manuelle Sammelaktion
     // erfolgt jetzt explizit über den „Bulk-Analyse"-Button im Header.
   } catch (err) {
