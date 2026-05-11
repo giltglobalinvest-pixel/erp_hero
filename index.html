@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.09';
+const APP_VERSION = 'v4.10';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1601,6 +1601,9 @@ function _attachSwipeHandlers(wrapEl) {
   const card = wrapEl.querySelector('.swipe-card');
   if (!card) return;
   let startX = 0, startY = 0, currentDelta = 0, isDragging = false, axisLocked = null;
+  // Long-Press: Touch 600ms ohne Move → Action-Menü öffnen (statt Swipe oder Tap)
+  let longPressTimer = null;
+  const cancelLongPress = () => { if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; } };
 
   const reset = () => {
     card.style.transition = 'transform 0.2s ease-out';
@@ -1629,6 +1632,18 @@ function _attachSwipeHandlers(wrapEl) {
     isDragging = true;
     axisLocked = null;
     card.style.transition = 'none';
+    // Long-Press starten — Cancel bei jedem Move oder TouchEnd
+    cancelLongPress();
+    longPressTimer = setTimeout(() => {
+      longPressTimer = null;
+      // Visual feedback + Modal
+      try { navigator.vibrate?.(20); } catch (_) {}
+      const ticketId = wrapEl.dataset.ticketId;
+      if (ticketId) {
+        isDragging = false;  // Swipe stoppen
+        openTicketActionMenu(Number(ticketId));
+      }
+    }, 600);
   };
   const onTouchMove = (e) => {
     if (!isDragging) return;
@@ -1638,6 +1653,8 @@ function _attachSwipeHandlers(wrapEl) {
     if (axisLocked === null) {
       if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // noch nichts entscheiden
       axisLocked = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+      // Sobald irgendeine Bewegung gestartet ist: Long-Press abbrechen
+      cancelLongPress();
     }
     if (axisLocked !== 'x') return;  // vertikales Scrollen — Karte nicht bewegen
     e.preventDefault();  // damit das Scroll nicht greift
@@ -1646,6 +1663,7 @@ function _attachSwipeHandlers(wrapEl) {
     card.style.transform = 'translateX(' + clamped + 'px)';
   };
   const onTouchEnd = () => {
+    cancelLongPress();
     if (!isDragging) return;
     isDragging = false;
     if (axisLocked !== 'x') return;
@@ -1658,7 +1676,160 @@ function _attachSwipeHandlers(wrapEl) {
   card.addEventListener('touchstart', onTouchStart, { passive: true });
   card.addEventListener('touchmove', onTouchMove, { passive: false });
   card.addEventListener('touchend', onTouchEnd, { passive: true });
-  card.addEventListener('touchcancel', () => { isDragging = false; reset(); }, { passive: true });
+  card.addEventListener('touchcancel', () => { cancelLongPress(); isDragging = false; reset(); }, { passive: true });
+  // Desktop: Rechtsklick triggert Action-Menü
+  card.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const ticketId = wrapEl.dataset.ticketId;
+    if (ticketId) openTicketActionMenu(Number(ticketId));
+  });
+}
+
+// Action-Menü beim Long-Press / Rechtsklick auf eine Ticket-Karte.
+// Zeigt Kunden-Kontakt-Daten + Quick-Actions (Anrufen, Email, Marketing-Mail
+// über Freshsales, CRM-Deep-Links, ERP-Anlegen).
+async function openTicketActionMenu(ticketId) {
+  if (!ticketId) return;
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5">
+      <div class="flex items-center justify-between mb-3 gap-2">
+        <h3 class="text-base font-bold text-ink-900 flex items-center gap-2">
+          <i data-lucide="zap" class="w-5 h-5 text-brand-600"></i>
+          Aktionen · FT-${ticketId}
+        </h3>
+        <button type="button" onclick="closeModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div id="tamContent">
+        <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade Anfrager…</p>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-lg' });
+  if (window.lucide) lucide.createIcons();
+  try {
+    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
+    const wrap = document.getElementById('tamContent');
+    if (!wrap) return;
+    if (!r) { wrap.innerHTML = '<p class="text-sm text-amber-700">Keine Anfrager-Daten verfügbar.</p>'; return; }
+    const fullName = (r.name || '').trim();
+    const parts = fullName.split(/\s+/);
+    const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : fullName;
+    const lastName  = parts.length > 1 ? parts[parts.length - 1] : '';
+    const companyName = r.company_name || r.company?.name || '';
+    const tel = r.phone || '';
+    const mobile = r.mobile || '';
+    const email = r.email || '';
+    // ERP-Status check
+    let inErp = false;
+    let erpCustomer = null;
+    if (email) {
+      const erp = await _findCustomerContactByEmail(email).catch(()=>null);
+      if (erp?.customer) { inErp = true; erpCustomer = erp.customer; }
+    }
+    // Freshsales-Lookup für Deep-Link zum Email-Composer
+    let fsContactId = null;
+    if (email && APP_KEYS.freshsalesSubdomain) {
+      try {
+        const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(email) + '&f=email&entities=contact');
+        const candidates =
+          (Array.isArray(lookup?.contacts?.contacts) ? lookup.contacts.contacts : null)
+          || (Array.isArray(lookup?.contacts) ? lookup.contacts : null)
+          || [];
+        const exact = candidates.find(c => (c.email || '').toLowerCase() === email.toLowerCase());
+        const hit = exact || candidates[0];
+        if (hit?.id) fsContactId = hit.id;
+      } catch (_) {}
+    }
+    // Freshworks-CRM-URL builder
+    const fsBase = (APP_KEYS.freshsalesSubdomain || '').replace(/^https?:\/\//i, '').replace(/\.freshworks\.com\/?.*$/i, '').replace(/\/+$/, '');
+    const fsContactUrl = (fsBase && fsContactId) ? `https://${fsBase}.freshworks.com/crm/sales/contacts/${fsContactId}` : null;
+    const fsContactUrlWithEmail = fsContactUrl ? fsContactUrl + '?open_email_composer=true' : null;
+    // Freshdesk-Ticket-URL
+    const fdTicketUrl = freshdeskTicketUrl(ticketId);
+
+    wrap.innerHTML = `
+      <!-- Kontakt-Block -->
+      <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-4">
+        <div class="flex items-start gap-3">
+          <div class="w-12 h-12 rounded-full bg-blue-600 text-white grid place-items-center shrink-0">
+            <i data-lucide="user" class="w-6 h-6"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <p class="text-base font-bold text-ink-900 truncate">${escapeHtml(firstName)} ${escapeHtml(lastName)}</p>
+            ${r.job_title ? `<p class="text-xs text-ink-600 truncate">${escapeHtml(r.job_title)}</p>` : ''}
+            ${companyName ? `<p class="text-sm font-semibold text-blue-900 truncate flex items-center gap-1"><i data-lucide="building-2" class="w-3.5 h-3.5"></i> ${escapeHtml(companyName)}</p>` : ''}
+            <div class="grid grid-cols-2 gap-1.5 mt-2 text-xs">
+              ${tel ? `<div class="flex items-center gap-1 text-ink-700"><i data-lucide="phone" class="w-3 h-3 text-ink-500"></i> ${escapeHtml(tel)}</div>` : ''}
+              ${mobile ? `<div class="flex items-center gap-1 text-ink-700"><i data-lucide="smartphone" class="w-3 h-3 text-ink-500"></i> ${escapeHtml(mobile)}</div>` : ''}
+              ${email ? `<div class="flex items-center gap-1 text-ink-700 col-span-2"><i data-lucide="mail" class="w-3 h-3 text-ink-500"></i> <span class="truncate">${escapeHtml(email)}</span></div>` : ''}
+            </div>
+            <div class="flex gap-1.5 mt-2">
+              ${inErp
+                ? '<span class="text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold">✓ im ERP</span>'
+                : '<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold">nicht im ERP</span>'}
+              ${fsContactId
+                ? '<span class="text-[10px] uppercase tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-semibold">✓ in Freshsales</span>'
+                : (APP_KEYS.freshsalesSubdomain ? '<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded">nicht in FS</span>' : '')}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Aktionen -->
+      <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">Aktionen</p>
+      <div class="space-y-1.5">
+        ${(mobile || tel) ? `<a href="tel:${escapeHtml(mobile || tel)}" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition">
+          <i data-lucide="phone" class="w-5 h-5 text-emerald-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-emerald-900">Anrufen</p><p class="text-[11px] text-emerald-700">${escapeHtml(mobile || tel)}</p></div>
+          <i data-lucide="arrow-up-right" class="w-4 h-4 text-emerald-600"></i>
+        </a>` : ''}
+        ${email ? `<a href="mailto:${escapeHtml(email)}" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
+          <i data-lucide="mail" class="w-5 h-5 text-ink-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Email schreiben (lokal)</p><p class="text-[11px] text-ink-600 truncate">${escapeHtml(email)}</p></div>
+          <i data-lucide="arrow-up-right" class="w-4 h-4 text-ink-500"></i>
+        </a>` : ''}
+        ${fsContactUrlWithEmail ? `<a href="${escapeHtml(fsContactUrlWithEmail)}" target="_blank" rel="noopener" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition">
+          <i data-lucide="send" class="w-5 h-5 text-purple-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-purple-900">Marketing-Email senden (Freshsales)</p><p class="text-[11px] text-purple-700">Öffnet Contact in Freshsales — dort Template auswählen + senden</p></div>
+          <i data-lucide="external-link" class="w-4 h-4 text-purple-600"></i>
+        </a>` : (APP_KEYS.freshsalesSubdomain && !fsContactId ? `<div class="flex items-center gap-3 p-3 bg-ink-50 border border-ink-200 rounded-lg opacity-70">
+          <i data-lucide="send" class="w-5 h-5 text-ink-500 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-700">Marketing-Email (Freshsales)</p><p class="text-[11px] text-ink-500">Contact nicht in Freshsales — erst „Im ERP anlegen + zu CRMs syncen"</p></div>
+        </div>` : '')}
+        ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
+          <i data-lucide="trending-up" class="w-5 h-5 text-blue-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Im Freshsales-CRM öffnen</p><p class="text-[11px] text-ink-600">Kontakt mit allen Deals + Aktivitäten</p></div>
+          <i data-lucide="external-link" class="w-4 h-4 text-ink-500"></i>
+        </a>` : ''}
+        ${fdTicketUrl ? `<a href="${escapeHtml(fdTicketUrl)}" target="_blank" rel="noopener" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
+          <i data-lucide="headphones" class="w-5 h-5 text-ink-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">In Freshdesk öffnen</p><p class="text-[11px] text-ink-600">Original-Ticket im Helpdesk</p></div>
+          <i data-lucide="external-link" class="w-4 h-4 text-ink-500"></i>
+        </a>` : ''}
+        ${inErp ? `<button type="button" onclick="closeModal();setTimeout(()=>openCustomerModal('${escapeHtml(erpCustomer.id)}'),100)" class="w-full flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition text-left">
+          <i data-lucide="user-check" class="w-5 h-5 text-emerald-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Kunde im ERP öffnen</p><p class="text-[11px] text-ink-600 truncate">${escapeHtml(erpCustomer.fields?.name1 || '–')}</p></div>
+          <i data-lucide="arrow-up-right" class="w-4 h-4 text-ink-500"></i>
+        </button>` : `<button type="button" onclick="closeModal();setTimeout(()=>_qvCreateContactInErp(${ticketId}, null), 200)" class="w-full flex items-center gap-3 p-3 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition text-left">
+          <i data-lucide="user-plus" class="w-5 h-5 text-amber-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-amber-900">Im ERP anlegen + zu CRMs syncen</p><p class="text-[11px] text-amber-700">Mit Vorschau zum Korrigieren</p></div>
+          <i data-lucide="arrow-up-right" class="w-4 h-4 text-amber-600"></i>
+        </button>`}
+        <button type="button" onclick="closeModal();setTimeout(()=>openFreshdeskTicket(${ticketId}),100)" class="w-full flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition text-left">
+          <i data-lucide="external-link" class="w-5 h-5 text-ink-700 shrink-0"></i>
+          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Ticket-Details öffnen</p><p class="text-[11px] text-ink-600">Volle Konversation, KI-Zusammenfassung, Quote erzeugen</p></div>
+          <i data-lucide="arrow-up-right" class="w-4 h-4 text-ink-500"></i>
+        </button>
+      </div>
+    `;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    const wrap = document.getElementById('tamContent');
+    if (wrap) wrap.innerHTML = '<p class="text-sm text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
+  }
 }
 
 // Click-Handler-Wrapper: wenn Swipe offen → erst schließen, sonst Ticket öffnen
