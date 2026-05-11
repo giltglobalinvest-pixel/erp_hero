@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.19';
+const APP_VERSION = 'v4.20';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4877,7 +4877,7 @@ async function _qvSubmitCreateInErp(btnEl) {
       company_id: [cur.id],
       status: 'aktiv',
       payment_terms: '14 Tage netto',
-      delivery_terms: 'EXW Hellbach'
+      delivery_terms: 'EXW Fellbach'
     };
     ['street','zip','city','country','website','vat_id'].forEach(k => {
       const v = get(k); if (v) customerFields[k] = v;
@@ -5629,7 +5629,7 @@ async function aiCreateQuoteFromMatch() {
 }
 
 // Aktion: Customer + Contact aus extrahierten Daten anlegen.
-// Setzt zusätzlich Defaults: Zahlungsziel "14 Tage netto", Lieferbedingungen "EXW Hellbach".
+// Setzt zusätzlich Defaults: Zahlungsziel "14 Tage netto", Lieferbedingungen "EXW Fellbach".
 // Legt automatisch eine Rechnungsadresse mit der Firmenanschrift an (kind=invoice, primary).
 // Liefert {customerId, contactId} oder wirft.
 async function _aiCreateCustomerAndContactFromExtracted() {
@@ -5659,7 +5659,7 @@ async function _aiCreateCustomerAndContactFromExtracted() {
     phone:          (ct.phone || '').trim(),
     vat_id:         (co.vat_id || '').trim(),
     payment_terms:  '14 Tage netto',
-    delivery_terms: 'EXW Hellbach',
+    delivery_terms: 'EXW Fellbach',
     status:         'aktiv',
     company_id:     [cur.id]
   };
