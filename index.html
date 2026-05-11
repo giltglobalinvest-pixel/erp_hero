@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.08';
+const APP_VERSION = 'v4.09';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3831,80 +3831,215 @@ async function showAiSummaryQuickView(ticketId) {
   }
 }
 
-// Quick-View "Im ERP anlegen": legt Customer + Contact aus den Freshdesk-Requester-
-// Daten an, triggert dann den CRM-Auto-Sync zu Freshdesk + Freshsales.
+// Quick-View "Im ERP anlegen": öffnet eine Vorschau mit editierbaren Feldern.
+// User kann Firma + Kontakt korrigieren, dann startet das eigentliche Anlegen +
+// CRM-Sync (siehe _qvSubmitCreateInErp).
 async function _qvCreateContactInErp(ticketId, btnEl) {
   if (!ticketId) return;
   const cur = getCurrentCompany();
   if (!cur) return toast('Kein Mandant ausgewählt', 'error');
   const origHtml = btnEl?.innerHTML;
-  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lade…'; if (window.lucide) lucide.createIcons(); }
   try {
     // 1. Frischen Ticket + Requester holen
     const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
     const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
     if (!r || !r.email) throw new Error('Keine E-Mail-Adresse beim Anfragenden gefunden');
 
-    // 2. Double-Check: existiert schon im ERP?
+    // 2. Double-Check: existiert schon?
     const existing = await _findCustomerContactByEmail(r.email).catch(() => null);
     if (existing?.customer) {
       toast('Kunde war schon im ERP: ' + (existing.customer.fields.name1 || '–'), 'info', 4000);
-      // Trotzdem CRM-Sync triggern, damit alles aktuell ist
       _syncCustomerOnUse(existing.customer.id);
-      // Modal neu rendern damit der ✓-Status erscheint
       showAiSummaryQuickView(ticketId);
       return;
     }
 
-    // 3. Customer-Daten zusammenstellen
+    // 3. Vorschau-Daten aufbauen
     const fullName = (r.name || '').trim();
     const nameParts = fullName.split(/\s+/);
     const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
     const firstName = nameParts.length > 1 ? nameParts.slice(0, -1).join(' ') : fullName;
     const companyName = (r.company_name || r.company?.name || '').trim();
-    // Falls keine Firma → aus Email-Domain extrahieren
     const fallbackCompanyFromEmail = !companyName ? _extractCompanyFromEmail(r.email) : '';
     const finalCompanyName = companyName || fallbackCompanyFromEmail || fullName || r.email;
-
     const customerNo = await nextCustomerNo(cur.id).catch(() => '');
-    const customerFields = {
+
+    // 4. Preview-Modal öffnen
+    _qvOpenCreatePreview({
+      ticketId,
       customer_no: customerNo,
       name1: finalCompanyName,
+      street: r.address || '',
+      zip: r.zip || '',
+      city: r.city || '',
+      country: 'Deutschland',
+      vat_id: '',
+      website: '',
+      first_name: firstName,
+      last_name: lastName,
+      email: r.email,
+      phone: r.phone || '',
+      mobile: r.mobile || '',
+      role: r.job_title || ''
+    });
+  } catch (e) {
+    toast('Fehler: ' + (e.message || e), 'error', 7000);
+  } finally {
+    if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
+function _qvOpenCreatePreview(prefill) {
+  const cur = getCurrentCompany();
+  // openModal2 falls verfügbar (Stack-Modal), sonst openModal (ersetzt)
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4 gap-2">
+        <h3 class="text-lg font-bold text-ink-900 flex items-center gap-2">
+          <i data-lucide="user-plus" class="w-5 h-5 text-amber-600"></i>
+          Kunde + Kontakt im ERP anlegen
+        </h3>
+        <button type="button" onclick="closeModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <p class="text-xs text-ink-600 mb-3">Daten sind aus Freshdesk vorbefüllt — bitte prüfen + ggf. korrigieren. Danach: Anlegen + Auto-Sync zu Freshdesk-Companies + Freshsales-Accounts.</p>
+
+      <form id="qvCreateForm" class="space-y-3">
+        <!-- Firma -->
+        <div class="bg-ink-50 border border-ink-200 rounded-lg p-3">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2 flex items-center gap-1"><i data-lucide="building-2" class="w-3 h-3"></i> Firma</p>
+          <div class="grid grid-cols-2 gap-2">
+            <div class="col-span-2">
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Name (Zeile 1) *</label>
+              <input name="name1" required value="${escapeHtml(prefill.name1 || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Kundennr. *</label>
+              <input name="customer_no" value="${escapeHtml(prefill.customer_no || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm font-mono">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">USt-IdNr</label>
+              <input name="vat_id" value="${escapeHtml(prefill.vat_id || '')}" placeholder="DE…" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm font-mono">
+            </div>
+            <div class="col-span-2">
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Straße + Nr.</label>
+              <input name="street" value="${escapeHtml(prefill.street || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">PLZ</label>
+              <input name="zip" value="${escapeHtml(prefill.zip || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Ort</label>
+              <input name="city" value="${escapeHtml(prefill.city || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Land</label>
+              <input name="country" value="${escapeHtml(prefill.country || 'Deutschland')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Website</label>
+              <input name="website" value="${escapeHtml(prefill.website || '')}" placeholder="https://…" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+          </div>
+        </div>
+
+        <!-- Ansprechpartner -->
+        <div class="bg-ink-50 border border-ink-200 rounded-lg p-3">
+          <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2 flex items-center gap-1"><i data-lucide="user" class="w-3 h-3"></i> Ansprechpartner</p>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Vorname</label>
+              <input name="first_name" value="${escapeHtml(prefill.first_name || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Nachname</label>
+              <input name="last_name" value="${escapeHtml(prefill.last_name || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div class="col-span-2">
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Funktion / Rolle</label>
+              <input name="role" value="${escapeHtml(prefill.role || '')}" placeholder="z.B. Einkauf" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div class="col-span-2">
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">E-Mail *</label>
+              <input name="email" required value="${escapeHtml(prefill.email || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Telefon</label>
+              <input name="phone" value="${escapeHtml(prefill.phone || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Mobil</label>
+              <input name="mobile" value="${escapeHtml(prefill.mobile || '')}" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm">
+            </div>
+          </div>
+        </div>
+
+        <input type="hidden" name="ticketId" value="${escapeHtml(String(prefill.ticketId))}">
+
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" onclick="closeModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
+          <button id="qvCreateSubmitBtn" type="button" onclick="_qvSubmitCreateInErp(this)" class="bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-2">
+            <i data-lucide="check" class="w-4 h-4"></i> Anlegen + zu CRMs syncen
+          </button>
+        </div>
+      </form>
+    </div>
+  `, { maxWidth: 'max-w-2xl' });
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _qvSubmitCreateInErp(btnEl) {
+  const form = document.getElementById('qvCreateForm');
+  if (!form) return;
+  const cur = getCurrentCompany();
+  if (!cur) return toast('Kein Mandant', 'error');
+  const fd = new FormData(form);
+  const get = (k) => (fd.get(k) || '').toString().trim();
+  if (!get('name1')) { toast('Name (Zeile 1) fehlt', 'warn'); return; }
+  if (!get('email')) { toast('E-Mail fehlt', 'warn'); return; }
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // Customer
+    const customerFields = {
+      customer_no: get('customer_no'),
+      name1: get('name1'),
       company_id: [cur.id],
       status: 'aktiv',
-      country: 'Deutschland',
       payment_terms: '14 Tage netto',
       delivery_terms: 'EXW Hellbach'
     };
-    if (r.address) customerFields.street = r.address;
-    if (r.city)    customerFields.city = r.city;
-    if (r.zip)     customerFields.zip = r.zip;
+    ['street','zip','city','country','website','vat_id'].forEach(k => {
+      const v = get(k); if (v) customerFields[k] = v;
+    });
     const customer = await writeData('Customer', customerFields);
 
-    // 4. Contact anlegen (verlinkt zum Customer)
+    // Contact
     const contactFields = {
       customer_id: [customer.id],
       company_id: [cur.id],
       status: 'aktiv',
-      email: r.email
+      email: get('email')
     };
-    if (firstName)  contactFields.first_name = firstName;
-    if (lastName)   contactFields.last_name = lastName;
-    if (r.phone)    contactFields.phone = r.phone;
-    if (r.mobile)   contactFields.mobile = r.mobile;
-    if (r.job_title) contactFields.role = r.job_title;
-    const contact = await writeData('Contact', contactFields);
+    ['first_name','last_name','phone','mobile','role'].forEach(k => {
+      const v = get(k); if (v) contactFields[k] = v;
+    });
+    await writeData('Contact', contactFields);
 
-    toast('✓ Kunde + Kontakt angelegt: ' + finalCompanyName, 'success', 4000);
-
-    // 5. CRM-Sync (Lazy-Push wird ausgelöst via writeData-Hook für Quote/Order/...
-    //    nicht für Customer/Contact, daher manuell anstoßen)
+    toast('✓ Kunde + Kontakt angelegt: ' + customerFields.name1, 'success', 4000);
+    // CRM-Sync triggern
     _syncCustomerOnUse(customer.id);
 
-    // 6. Modal-Refresh für aktuellen ERP-Status
-    showAiSummaryQuickView(ticketId);
+    // Modal schließen + Quick-View aktualisieren
+    closeModal();
+    const tid = get('ticketId');
+    if (tid) setTimeout(() => showAiSummaryQuickView(Number(tid)), 200);
   } catch (e) {
-    toast('Fehler beim Anlegen: ' + (e.message || e), 'error', 8000);
+    toast('Fehler: ' + (e.message || e), 'error', 8000);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
 }
