@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.01';
+const APP_VERSION = 'v4.02';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -9875,45 +9875,38 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
       });
       if (!silent) toast('Freshsales-Account aktualisiert: ' + (result?.sales_account?.name || fs.name), 'success', 3500);
     } else {
-      // POST → Bei Duplikat (400 "Company is not unique") per Lookup die existierende ID
-      // finden und stattdessen PUT machen (Verknüpfung herstellen statt zweite Firma anlegen)
+      // Proaktive Duplikat-Prüfung: erst per Lookup nachsehen, ob die Firma
+      // schon in Freshsales existiert. Wenn ja → PUT auf vorhandene ID
+      // (Verknüpfung etablieren). Wenn nein → POST anlegen.
+      // So vermeiden wir Race-Conditions mit dem 400-"Company is not unique".
+      let foundId = null;
+      let foundName = null;
       try {
+        const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(fs.name) + '&f=sales_account&entities=sales_account');
+        console.log('[FS Lookup] response shape:', JSON.stringify(lookup).slice(0, 400));
+        // Freshsales-Response kann verschachtelt sein, alle Varianten durchprobieren
+        const candidates =
+          (Array.isArray(lookup?.sales_accounts?.sales_accounts) ? lookup.sales_accounts.sales_accounts : null)
+          || (Array.isArray(lookup?.sales_accounts) ? lookup.sales_accounts : null)
+          || (Array.isArray(lookup?.lookup?.sales_accounts) ? lookup.lookup.sales_accounts : null)
+          || [];
+        const exact = candidates.find(c => (c.name || '').trim().toLowerCase() === fs.name.toLowerCase());
+        const hit = exact || candidates[0];
+        if (hit?.id) { foundId = hit.id; foundName = hit.name; }
+      } catch (eLookup) {
+        console.warn('[FS Lookup] fehlgeschlagen:', eLookup.message);
+      }
+
+      if (foundId) {
+        result = await proxyFetch('freshsales/api/sales_accounts/' + foundId, {
+          method: 'PUT', body: { sales_account: fs }
+        });
+        if (!silent) toast('Existierenden Freshsales-Account verknüpft + aktualisiert: ' + (foundName || fs.name), 'success', 4500);
+      } else {
         result = await proxyFetch('freshsales/api/sales_accounts', {
           method: 'POST', body: { sales_account: fs }
         });
         if (!silent) toast('In Freshsales angelegt: ' + (result?.sales_account?.name || fs.name), 'success', 3500);
-      } catch (e1) {
-        const dupMatch = /not unique|already exist|Name existiert|duplicate|company.*unique/i.test(e1.message || '');
-        if (dupMatch) {
-          // Lookup nach Name in Freshsales
-          let foundId = null;
-          let foundName = null;
-          try {
-            const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(fs.name) + '&f=sales_account&entities=sales_account');
-            // Response-Shape ist Freshsales-spezifisch — beide Varianten abfangen
-            const candidates =
-              (Array.isArray(lookup?.sales_accounts?.sales_accounts) ? lookup.sales_accounts.sales_accounts : null)
-              || (Array.isArray(lookup?.sales_accounts) ? lookup.sales_accounts : null)
-              || (Array.isArray(lookup?.lookup?.sales_accounts) ? lookup.lookup.sales_accounts : null)
-              || [];
-            // Exakter Name-Match bevorzugen, sonst erstes Ergebnis
-            const exact = candidates.find(c => (c.name || '').trim().toLowerCase() === fs.name.toLowerCase());
-            const hit = exact || candidates[0];
-            if (hit?.id) { foundId = hit.id; foundName = hit.name; }
-          } catch (eLookup) {
-            console.warn('[FS Lookup] fehlgeschlagen:', eLookup.message);
-          }
-          if (foundId) {
-            result = await proxyFetch('freshsales/api/sales_accounts/' + foundId, {
-              method: 'PUT', body: { sales_account: fs }
-            });
-            if (!silent) toast('Existierenden Freshsales-Account gefunden + aktualisiert: ' + (foundName || fs.name), 'success', 4000);
-          } else {
-            throw new Error('Firma „' + fs.name + '" existiert in Freshsales, konnte aber per Lookup nicht eindeutig gefunden werden. Bitte Freshsales-Account-ID manuell in das Customer-Feld freshsales_account_id eintragen.');
-          }
-        } else {
-          throw e1;
-        }
       }
     }
     const newId = result?.sales_account?.id || result?.id;
@@ -9934,6 +9927,8 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
       userMsg = 'Freshsales 404 — Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht im Freshworks-CRM. Logge dich in Freshsales ein, schau auf die URL (z.B. <bundle>.freshworks.com) und korrigiere die Subdomain in Admin → Einstellungen → Step 9.';
     } else if (/401|403/.test(m)) {
       userMsg = 'Freshsales-Token ungültig (' + m.match(/40[13]/)[0] + ') — neuen Token in Freshsales generieren und in Step 9 eintragen.';
+    } else if (/not unique|Name existiert|Company is not unique/i.test(m)) {
+      userMsg = 'Firma „' + (fs?.name || '?') + '" existiert in Freshsales, konnte aber per Lookup nicht gefunden werden. Schau in die Browser-Konsole (F12) → suche nach „[FS Lookup] response shape" → schick mir die Ausgabe.';
     }
     if (!silent) toast(userMsg, 'error', 12000);
     else console.warn('[Lazy-Push FS] customer=' + customerId + ': ' + m);
