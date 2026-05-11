@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.06';
+const APP_VERSION = 'v4.07';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1706,6 +1706,115 @@ const AUTO_AI_BATCH_SIZE = 3;
 const AUTO_AI_STATUS_CODES = new Set([2, 3]);  // 2=Offen, 3=Ausstehend
 const _autoAiInProgress = new Set();
 
+// Bulk-Aktion: Für alle sichtbaren Tickets KI-Zusammenfassung + Titel-Umschreibung,
+// mit Smart-Skip (überspringt bereits behandelte Tickets).
+async function bulkAnalyzeVisibleTickets(btnEl) {
+  if (!_proxyBase()) return toast('Proxy nicht konfiguriert', 'error');
+  if (!APP_KEYS.proxyV2) return toast('Bulk-Aktion benötigt Val.town v2 (Titel-Umschreiben braucht PUT)', 'error', 8000);
+  // Alle sichtbaren Tickets aus dem DOM einsammeln
+  const rows = document.querySelectorAll('.swipe-card-wrap[data-ticket-id]');
+  const visibleTickets = [];
+  rows.forEach(row => {
+    if (row.offsetParent === null) return; // versteckt
+    const id = row.dataset.ticketId;
+    if (id) visibleTickets.push(id);
+  });
+  if (visibleTickets.length === 0) return toast('Keine sichtbaren Tickets', 'warn');
+  // Tickets-Daten frisch laden, damit wir aktuelle Subjects/Status haben
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Analysiere…'; if (window.lucide) lucide.createIcons(); }
+  const stats = { aiDone: 0, aiSkipped: 0, titleDone: 0, titleSkipped: 0, errors: 0 };
+  toast('Bulk-Analyse läuft für ' + visibleTickets.length + ' Ticket(s)…', 'info', 4000);
+  for (const tid of visibleTickets) {
+    try {
+      const t = await freshdeskFetch('tickets/' + tid + '?include=requester');
+      if (!t || !t.id) { stats.errors++; continue; }
+      // === Smart-Skip 1: KI-Analyse nur wenn noch keine KI-Notiz als letzte Notiz im Ticket ===
+      let aiSkip = false;
+      try {
+        const scan = await _fetchTicketPrivateNoteScan(t.id);
+        if (scan.aiNote && scan.aiIsLatest) aiSkip = true;
+      } catch (_) {}
+      if (aiSkip) {
+        stats.aiSkipped++;
+      } else {
+        try {
+          const ok = await _autoAnalyzeTicketHeadless(t);
+          if (ok) {
+            stats.aiDone++;
+            _fdAiSummaryCache.delete(String(t.id));
+            // Badge im DOM aktualisieren
+            const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + t.id + '"]');
+            const slot = row?.querySelector('.ai-badge-slot');
+            if (slot && !slot.innerHTML.includes('sparkles')) {
+              slot.innerHTML = '<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(' + t.id + ')" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>';
+              if (window.lucide) lucide.createIcons();
+            }
+          }
+        } catch (e) { console.warn('[Bulk-AI] ' + t.id + ':', e.message); stats.errors++; }
+      }
+      // === Smart-Skip 2: Titel nur umschreiben, wenn er noch nicht im Schema-Format ist ===
+      if (_isTitleAlreadyRewritten(t.subject)) {
+        stats.titleSkipped++;
+      } else {
+        try {
+          await _rewriteTitleHeadless(t);
+          stats.titleDone++;
+        } catch (e) { console.warn('[Bulk-Title] ' + t.id + ':', e.message); stats.errors++; }
+      }
+    } catch (e) {
+      console.warn('[Bulk] ' + tid + ':', e.message);
+      stats.errors++;
+    }
+  }
+  const summary =
+    `✓ ${stats.aiDone} KI-Analysen erstellt (${stats.aiSkipped} übersprungen) · ` +
+    `${stats.titleDone} Titel umgeschrieben (${stats.titleSkipped} übersprungen)` +
+    (stats.errors > 0 ? ` · ${stats.errors} Fehler (Konsole)` : '');
+  toast(summary, stats.errors > 0 ? 'warn' : 'success', 7000);
+  if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
+  // Liste am Ende refresh — neue Titel + Badges sichtbar machen
+  if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+}
+
+// Headless-Variante des Titel-Umschreibens — nutzt KI für den Topic-Teil
+async function _rewriteTitleHeadless(ticket) {
+  // Firma + Kontakt bestimmen (gleiche Logik wie im manuellen rewriteFreshdeskTicketTitle)
+  let firma = '';
+  const requester = ticket.requester || (ticket.requester_id ? await _loadFdContact(ticket.requester_id).catch(()=>null) : null);
+  if (requester) {
+    if (requester.company_name) firma = requester.company_name;
+    else if (requester.company?.name) firma = requester.company.name;
+    else if (requester.email) firma = _extractCompanyFromEmail(requester.email) || '';
+    if (!firma && requester.name && !_isGenericRequesterName(requester.name)) firma = requester.name;
+  }
+  if (!firma) firma = '–';
+  // Topic via KI extrahieren
+  let topic = '';
+  try {
+    const firstMsg = _fdHtmlToText(ticket.description_html || ticket.description || '').slice(0, 1200);
+    const prompt = `Fasse den Kern dieser Kundenanfrage in einem KURZEN deutschen Stichpunkt zusammen — max 60 Zeichen, KEINE Anführungszeichen, KEIN Punkt am Ende, KEIN Satz, sondern ein knappes Thema wie „Servicetausch V3F16L" oder „Reparatur Steuerung KONE Monospace".
+
+Aktueller Titel: ${ticket.subject || '(leer)'}
+
+Erste Nachricht:
+${firstMsg || '(leer)'}
+
+Antworte AUSSCHLIESSLICH mit dem Stichpunkt, kein Text drumherum.`;
+    topic = (await askAI(prompt, { maxTokens: 80, purpose: 'bulk_title_topic' }) || '').trim();
+    topic = topic.replace(/^["'„]+/, '').replace(/["'""]+$/, '').replace(/\.+$/, '').trim();
+    if (topic.length > 80) topic = topic.slice(0, 77) + '…';
+    if (!topic) topic = (ticket.subject || '(ohne Betreff)').slice(0, 60);
+  } catch (_) {
+    topic = (ticket.subject || '(ohne Betreff)').slice(0, 60);
+  }
+  const newTitle = `Anfrage „FT-${ticket.id}" von „${firma}" für „${topic}"`;
+  await proxyFetch('freshdesk/api/v2/tickets/' + ticket.id, {
+    method: 'PUT',
+    body: { subject: newTitle }
+  });
+}
+
 async function _autoAnalyzeMissingTickets(tickets) {
   if (!_proxyBase()) return;
   const candidates = [];
@@ -1751,45 +1860,119 @@ async function _autoAnalyzeMissingTickets(tickets) {
 }
 
 async function _autoAnalyzeTicketHeadless(t) {
-  const parts = [];
-  parts.push('Ticket FT-' + t.id + ': ' + (t.subject || '(ohne Betreff)'));
-  if (t.type) parts.push('Typ: ' + t.type);
-  parts.push('Erstellt: ' + _fdFmtDate(t.created_at));
-  parts.push('');
-  parts.push('--- Erste Nachricht ---');
-  parts.push(_fdHtmlToText(t.description_html || t.description || '') || '(leer)');
-  // Conversations laden (best-effort)
+  // 1) Volldatenmenge holen: frisches Ticket inkl. requester + attachments, Conversations
+  let ticket = t;
+  let requester = null;
   try {
-    const conv = await freshdeskFetch('tickets/' + t.id + '/conversations');
-    const list = (Array.isArray(conv) ? conv : []).slice()
-      .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
-    if (list.length > 0) {
-      parts.push('');
-      parts.push('--- Verlauf ---');
-      for (const c of list.slice(0, 10)) {  // max 10 Conversations für Token-Limit
-        const dir = c.incoming ? 'Eingehend' : 'Ausgehend';
-        const note = c.private ? ' [private Notiz]' : '';
-        parts.push('### ' + dir + note + ' · ' + _fdFmtDate(c.created_at));
-        parts.push(_fdHtmlToText(c.body || c.body_text || '').slice(0, 1500) || '(leer)');
-      }
+    // include=requester liefert direkt den Contact-Block mit Name/Phone/Email/Company
+    const fresh = await freshdeskFetch('tickets/' + t.id + '?include=requester');
+    if (fresh && fresh.id) {
+      ticket = fresh;
+      requester = fresh.requester || null;
     }
   } catch (_) {}
+  // Requester separat nachladen falls include nicht klappte
+  if (!requester && ticket.requester_id) {
+    requester = await _loadFdContact(ticket.requester_id).catch(() => null);
+  }
+  // 2) Conversations chronologisch laden
+  let conversations = [];
+  try {
+    const conv = await freshdeskFetch('tickets/' + t.id + '/conversations');
+    conversations = (Array.isArray(conv) ? conv : []).slice()
+      .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  } catch (_) {}
+  // 3) Anhänge — Bilder für Vision-API herunterladen (max 5)
+  const allAttachments = _collectFreshdeskAttachmentsFrom(ticket, conversations);
+  const imageAttachments = allAttachments.filter(a => /^image\//i.test(a.content_type || ''));
+  const otherAttachments = allAttachments.filter(a => !/^image\//i.test(a.content_type || ''));
+  const MAX_IMAGES = 5;
+  const imageContents = [];
+  const imageNamesInOrder = [];
+  for (const att of imageAttachments.slice(0, MAX_IMAGES)) {
+    const b64 = await _downloadAttachmentAsBase64(att);
+    if (b64) {
+      imageContents.push({ mediaType: att.content_type, data: b64 });
+      imageNamesInOrder.push(att.name || '(unbenannt)');
+    }
+  }
+  // 4) Prompt zusammenbauen
+  const parts = [];
+  parts.push('Ticket FT-' + ticket.id + ': ' + (ticket.subject || '(ohne Betreff)'));
+  if (ticket.type) parts.push('Typ: ' + ticket.type);
+  parts.push('Erstellt: ' + _fdFmtDate(ticket.created_at));
+  // Requester-Block
+  if (requester) {
+    parts.push('');
+    parts.push('--- Anfragender (aus Freshdesk-Kontakt) ---');
+    if (requester.name)         parts.push('Name: ' + requester.name);
+    if (requester.email)        parts.push('E-Mail: ' + requester.email);
+    if (requester.phone)        parts.push('Telefon: ' + requester.phone);
+    if (requester.mobile)       parts.push('Mobil: ' + requester.mobile);
+    if (requester.job_title)    parts.push('Funktion: ' + requester.job_title);
+    if (requester.company_name) parts.push('Firma: ' + requester.company_name);
+    else if (requester.company && requester.company.name) parts.push('Firma: ' + requester.company.name);
+  }
+  parts.push('');
+  parts.push('--- Erste Nachricht ---');
+  parts.push(_fdHtmlToText(ticket.description_html || ticket.description || '') || '(leer)');
+  if (conversations.length > 0) {
+    parts.push('');
+    parts.push('--- Verlauf ---');
+    for (const c of conversations.slice(0, 10)) {
+      const dir = c.incoming ? 'Eingehend' : 'Ausgehend';
+      const note = c.private ? ' [private Notiz]' : '';
+      parts.push('### ' + dir + note + ' · ' + _fdFmtDate(c.created_at));
+      parts.push(_fdHtmlToText(c.body || c.body_text || '').slice(0, 1500) || '(leer)');
+    }
+  }
+  // Anhänge-Übersicht
+  if (allAttachments.length > 0) {
+    parts.push('');
+    parts.push('--- Anhänge (' + allAttachments.length + ' insgesamt, ' + imageContents.length + ' Bild(er) zur Vision-Analyse) ---');
+    for (const a of allAttachments) {
+      const isImg = /^image\//i.test(a.content_type || '');
+      const note = isImg
+        ? (imageNamesInOrder.includes(a.name) ? ' [BILD AN KI ÜBERGEBEN]' : ' [Bild nicht ladbar]')
+        : '';
+      parts.push('• ' + (a.name || '(unbenannt)') + ' (' + (a.content_type || '?') + ', ' + (a.size ? Math.round(a.size/1024)+' kB' : '?') + ')' + note);
+    }
+  }
   const fullText = parts.join('\n');
+
+  const imageHint = imageContents.length > 0 ? `
+
+BILDANHÄNGE: ${imageContents.length} Bild(er) sind beigefügt (${imageNamesInOrder.join(', ')}).
+Wenn die Anfrage auf „Foto im Anhang" / „siehe Bild" / „Typenschild" verweist, analysiere die Bilder:
+- TYPENSCHILD → Hersteller, Typ-Nr, Spannung, Leistung
+- DEFEKT-FOTO → sichtbarer Schaden in einem Satz
+- BESTELLLISTE / DATENBLATT → erkennbare Artikel/Codes
+Trage die Erkenntnisse als eigenen Abschnitt **„Erkenntnisse aus Bildanhang:"** unten ein.` : '';
+
+  const otherHint = otherAttachments.length > 0 ? `
+
+WEITERE ANHÄNGE (nicht analysierbar — nur erwähnen): ${otherAttachments.map(a => a.name).join(', ')}. Erwähne sie unter **„Weitere Anhänge:"** als Hinweis.` : '';
+
   const prompt = `Erstelle eine kompakte Zusammenfassung für dieses Freshdesk-Ticket auf Deutsch.
-Format mit drei fettgedruckten Labels:
+Format mit drei fettgedruckten Pflicht-Labels — bei Bedarf weitere Labels:
 
 **Anliegen:** Was will der Kunde — kurz und konkret (1-2 Zeilen)
 **Aktueller Stand:** Was wurde bereits getan / besprochen
 **Offene Punkte:** Was muss als nächstes passieren
-
-Keine Floskeln, keine Anrede, max 8 Zeilen total. Bei Bedarf erwähne wichtige Detail-Infos (Artikel-Nr, Liefertermin, Kontaktdaten).
+**Anfragender:** Name · Funktion · Firma — und IMMER die wichtigste Telefonnummer wenn vorhanden (Mobil bevorzugt, sonst Festnetz, dann E-Mail). Format: „Max Mustermann (Einkauf) · Mustermann GmbH · ☎ +49 123 456789".
+${imageContents.length > 0 ? '**Erkenntnisse aus Bildanhang:** kurze Erkennung der wichtigsten Bild-Inhalte\n' : ''}${otherAttachments.length > 0 ? '**Weitere Anhänge:** nicht-analysierte Dateien kurz benennen\n' : ''}
+Keine Floskeln, keine Anrede, max 12 Zeilen total. Wichtige Detail-Infos (Artikel-Nr, Liefertermin) im Anliegen erwähnen.
 
 --- Ticket-Inhalt ---
-${fullText}`;
-  const raw = await askAI(prompt, { maxTokens: 800, purpose: 'auto_ticket_summary' });
+${fullText}${imageHint}${otherHint}`;
+
+  const raw = await askAI(prompt, {
+    maxTokens: 1200,
+    purpose: 'auto_ticket_summary',
+    images: imageContents
+  });
   const summary = String(raw || '').trim();
   if (!summary) return false;
-  // Als private Notiz speichern — gleicher Marker wie manuelle KI-Analyse
   const noteHtml = '<p><strong>' + FD_AI_SUMMARY_MARKER + '</strong> · auto-analysiert am ' + escapeHtml(new Date().toLocaleString('de-DE')) + '</p>' +
                    '<p>' + escapeHtml(summary).replace(/\n/g, '<br>') + '</p>';
   await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
@@ -2062,10 +2245,9 @@ async function loadFreshdeskTicketsPreview() {
       }
       if (window.lucide) lucide.createIcons();
     });
-    _runWithLimit(tasks, 5).then(() => {
-      // Nach Note-Scans: Auto-KI-Analyse für Tickets ohne KI-Notiz starten (fire-and-forget)
-      _autoAnalyzeMissingTickets(tickets).catch(()=>{});
-    }).catch(() => {});
+    _runWithLimit(tasks, 5).catch(() => {});
+    // Hinweis: Auto-KI-Analyse beim Laden ist abgeschaltet — manuelle Sammelaktion
+    // erfolgt jetzt explizit über den „Bulk-Analyse"-Button im Header.
   } catch (err) {
     wrap.innerHTML = `
       <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-900">
@@ -2568,12 +2750,17 @@ async function toggleFreshdeskTicketHistory() {
    damit die KI-Analyse nicht crasht.
 */
 function _collectFreshdeskAttachments() {
+  return _collectFreshdeskAttachmentsFrom(_fdTicketState.ticket, _fdTicketState.conversations);
+}
+
+// State-freie Variante — für Headless-Analyse + Bulk-Operationen
+function _collectFreshdeskAttachmentsFrom(ticket, conversations) {
   const out = [];
-  const t = _fdTicketState.ticket || {};
+  const t = ticket || {};
   if (Array.isArray(t.attachments)) {
     for (const a of t.attachments) out.push({ ...a, origin: 'Erste Nachricht', conv_date: t.created_at });
   }
-  const convs = _fdTicketState.conversations || [];
+  const convs = Array.isArray(conversations) ? conversations : [];
   for (const c of convs) {
     if (Array.isArray(c.attachments)) {
       for (const a of c.attachments) out.push({
@@ -2584,6 +2771,13 @@ function _collectFreshdeskAttachments() {
     }
   }
   return out;
+}
+
+// Erkennt, ob ein Ticket-Titel bereits dem strukturierten Format folgt:
+// "Anfrage „FT-XXX" von „Firma" für „Topic""
+function _isTitleAlreadyRewritten(subject) {
+  if (!subject) return false;
+  return /^Anfrage\s+„FT-\d+"\s+von\s+„[^"]+"\s+für\s+„[^"]+"$/.test(String(subject).trim());
 }
 
 async function _downloadAttachmentAsBase64(att) {
@@ -3006,12 +3200,16 @@ async function _fetchTicketPrivateNoteScan(ticketId) {
     const h = String((c.body || '') + '\n' + (c.body_text || ''));
     if (!h.includes(FD_INTERNAL_NOTE_MARKER) && !h.includes('Interne Notiz')) return false;
     if (!ownName) return false;
-    // Author-Match: der Username steht im Header der Notiz
     return h.includes(ownName);
   };
   const aiNote  = privates.find(isAiNote)  || null;
   const ownNote = privates.find(isOwnNote) || null;
-  return { aiNote, ownNote, privates };
+  // Aktualität der KI-Notiz prüfen: ist sie noch die zeitlich letzte Aktivität?
+  // (also keine spätere Mail/Notiz dazwischen). Wenn nicht → User-Wunsch:
+  // Bulk-Aktion darf erneut analysieren.
+  const lastConv = list[0] || null;  // chronologisch absteigend → erstes Element = neueste
+  const aiIsLatest = !!(aiNote && lastConv && aiNote.id === lastConv.id);
+  return { aiNote, ownNote, privates, lastConv, aiIsLatest, allConversations: list };
 }
 
 // Cache-aware Check: liefert {aiNote, ownNote} eines Tickets.
@@ -3544,9 +3742,40 @@ async function showAiSummaryQuickView(ticketId) {
       : fullText;
     const headerLine = headerIdx >= 0 ? lines[headerIdx] : '';
     wrap.innerHTML = `
-      <div class="bg-purple-50 border border-purple-200 rounded-xl p-4 text-sm text-ink-800 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-y-auto">${escapeHtml(cleanText || '(leer)')}</div>
+      <div id="qvContactBox" class="mb-3"></div>
+      <div class="bg-purple-50 border border-purple-200 rounded-xl p-4 text-sm text-ink-800 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto">${escapeHtml(cleanText || '(leer)')}</div>
       <p class="text-[11px] text-ink-500 italic mt-2">${escapeHtml(headerLine || ('Erstellt: ' + _fdFmtDate(aiNote.created_at)))}</p>
     `;
+    // Anfrager-Daten lazy laden + Klick-Telefonnummer prominent zeigen
+    (async () => {
+      try {
+        const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+        const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
+        const box = document.getElementById('qvContactBox');
+        if (!r || !box) return;
+        const companyName = r.company_name || r.company?.name || '';
+        const tel = r.mobile || r.phone || '';
+        box.innerHTML = `
+          <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-start gap-3">
+            <div class="w-10 h-10 rounded-full bg-blue-600 text-white grid place-items-center shrink-0">
+              <i data-lucide="user" class="w-5 h-5"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="font-bold text-ink-900 truncate">${escapeHtml(r.name || '–')}</p>
+              ${r.job_title ? `<p class="text-[11px] text-ink-600 truncate">${escapeHtml(r.job_title)}${companyName ? ' · ' + escapeHtml(companyName) : ''}</p>` : (companyName ? `<p class="text-[11px] text-ink-600 truncate">${escapeHtml(companyName)}</p>` : '')}
+              <div class="flex flex-wrap gap-1.5 mt-1.5">
+                ${tel ? `<a href="tel:${escapeHtml(tel)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg">
+                  <i data-lucide="phone" class="w-3 h-3"></i> ${escapeHtml(tel)}
+                </a>` : ''}
+                ${r.email ? `<a href="mailto:${escapeHtml(r.email)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-blue-300 hover:bg-blue-50 text-blue-800 text-xs rounded-lg">
+                  <i data-lucide="mail" class="w-3 h-3"></i> Email
+                </a>` : ''}
+              </div>
+            </div>
+          </div>`;
+        if (window.lucide) lucide.createIcons();
+      } catch (_) {}
+    })();
   } catch (e) {
     const wrap = document.getElementById('aiSummaryQuickContent');
     if (wrap) wrap.innerHTML = '<p class="text-sm text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
@@ -11389,6 +11618,9 @@ async function renderInquiries() {
               <option value="hide" ${_inquiriesOwnNoteFilter==='hide'?'selected':''}>Eigene Notizen ausblenden</option>
               <option value="only" ${_inquiriesOwnNoteFilter==='only'?'selected':''}>Nur eigene Notizen</option>
             </select>
+            <button type="button" onclick="bulkAnalyzeVisibleTickets(this)" title="Für alle sichtbaren Tickets: KI-Analyse + Titel-Umschreibung (überspringt bereits behandelte)" class="text-xs px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium inline-flex items-center gap-1.5">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Bulk-Analyse
+            </button>
             <span class="text-[10px] uppercase tracking-wider bg-brand-100 text-brand-700 px-1.5 py-0.5 rounded font-medium">read-only</span>
           </div>
         </div>
