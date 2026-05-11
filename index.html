@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.07';
+const APP_VERSION = 'v4.08';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1947,7 +1947,8 @@ Wenn die Anfrage auf „Foto im Anhang" / „siehe Bild" / „Typenschild" verwe
 - TYPENSCHILD → Hersteller, Typ-Nr, Spannung, Leistung
 - DEFEKT-FOTO → sichtbarer Schaden in einem Satz
 - BESTELLLISTE / DATENBLATT → erkennbare Artikel/Codes
-Trage die Erkenntnisse als eigenen Abschnitt **„Erkenntnisse aus Bildanhang:"** unten ein.` : '';
+- E-MAIL-SIGNATUR / VISITENKARTE-BILD (kleines image im Email-Footer, oft signatur.png/jpg, enthält Logo + Kontaktdaten) → extrahiere Name, Funktion, Firma, Adresse, Telefon (Festnetz + Mobil), E-Mail, Website. Trage die Kontaktdaten priorisiert in den **„Anfragender:"**-Abschnitt ein (überschreibt die Freshdesk-Werte falls präziser).
+Trage die Bild-Inhalte als eigenen Abschnitt **„Erkenntnisse aus Bildanhang:"** ein.` : '';
 
   const otherHint = otherAttachments.length > 0 ? `
 
@@ -2915,6 +2916,7 @@ Typische Inhalte und was zu extrahieren ist:
 - MASSZEICHNUNG / DATENBLATT → erkennbare Hauptmaße, Modellbezeichnung, Code
 - BESTELLLISTE / DOKUMENT-SCAN → Artikel-Liste extrahieren
 - SCREENSHOT EINES FEHLERCODES → Fehlercode + Bedeutung wenn ableitbar
+- E-MAIL-SIGNATUR / VISITENKARTE-BILD (kleines image im Email-Footer, oft signatur.png/jpg, enthält Logo + Kontaktdaten) → extrahiere Name, Funktion, Firma, Adresse, Telefon (Festnetz + Mobil), E-Mail, Website. Trage diese Kontaktdaten in die "contact" und "company" Sections des JSON-Schemas ein — übersteuern die Freshdesk-Requester-Daten falls präziser oder vollständiger.
 
 Trage die Erkenntnisse in den summary-Text als eigenen Abschnitt **"Erkenntnisse aus Bildanhang:"** ein — kurz und konkret.
 
@@ -3745,40 +3747,165 @@ async function showAiSummaryQuickView(ticketId) {
       <div id="qvContactBox" class="mb-3"></div>
       <div class="bg-purple-50 border border-purple-200 rounded-xl p-4 text-sm text-ink-800 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto">${escapeHtml(cleanText || '(leer)')}</div>
       <p class="text-[11px] text-ink-500 italic mt-2">${escapeHtml(headerLine || ('Erstellt: ' + _fdFmtDate(aiNote.created_at)))}</p>
+      <div id="qvAttachmentsBox" class="mt-3"></div>
     `;
-    // Anfrager-Daten lazy laden + Klick-Telefonnummer prominent zeigen
+    // Anfrager + ERP-Status + Anhänge laden
     (async () => {
       try {
         const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
         const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
+        // Conversations für Anhänge holen
+        let conversations = [];
+        try {
+          const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+          conversations = Array.isArray(conv) ? conv : [];
+        } catch (_) {}
+        // ERP-Status check (per Email)
+        let erpStatus = { customer: null, contact: null };
+        if (r?.email) {
+          try {
+            erpStatus = await _findCustomerContactByEmail(r.email) || erpStatus;
+          } catch (_) {}
+        }
         const box = document.getElementById('qvContactBox');
-        if (!r || !box) return;
-        const companyName = r.company_name || r.company?.name || '';
-        const tel = r.mobile || r.phone || '';
-        box.innerHTML = `
-          <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-start gap-3">
-            <div class="w-10 h-10 rounded-full bg-blue-600 text-white grid place-items-center shrink-0">
-              <i data-lucide="user" class="w-5 h-5"></i>
-            </div>
-            <div class="flex-1 min-w-0">
-              <p class="font-bold text-ink-900 truncate">${escapeHtml(r.name || '–')}</p>
-              ${r.job_title ? `<p class="text-[11px] text-ink-600 truncate">${escapeHtml(r.job_title)}${companyName ? ' · ' + escapeHtml(companyName) : ''}</p>` : (companyName ? `<p class="text-[11px] text-ink-600 truncate">${escapeHtml(companyName)}</p>` : '')}
-              <div class="flex flex-wrap gap-1.5 mt-1.5">
-                ${tel ? `<a href="tel:${escapeHtml(tel)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg">
-                  <i data-lucide="phone" class="w-3 h-3"></i> ${escapeHtml(tel)}
-                </a>` : ''}
-                ${r.email ? `<a href="mailto:${escapeHtml(r.email)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-blue-300 hover:bg-blue-50 text-blue-800 text-xs rounded-lg">
-                  <i data-lucide="mail" class="w-3 h-3"></i> Email
-                </a>` : ''}
+        if (r && box) {
+          const companyName = r.company_name || r.company?.name || '';
+          const tel = r.mobile || r.phone || '';
+          const inErp = !!(erpStatus?.customer);
+          box.innerHTML = `
+            <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-start gap-3">
+              <div class="w-10 h-10 rounded-full bg-blue-600 text-white grid place-items-center shrink-0">
+                <i data-lucide="user" class="w-5 h-5"></i>
               </div>
-            </div>
-          </div>`;
-        if (window.lucide) lucide.createIcons();
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <p class="font-bold text-ink-900 truncate">${escapeHtml(r.name || '–')}</p>
+                  ${inErp
+                    ? '<span class="text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold">✓ im ERP</span>'
+                    : '<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold">nicht im ERP</span>'}
+                </div>
+                ${r.job_title ? `<p class="text-[11px] text-ink-600 truncate">${escapeHtml(r.job_title)}${companyName ? ' · ' + escapeHtml(companyName) : ''}</p>` : (companyName ? `<p class="text-[11px] text-ink-600 truncate">${escapeHtml(companyName)}</p>` : '')}
+                <div class="flex flex-wrap gap-1.5 mt-1.5">
+                  ${tel ? `<a href="tel:${escapeHtml(tel)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg">
+                    <i data-lucide="phone" class="w-3 h-3"></i> ${escapeHtml(tel)}
+                  </a>` : ''}
+                  ${r.email ? `<a href="mailto:${escapeHtml(r.email)}" onclick="event.stopPropagation()" class="inline-flex items-center gap-1 px-2 py-1 bg-white border border-blue-300 hover:bg-blue-50 text-blue-800 text-xs rounded-lg">
+                    <i data-lucide="mail" class="w-3 h-3"></i> Email
+                  </a>` : ''}
+                  ${inErp
+                    ? `<button type="button" onclick="event.stopPropagation();closeModal();setTimeout(()=>openCustomerModal('${erpStatus.customer.id}'),100)" class="inline-flex items-center gap-1 px-2 py-1 bg-emerald-50 border border-emerald-300 hover:bg-emerald-100 text-emerald-800 text-xs rounded-lg">
+                        <i data-lucide="external-link" class="w-3 h-3"></i> Kunde im ERP öffnen
+                      </button>`
+                    : `<button id="qvCreateInErpBtn" type="button" onclick="_qvCreateContactInErp(${ticketId}, this)" class="inline-flex items-center gap-1 px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg">
+                        <i data-lucide="user-plus" class="w-3 h-3"></i> Im ERP anlegen + zu CRMs syncen
+                      </button>`}
+                </div>
+              </div>
+            </div>`;
+          if (window.lucide) lucide.createIcons();
+        }
+        // Anhänge anzeigen
+        const allAtts = _collectFreshdeskAttachmentsFrom(t, conversations);
+        const attBox = document.getElementById('qvAttachmentsBox');
+        if (allAtts.length > 0 && attBox) {
+          attBox.innerHTML = `
+            <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1.5">Anhänge (${allAtts.length})</p>
+            <div class="flex flex-wrap gap-1.5">
+              ${allAtts.map(a => {
+                const isImg = /^image\//i.test(a.content_type || '');
+                const sz = a.size ? Math.round(a.size/1024) + ' kB' : '';
+                return `<a href="${escapeHtml(a.attachment_url || '#')}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-ink-200 rounded-lg bg-white hover:bg-ink-50 max-w-[240px]" title="${escapeHtml(a.origin || '')}">
+                  <i data-lucide="${isImg ? 'image' : 'paperclip'}" class="w-3 h-3 shrink-0"></i>
+                  <span class="truncate">${escapeHtml(a.name || '(unbenannt)')}</span>
+                  ${sz ? `<span class="text-ink-400 shrink-0">${sz}</span>` : ''}
+                </a>`;
+              }).join('')}
+            </div>`;
+          if (window.lucide) lucide.createIcons();
+        }
       } catch (_) {}
     })();
   } catch (e) {
     const wrap = document.getElementById('aiSummaryQuickContent');
     if (wrap) wrap.innerHTML = '<p class="text-sm text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+// Quick-View "Im ERP anlegen": legt Customer + Contact aus den Freshdesk-Requester-
+// Daten an, triggert dann den CRM-Auto-Sync zu Freshdesk + Freshsales.
+async function _qvCreateContactInErp(ticketId, btnEl) {
+  if (!ticketId) return;
+  const cur = getCurrentCompany();
+  if (!cur) return toast('Kein Mandant ausgewählt', 'error');
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // 1. Frischen Ticket + Requester holen
+    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
+    if (!r || !r.email) throw new Error('Keine E-Mail-Adresse beim Anfragenden gefunden');
+
+    // 2. Double-Check: existiert schon im ERP?
+    const existing = await _findCustomerContactByEmail(r.email).catch(() => null);
+    if (existing?.customer) {
+      toast('Kunde war schon im ERP: ' + (existing.customer.fields.name1 || '–'), 'info', 4000);
+      // Trotzdem CRM-Sync triggern, damit alles aktuell ist
+      _syncCustomerOnUse(existing.customer.id);
+      // Modal neu rendern damit der ✓-Status erscheint
+      showAiSummaryQuickView(ticketId);
+      return;
+    }
+
+    // 3. Customer-Daten zusammenstellen
+    const fullName = (r.name || '').trim();
+    const nameParts = fullName.split(/\s+/);
+    const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+    const firstName = nameParts.length > 1 ? nameParts.slice(0, -1).join(' ') : fullName;
+    const companyName = (r.company_name || r.company?.name || '').trim();
+    // Falls keine Firma → aus Email-Domain extrahieren
+    const fallbackCompanyFromEmail = !companyName ? _extractCompanyFromEmail(r.email) : '';
+    const finalCompanyName = companyName || fallbackCompanyFromEmail || fullName || r.email;
+
+    const customerNo = await nextCustomerNo(cur.id).catch(() => '');
+    const customerFields = {
+      customer_no: customerNo,
+      name1: finalCompanyName,
+      company_id: [cur.id],
+      status: 'aktiv',
+      country: 'Deutschland',
+      payment_terms: '14 Tage netto',
+      delivery_terms: 'EXW Hellbach'
+    };
+    if (r.address) customerFields.street = r.address;
+    if (r.city)    customerFields.city = r.city;
+    if (r.zip)     customerFields.zip = r.zip;
+    const customer = await writeData('Customer', customerFields);
+
+    // 4. Contact anlegen (verlinkt zum Customer)
+    const contactFields = {
+      customer_id: [customer.id],
+      company_id: [cur.id],
+      status: 'aktiv',
+      email: r.email
+    };
+    if (firstName)  contactFields.first_name = firstName;
+    if (lastName)   contactFields.last_name = lastName;
+    if (r.phone)    contactFields.phone = r.phone;
+    if (r.mobile)   contactFields.mobile = r.mobile;
+    if (r.job_title) contactFields.role = r.job_title;
+    const contact = await writeData('Contact', contactFields);
+
+    toast('✓ Kunde + Kontakt angelegt: ' + finalCompanyName, 'success', 4000);
+
+    // 5. CRM-Sync (Lazy-Push wird ausgelöst via writeData-Hook für Quote/Order/...
+    //    nicht für Customer/Contact, daher manuell anstoßen)
+    _syncCustomerOnUse(customer.id);
+
+    // 6. Modal-Refresh für aktuellen ERP-Status
+    showAiSummaryQuickView(ticketId);
+  } catch (e) {
+    toast('Fehler beim Anlegen: ' + (e.message || e), 'error', 8000);
+    if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
 }
 
