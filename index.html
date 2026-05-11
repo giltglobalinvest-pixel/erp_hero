@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.10';
+const APP_VERSION = 'v4.11';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1685,6 +1685,263 @@ function _attachSwipeHandlers(wrapEl) {
   });
 }
 
+/* ============================================================
+   MARKETING-EMAIL-VERSAND
+   ============================================================
+   Freshsales hat keine Send-Email-API → Versand erfolgt über
+   Freshdesk POST /api/v2/tickets/outbound_email (legt Ticket an
+   + sendet die Mail). Danach wird in Freshsales beim Contact
+   automatisch eine Note hinterlegt, damit der Versand im CRM
+   nachvollziehbar bleibt.
+*/
+
+// Cache für Canned Responses (Freshdesk-Email-Templates)
+let _fdCannedResponsesCache = null;
+async function _loadFdCannedResponses() {
+  if (_fdCannedResponsesCache) return _fdCannedResponsesCache;
+  const all = [];
+  try {
+    const folders = await freshdeskFetch('canned_response_folders');
+    for (const f of (Array.isArray(folders) ? folders : [])) {
+      try {
+        const responses = await freshdeskFetch('canned_response_folders/' + f.id + '/responses');
+        for (const r of (Array.isArray(responses) ? responses : [])) {
+          all.push({
+            id: r.id,
+            folder_id: f.id,
+            folder_name: f.name || '',
+            title: r.title || ('Vorlage ' + r.id),
+            content: r.content_html || r.content || ''
+          });
+        }
+      } catch (_) {}
+    }
+  } catch (e) {
+    console.warn('[CannedResp] Laden fehlgeschlagen:', e.message);
+  }
+  _fdCannedResponsesCache = all;
+  return all;
+}
+
+// Rendert Variablen in einem Template-Body (einfach: ${Vorname} etc.)
+function _renderTemplateBody(html, vars) {
+  let out = String(html || '');
+  for (const [k, v] of Object.entries(vars || {})) {
+    const safeVal = String(v || '');
+    // Mehrere Placeholder-Varianten: {{name}}, ${name}, [name]
+    out = out.replace(new RegExp('\\{\\{\\s*' + k + '\\s*\\}\\}', 'gi'), safeVal);
+    out = out.replace(new RegExp('\\$\\{\\s*' + k + '\\s*\\}', 'gi'), safeVal);
+  }
+  return out;
+}
+
+// Schreibt eine Notiz an einen Freshsales-Contact (best-effort, fail-soft)
+async function _writeFsContactNote(contactId, description) {
+  if (!contactId || !APP_KEYS.freshsalesSubdomain) return false;
+  try {
+    await proxyFetch('freshsales/api/notes', {
+      method: 'POST',
+      body: {
+        note: {
+          description: description,
+          targetable_type: 'Contact',
+          targetable_id: Number(contactId)
+        }
+      }
+    });
+    return true;
+  } catch (e) {
+    console.warn('[FS Note] fehlgeschlagen:', e.message);
+    return false;
+  }
+}
+
+// Marketing-Email-Modal öffnen
+async function openMarketingEmailModal(ticketId, opts) {
+  opts = opts || {};
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  // Daten: requester + ggf. FS-Contact-ID + Templates
+  opener(`
+    <div class="p-5">
+      <div class="flex items-center justify-between mb-3 gap-2">
+        <h3 class="text-base font-bold text-ink-900 flex items-center gap-2">
+          <i data-lucide="send" class="w-5 h-5 text-purple-600"></i>
+          Marketing-Email senden
+        </h3>
+        <button type="button" onclick="closeModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <p class="text-[11px] text-ink-500 mb-3">Versand via Freshdesk (legt ein Ticket an + verschickt die Mail). Die Aktion wird automatisch als Notiz beim Freshsales-Contact dokumentiert.</p>
+      <div id="memContent">
+        <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade Empfänger + Vorlagen…</p>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-3xl' });
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    // Empfänger-Daten holen
+    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
+    if (!r || !r.email) {
+      document.getElementById('memContent').innerHTML = '<p class="text-sm text-amber-700">Keine E-Mail-Adresse beim Anfragenden gefunden.</p>';
+      return;
+    }
+    // Templates parallel laden
+    const templatesPromise = _loadFdCannedResponses();
+    // Freshsales-Contact-ID für spätere Notiz holen
+    let fsContactId = opts.fsContactId || null;
+    if (!fsContactId && r.email && APP_KEYS.freshsalesSubdomain) {
+      try {
+        const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(r.email) + '&f=email&entities=contact');
+        const cands =
+          (Array.isArray(lookup?.contacts?.contacts) ? lookup.contacts.contacts : null)
+          || (Array.isArray(lookup?.contacts) ? lookup.contacts : null) || [];
+        const exact = cands.find(c => (c.email || '').toLowerCase() === r.email.toLowerCase());
+        if ((exact || cands[0])?.id) fsContactId = (exact || cands[0]).id;
+      } catch (_) {}
+    }
+    // Vor/Nachname zerlegen
+    const fullName = (r.name || '').trim();
+    const nameParts = fullName.split(/\s+/);
+    const firstName = nameParts.length > 1 ? nameParts.slice(0, -1).join(' ') : fullName;
+    const lastName  = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+    const companyName = r.company_name || r.company?.name || '';
+    const userName = (APP_KEYS.user?.name || '').trim();
+
+    const templates = await templatesPromise;
+
+    document.getElementById('memContent').innerHTML = `
+      <form id="memForm" class="space-y-3">
+        <!-- Empfänger (read-only) -->
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 flex items-center gap-2">
+          <i data-lucide="mail" class="w-4 h-4 text-blue-700 shrink-0"></i>
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-semibold text-ink-900 truncate">${escapeHtml(r.name || '–')} ${companyName ? '· ' + escapeHtml(companyName) : ''}</p>
+            <p class="text-[11px] text-ink-600 truncate">${escapeHtml(r.email)}</p>
+          </div>
+          ${fsContactId
+            ? '<span class="text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold shrink-0">FS-Notiz wird geschrieben</span>'
+            : '<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded shrink-0">keine FS-Notiz (Contact nicht in FS)</span>'}
+        </div>
+
+        <!-- Template-Auswahl -->
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1 flex items-center gap-1"><i data-lucide="layout-template" class="w-3.5 h-3.5"></i> Vorlage (optional)</label>
+          <select id="memTemplate" onchange="_memApplyTemplate(this.value)" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
+            <option value="">— Frei schreiben —</option>
+            ${(() => {
+              const byFolder = {};
+              templates.forEach(t => {
+                if (!byFolder[t.folder_name]) byFolder[t.folder_name] = [];
+                byFolder[t.folder_name].push(t);
+              });
+              return Object.entries(byFolder).map(([folder, list]) => `
+                <optgroup label="${escapeHtml(folder)}">
+                  ${list.map(t => `<option value="${escapeHtml(String(t.id))}">${escapeHtml(t.title)}</option>`).join('')}
+                </optgroup>
+              `).join('');
+            })()}
+          </select>
+          <p class="text-[10px] text-ink-500 mt-0.5">${templates.length} Freshdesk-Vorlagen verfügbar — Platzhalter <code>{{Vorname}}</code>, <code>{{Firma}}</code>, <code>{{Email}}</code>, <code>{{Absender}}</code> werden ersetzt.</p>
+        </div>
+
+        <!-- Betreff -->
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Betreff *</label>
+          <input id="memSubject" type="text" required value="" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+        </div>
+
+        <!-- Body (HTML / textarea — keep simple) -->
+        <div>
+          <label class="block text-xs font-medium text-ink-700 mb-1">Nachricht (HTML erlaubt) *</label>
+          <textarea id="memBody" rows="10" required class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono resize-y" placeholder="<p>Sehr geehrter Herr ${escapeHtml(lastName)},</p>..."></textarea>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-1">
+          <button type="button" onclick="closeModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
+          <button id="memSendBtn" type="button" onclick="_memSend(${ticketId}, '${escapeHtml(r.email)}', ${fsContactId ? Number(fsContactId) : 'null'}, this)" class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-2">
+            <i data-lucide="send" class="w-4 h-4"></i> Senden${fsContactId ? ' + FS-Notiz' : ''}
+          </button>
+        </div>
+      </form>
+    `;
+    // Template-Var-Cache für die Vorbefüllung
+    window._memVars = {
+      'Vorname': firstName,
+      'Nachname': lastName,
+      'Name': fullName,
+      'Firma': companyName,
+      'Email': r.email,
+      'Absender': userName
+    };
+    window._memTemplates = templates;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    document.getElementById('memContent').innerHTML = '<p class="text-sm text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+function _memApplyTemplate(templateId) {
+  if (!templateId) return;
+  const tpl = (window._memTemplates || []).find(x => String(x.id) === String(templateId));
+  if (!tpl) return;
+  const subjEl = document.getElementById('memSubject');
+  const bodyEl = document.getElementById('memBody');
+  if (subjEl && !subjEl.value) subjEl.value = tpl.title || '';
+  if (bodyEl) bodyEl.value = _renderTemplateBody(tpl.content || '', window._memVars || {});
+}
+
+async function _memSend(ticketId, toEmail, fsContactId, btnEl) {
+  const subj = document.getElementById('memSubject')?.value.trim();
+  const body = document.getElementById('memBody')?.value.trim();
+  if (!subj) { toast('Betreff fehlt', 'warn'); return; }
+  if (!body) { toast('Nachricht fehlt', 'warn'); return; }
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Sende…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // 1) Outbound Email via Freshdesk — legt automatisch ein Ticket an
+    const res = await proxyFetch('freshdesk/api/v2/tickets/outbound_email', {
+      method: 'POST',
+      body: {
+        subject: subj,
+        description: body,
+        email: toEmail,
+        status: 2,
+        priority: 1,
+        responder_id: APP_KEYS.user?._id ? null : undefined,
+        tags: ['marketing', 'erp-hero']
+      }
+    });
+    const newTicketId = res?.id || res?.ticket?.id || '?';
+    toast('✓ E-Mail versendet (FD-Ticket FT-' + newTicketId + ')', 'success', 4500);
+
+    // 2) Optional: Notiz in Freshsales beim Contact
+    if (fsContactId) {
+      const noteText = '📨 Marketing-Email versendet aus ERP Hero'
+        + '\nBetreff: ' + subj
+        + '\nVon: ' + (APP_KEYS.user?.name || '?')
+        + '\nReferenz-Ticket: FT-' + newTicketId
+        + '\nDatum: ' + new Date().toLocaleString('de-DE')
+        + (ticketId ? '\nAusgehend von Ticket: FT-' + ticketId : '');
+      const ok = await _writeFsContactNote(fsContactId, noteText);
+      if (ok) toast('✓ Notiz in Freshsales beim Contact angelegt', 'success', 3500);
+      else toast('Email versendet, aber FS-Notiz konnte nicht angelegt werden (siehe Konsole)', 'warn', 6000);
+    }
+
+    closeModal();
+  } catch (e) {
+    const m = e.message || String(e);
+    let msg = 'Versand fehlgeschlagen: ' + m;
+    if (/email_config_id/i.test(m)) {
+      msg = 'Freshdesk akzeptiert nicht den Default-Absender. Bitte in Freshdesk → Admin → Email Settings prüfen ob ein Default-Email-Config aktiv ist.';
+    }
+    toast(msg, 'error', 10000);
+    if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
 // Action-Menü beim Long-Press / Rechtsklick auf eine Ticket-Karte.
 // Zeigt Kunden-Kontakt-Daten + Quick-Actions (Anrufen, Email, Marketing-Mail
 // über Freshsales, CRM-Deep-Links, ERP-Anlegen).
@@ -1791,14 +2048,14 @@ async function openTicketActionMenu(ticketId) {
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Email schreiben (lokal)</p><p class="text-[11px] text-ink-600 truncate">${escapeHtml(email)}</p></div>
           <i data-lucide="arrow-up-right" class="w-4 h-4 text-ink-500"></i>
         </a>` : ''}
-        ${fsContactUrlWithEmail ? `<a href="${escapeHtml(fsContactUrlWithEmail)}" target="_blank" rel="noopener" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition">
+        ${email ? `<button type="button" onclick="closeModal();setTimeout(()=>openMarketingEmailModal(${ticketId}, { fsContactId: ${fsContactId ? Number(fsContactId) : 'null'} }), 200)" class="w-full flex items-center gap-3 p-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition text-left">
           <i data-lucide="send" class="w-5 h-5 text-purple-700 shrink-0"></i>
-          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-purple-900">Marketing-Email senden (Freshsales)</p><p class="text-[11px] text-purple-700">Öffnet Contact in Freshsales — dort Template auswählen + senden</p></div>
-          <i data-lucide="external-link" class="w-4 h-4 text-purple-600"></i>
-        </a>` : (APP_KEYS.freshsalesSubdomain && !fsContactId ? `<div class="flex items-center gap-3 p-3 bg-ink-50 border border-ink-200 rounded-lg opacity-70">
-          <i data-lucide="send" class="w-5 h-5 text-ink-500 shrink-0"></i>
-          <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-700">Marketing-Email (Freshsales)</p><p class="text-[11px] text-ink-500">Contact nicht in Freshsales — erst „Im ERP anlegen + zu CRMs syncen"</p></div>
-        </div>` : '')}
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-semibold text-purple-900">Marketing-Email senden</p>
+            <p class="text-[11px] text-purple-700">Versand via Freshdesk + Notiz im Freshsales-Contact${fsContactId ? '' : ' (Contact in FS nicht gefunden — Notiz wird übersprungen)'}</p>
+          </div>
+          <i data-lucide="arrow-up-right" class="w-4 h-4 text-purple-600"></i>
+        </button>` : ''}
         ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
           <i data-lucide="trending-up" class="w-5 h-5 text-blue-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Im Freshsales-CRM öffnen</p><p class="text-[11px] text-ink-600">Kontakt mit allen Deals + Aktivitäten</p></div>
