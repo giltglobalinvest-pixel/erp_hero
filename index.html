@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.13';
+const APP_VERSION = 'v4.14';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3225,9 +3225,12 @@ function _renderFreshdeskTicket() {
         ) : '<p class="text-xs text-ink-500 italic">Klicke „Verlauf anzeigen", um die Konversation zu laden.</p>'}
       </div>
 
-      <!-- Footer-Aktion: Direktlink Freshdesk -->
+      <!-- Footer-Aktion: Interne Notiz + Schließen -->
       ${APP_KEYS.freshdeskProxyUrl || _proxyBase() ? `
-        <div class="border-t border-ink-100 pt-3 flex justify-end">
+        <div class="border-t border-ink-100 pt-3 flex justify-between gap-2 flex-wrap">
+          <button type="button" onclick="openInternalNoteComposer(${_fdTicketState.id})" class="text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-lg px-3 py-2 font-medium inline-flex items-center gap-1.5">
+            <i data-lucide="message-square-plus" class="w-4 h-4"></i> Interne Notiz schreiben
+          </button>
           <button type="button" onclick="closeModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Schließen</button>
         </div>
       ` : ''}
@@ -4138,12 +4141,25 @@ async function _qnSave(ticketId) {
       });
       toast('Notiz im Ticket gespeichert', 'success', 2500);
     }
-    // Sauber aufräumen + zurück zur Übersicht
+    // Sauber aufräumen — Modal-Close je nach Kontext:
+    //   - Stack-Modal (Composer als Overlay über Detail-Modal) → nur Stack zu, Detail bleibt
+    //   - Sonst Hauptmodal zu (klassischer QuickView-Flow)
     _quickNoteState = { ticketId: null, recognition: null, recording: false, interim: '', saving: false, existingNoteId: null, existingNoteHtml: null };
-    closeModal();
-    // Liste neu laden — KI-Cache invalidieren, damit aktuelle Notiz-Marker stimmen
+    closeTopModal();
+    // Cache invalidieren, damit aktuelle Notiz-Marker (KI / eigene) stimmen
     _fdAiSummaryCache.delete(ticketId);
-    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+    // Wenn die Anfragen-Liste sichtbar ist → refresh, sonst skip
+    if (document.getElementById('freshdeskTicketsWrap')) {
+      try { loadFreshdeskTicketsPreview(); } catch (_) {}
+    }
+    // Wenn das Ticket-Detail-Modal offen ist (gleiche Ticket-ID) → Conversations
+    // invalidieren, damit die neue Notiz im Verlauf erscheint bei Re-Render.
+    if (_fdTicketState && _fdTicketState.id === ticketId) {
+      _fdTicketState.conversations = null;
+      if (_fdTicketState.showHistory) {
+        try { await _ensureFreshdeskConversations(); _renderFreshdeskTicket(); } catch (_) {}
+      }
+    }
   } catch (e) {
     toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 7000);
   } finally {
@@ -4160,6 +4176,68 @@ function _qnRenderSaveBtn() {
     ? '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'
     : '<i data-lucide="send" class="w-4 h-4"></i> Speichern + zurück zur Übersicht';
   if (window.lucide) lucide.createIcons();
+}
+
+// Standalone-Composer für eine interne Notiz — Stack-Modal über dem Ticket-Detail
+// oder anderen Hauptmodalen. Erkennt automatisch eine bereits existierende
+// eigene Notiz und schaltet auf Edit-Mode (PUT statt POST).
+async function openInternalNoteComposer(ticketId) {
+  if (!ticketId) return;
+  // Existierende eigene Notiz aus Cache holen, sonst frischer Scan
+  let existingOwn = _fdAiSummaryCache.get(ticketId)?.ownNote || null;
+  if (!existingOwn) {
+    try {
+      const scan = await _fetchTicketPrivateNoteScan(ticketId);
+      existingOwn = scan?.ownNote || null;
+    } catch (_) {}
+  }
+  // QuickNote-State initialisieren — wir nutzen die existierenden _qnSave /
+  // _qnToggleMic / _qnRenderControls Helper, die alle auf _quickNoteState arbeiten.
+  _quickNoteState = {
+    ticketId,
+    recognition: null, recording: false, interim: '', saving: false,
+    existingNoteId:   existingOwn?.id || null,
+    existingNoteHtml: existingOwn ? (existingOwn.body || existingOwn.body_text || '') : null
+  };
+  const existingText = existingOwn ? _qnExtractTextFromNote(_quickNoteState.existingNoteHtml) : '';
+  const hasMic = _qnHasSpeechApi();
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5">
+      <div class="flex items-center justify-between mb-3 gap-2">
+        <h3 class="text-base font-bold text-amber-900 flex items-center gap-2">
+          <i data-lucide="${existingOwn ? 'edit-3' : 'message-square-plus'}" class="w-5 h-5"></i>
+          ${existingOwn ? 'Deine interne Notiz bearbeiten' : 'Interne Notiz schreiben'}
+          <span class="text-xs font-normal text-ink-500">· FT-${ticketId}</span>
+        </h3>
+        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div class="bg-amber-50 border border-amber-200 rounded-lg p-2.5 mb-3 text-[11px] text-amber-900 leading-snug">
+        ${existingOwn
+          ? `Aktualisierung der bestehenden Notiz (PUT — keine doppelte Notiz im Verlauf). Erstellt ${escapeHtml(new Date(existingOwn.created_at).toLocaleString('de-DE'))}.`
+          : 'Wird als private Notiz im Ticket gespeichert, sichtbar für Mitarbeiter im Freshdesk-Verlauf.'}
+      </div>
+      <textarea id="qnText" rows="6" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/30 resize-y bg-white" placeholder="${hasMic ? 'Schreibe oder klick auf Sprachnotiz…' : 'Schreibe deine Notiz hier…'}">${escapeHtml(existingText)}</textarea>
+      <div class="flex gap-2 mt-3 flex-wrap items-center">
+        ${hasMic ? `<button id="qnMicBtn" type="button" onclick="_qnToggleMic(${ticketId})" class="bg-purple-100 text-purple-700 border border-purple-300 hover:bg-purple-200 rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5">
+          <i data-lucide="mic" class="w-4 h-4"></i> Sprachnotiz
+        </button>` : ''}
+        <button type="button" onclick="closeTopModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
+        <button id="qnSaveBtn" type="button" onclick="_qnSave(${ticketId})" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-1.5 flex-1 min-w-[160px] justify-center">
+          <i data-lucide="send" class="w-4 h-4"></i> ${existingOwn ? 'Aktualisieren' : 'Speichern'}
+        </button>
+      </div>
+      <p id="qnStatus" class="text-[11px] text-ink-500 mt-1.5 min-h-[14px]"></p>
+    </div>
+  `, { maxWidth: 'max-w-xl' });
+  if (window.lucide) lucide.createIcons();
+  // Auto-Focus
+  setTimeout(() => {
+    const ta = document.getElementById('qnText');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }, 100);
 }
 
 async function showAiSummaryQuickView(ticketId) {
