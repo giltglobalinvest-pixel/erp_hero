@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.05';
+const APP_VERSION = 'v4.06';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1523,6 +1523,282 @@ async function updateTicketResponder(ticketId, responderId) {
   }
 }
 
+/* ============================================================
+   FRESHDESK CONTACT CACHE — für Swipe-Reveal "Anfragender"
+   ============================================================ */
+const _fdContactCache = new Map();
+async function _loadFdContact(contactId) {
+  if (!contactId) return null;
+  if (_fdContactCache.has(contactId)) return _fdContactCache.get(contactId);
+  try {
+    const c = await freshdeskFetch('contacts/' + contactId);
+    const obj = {
+      id: c.id,
+      name: c.name || '',
+      email: c.email || '',
+      phone: c.phone || '',
+      mobile: c.mobile || '',
+      company_id: c.company_id || null,
+      company_name: '',
+      job_title: c.job_title || ''
+    };
+    _fdContactCache.set(contactId, obj);
+    // Company-Name nachladen (best-effort)
+    if (obj.company_id) {
+      try {
+        const co = await freshdeskFetch('companies/' + obj.company_id);
+        obj.company_name = co.name || '';
+        _fdContactCache.set(contactId, obj);
+        // Falls schon im DOM gerendert: Live-Update der Swipe-Panels
+        document.querySelectorAll('[data-swipe-contact-id="' + contactId + '"] .swipe-company').forEach(el => {
+          el.textContent = obj.company_name || '–';
+        });
+      } catch (_) {}
+    }
+    return obj;
+  } catch (e) {
+    console.warn('[Contact-Cache] ' + contactId + ':', e.message);
+    return null;
+  }
+}
+
+// Wird vom Swipe-Handler aufgerufen, sobald die Karte nach links geöffnet wird.
+async function _revealSwipeContact(wrapEl, ticketId, requesterId) {
+  if (!requesterId) return;
+  const panel = wrapEl.querySelector('.swipe-action-right');
+  if (!panel) return;
+  // Lade-Anzeige
+  panel.querySelector('.swipe-contact-loading')?.classList.remove('hidden');
+  const c = await _loadFdContact(requesterId);
+  panel.querySelector('.swipe-contact-loading')?.classList.add('hidden');
+  if (!c) {
+    panel.querySelector('.swipe-contact-data').innerHTML = '<p class="text-xs text-red-700">Kontaktdaten nicht ladbar</p>';
+    return;
+  }
+  panel.querySelector('.swipe-contact-data').innerHTML = `
+    <p class="text-[10px] uppercase tracking-wider text-blue-700 font-semibold">Anfragender</p>
+    <p class="text-sm font-bold text-ink-900 truncate">${escapeHtml(c.name || '–')}</p>
+    ${c.job_title ? `<p class="text-[11px] text-ink-600 truncate">${escapeHtml(c.job_title)}</p>` : ''}
+    <p class="text-[10px] uppercase tracking-wider text-blue-700 font-semibold mt-1.5">Firma</p>
+    <p class="text-xs text-ink-900 truncate"><span class="swipe-company">${escapeHtml(c.company_name || '… lade')}</span></p>
+    ${c.phone ? `<p class="text-xs text-ink-700 mt-1.5"><i data-lucide="phone" class="inline w-3 h-3"></i> <a href="tel:${escapeHtml(c.phone)}" onclick="event.stopPropagation()" class="text-blue-700 underline">${escapeHtml(c.phone)}</a></p>` : ''}
+    ${c.mobile ? `<p class="text-xs text-ink-700"><i data-lucide="smartphone" class="inline w-3 h-3"></i> <a href="tel:${escapeHtml(c.mobile)}" onclick="event.stopPropagation()" class="text-blue-700 underline">${escapeHtml(c.mobile)}</a></p>` : ''}
+    ${c.email ? `<p class="text-xs text-ink-700"><i data-lucide="mail" class="inline w-3 h-3"></i> <a href="mailto:${escapeHtml(c.email)}" onclick="event.stopPropagation()" class="text-blue-700 underline break-all">${escapeHtml(c.email)}</a></p>` : ''}
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+
+/* ============================================================
+   SWIPE-GESTEN FÜR TICKET-KARTEN
+   ============================================================
+   Touch-Handlers: links wischen zeigt Kunde/Anfrager-Panel rechts.
+   Rechts wischen zeigt Voice-Notiz-Aktion links.
+*/
+const SWIPE_THRESHOLD = 50;        // ab welcher px-Distanz "geöffnet" gilt
+const SWIPE_OPEN_DISTANCE = 200;   // wie weit die Karte beim Öffnen versetzt wird
+
+function _attachSwipeHandlers(wrapEl) {
+  const card = wrapEl.querySelector('.swipe-card');
+  if (!card) return;
+  let startX = 0, startY = 0, currentDelta = 0, isDragging = false, axisLocked = null;
+
+  const reset = () => {
+    card.style.transition = 'transform 0.2s ease-out';
+    card.style.transform = 'translateX(0)';
+    wrapEl.dataset.swipeOpen = '';
+  };
+  const openLeft = () => {  // Swipe rechts → öffnet links (Voice-Notiz)
+    card.style.transition = 'transform 0.2s ease-out';
+    card.style.transform = 'translateX(' + SWIPE_OPEN_DISTANCE + 'px)';
+    wrapEl.dataset.swipeOpen = 'left';
+  };
+  const openRight = () => {  // Swipe links → öffnet rechts (Kunde-Info)
+    card.style.transition = 'transform 0.2s ease-out';
+    card.style.transform = 'translateX(-' + SWIPE_OPEN_DISTANCE + 'px)';
+    wrapEl.dataset.swipeOpen = 'right';
+    // Contact lazy laden
+    const ticketId = wrapEl.dataset.ticketId;
+    const requesterId = wrapEl.dataset.requesterId;
+    if (requesterId) _revealSwipeContact(wrapEl, ticketId, requesterId);
+  };
+
+  const onTouchStart = (e) => {
+    if (e.touches.length !== 1) return;
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    isDragging = true;
+    axisLocked = null;
+    card.style.transition = 'none';
+  };
+  const onTouchMove = (e) => {
+    if (!isDragging) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = e.touches[0].clientY - startY;
+    // Axis-Lock: nach den ersten paar pixeln entscheiden ob horizontal oder vertikal
+    if (axisLocked === null) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // noch nichts entscheiden
+      axisLocked = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    }
+    if (axisLocked !== 'x') return;  // vertikales Scrollen — Karte nicht bewegen
+    e.preventDefault();  // damit das Scroll nicht greift
+    const clamped = Math.max(-SWIPE_OPEN_DISTANCE, Math.min(SWIPE_OPEN_DISTANCE, dx));
+    currentDelta = clamped;
+    card.style.transform = 'translateX(' + clamped + 'px)';
+  };
+  const onTouchEnd = () => {
+    if (!isDragging) return;
+    isDragging = false;
+    if (axisLocked !== 'x') return;
+    if (currentDelta < -SWIPE_THRESHOLD) openRight();
+    else if (currentDelta > SWIPE_THRESHOLD) openLeft();
+    else reset();
+    currentDelta = 0;
+  };
+
+  card.addEventListener('touchstart', onTouchStart, { passive: true });
+  card.addEventListener('touchmove', onTouchMove, { passive: false });
+  card.addEventListener('touchend', onTouchEnd, { passive: true });
+  card.addEventListener('touchcancel', () => { isDragging = false; reset(); }, { passive: true });
+}
+
+// Click-Handler-Wrapper: wenn Swipe offen → erst schließen, sonst Ticket öffnen
+function _swipeCardClick(wrapEl, ticketId, ev) {
+  if (wrapEl.dataset.swipeOpen) {
+    // Erst zumachen
+    const card = wrapEl.querySelector('.swipe-card');
+    card.style.transition = 'transform 0.2s ease-out';
+    card.style.transform = 'translateX(0)';
+    wrapEl.dataset.swipeOpen = '';
+    ev?.preventDefault?.();
+    ev?.stopPropagation?.();
+    return;
+  }
+  openFreshdeskTicket(ticketId);
+}
+
+// Voice-Notiz aus dem Left-Action-Panel
+function _swipeOpenVoiceNote(ticketId, ev) {
+  ev?.stopPropagation?.();
+  // Reset Swipe-State
+  const wrap = document.querySelector('[data-ticket-id="' + ticketId + '"]')?.closest('.swipe-card-wrap');
+  if (wrap) {
+    const card = wrap.querySelector('.swipe-card');
+    if (card) { card.style.transform = 'translateX(0)'; card.style.transition = 'transform 0.2s'; }
+    wrap.dataset.swipeOpen = '';
+  }
+  // Quick-View öffnen (enthält Notiz-Bereich mit Mic-Button)
+  showAiSummaryQuickView(ticketId);
+  // Auto-Start des Mikros nach kurzer Verzögerung (warten bis Modal da ist)
+  setTimeout(() => {
+    const micBtn = document.getElementById('qnMicBtn');
+    if (micBtn && !_quickNoteState.recording) micBtn.click();
+  }, 400);
+}
+
+/* ============================================================
+   AUTO-KI-ZUSAMMENFASSUNG FÜR OFFENE/AUSSTEHENDE TICKETS
+   ============================================================
+   Beim Laden der Tickets-Liste werden im Hintergrund Tickets ohne
+   bestehende KI-Notiz analysiert. Limit pro Refresh, um Token-Kosten
+   zu begrenzen. Sequenziell (Concurrency 1).
+*/
+const AUTO_AI_BATCH_SIZE = 3;
+const AUTO_AI_STATUS_CODES = new Set([2, 3]);  // 2=Offen, 3=Ausstehend
+const _autoAiInProgress = new Set();
+
+async function _autoAnalyzeMissingTickets(tickets) {
+  if (!_proxyBase()) return;
+  const candidates = [];
+  for (const t of tickets) {
+    if (!AUTO_AI_STATUS_CODES.has(t.status)) continue;
+    if (_autoAiInProgress.has(t.id)) continue;
+    const cached = _fdAiSummaryCache.get(t.id);
+    if (cached && cached.updated_at === t.updated_at) {
+      if (cached.aiNote) continue;  // hat schon KI-Notiz
+    } else {
+      // Cache nicht aktuell — frischen Scan machen
+      const scan = await _checkLastNoteAiSummary(t).catch(() => null);
+      if (scan?.aiNote) continue;
+    }
+    candidates.push(t);
+  }
+  const batch = candidates.slice(0, AUTO_AI_BATCH_SIZE);
+  if (batch.length === 0) return;
+  console.log('[Auto-AI] starte Analyse für ' + batch.length + ' Ticket(s)');
+  for (const t of batch) {
+    _autoAiInProgress.add(t.id);
+    try {
+      const ok = await _autoAnalyzeTicketHeadless(t);
+      if (ok) {
+        // Cache invalidieren + Badge aktualisieren
+        _fdAiSummaryCache.delete(t.id);
+        await _checkLastNoteAiSummary(t).catch(() => {});
+        const row = document.querySelector('[data-ticket-id="' + t.id + '"]');
+        if (row) {
+          const slot = row.querySelector('.ai-badge-slot');
+          if (slot && !slot.innerHTML.includes('sparkles')) {
+            slot.innerHTML = '<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(' + t.id + ')" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>';
+            if (window.lucide) lucide.createIcons();
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[Auto-AI] Ticket ' + t.id + ':', e.message);
+    } finally {
+      _autoAiInProgress.delete(t.id);
+    }
+  }
+}
+
+async function _autoAnalyzeTicketHeadless(t) {
+  const parts = [];
+  parts.push('Ticket FT-' + t.id + ': ' + (t.subject || '(ohne Betreff)'));
+  if (t.type) parts.push('Typ: ' + t.type);
+  parts.push('Erstellt: ' + _fdFmtDate(t.created_at));
+  parts.push('');
+  parts.push('--- Erste Nachricht ---');
+  parts.push(_fdHtmlToText(t.description_html || t.description || '') || '(leer)');
+  // Conversations laden (best-effort)
+  try {
+    const conv = await freshdeskFetch('tickets/' + t.id + '/conversations');
+    const list = (Array.isArray(conv) ? conv : []).slice()
+      .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+    if (list.length > 0) {
+      parts.push('');
+      parts.push('--- Verlauf ---');
+      for (const c of list.slice(0, 10)) {  // max 10 Conversations für Token-Limit
+        const dir = c.incoming ? 'Eingehend' : 'Ausgehend';
+        const note = c.private ? ' [private Notiz]' : '';
+        parts.push('### ' + dir + note + ' · ' + _fdFmtDate(c.created_at));
+        parts.push(_fdHtmlToText(c.body || c.body_text || '').slice(0, 1500) || '(leer)');
+      }
+    }
+  } catch (_) {}
+  const fullText = parts.join('\n');
+  const prompt = `Erstelle eine kompakte Zusammenfassung für dieses Freshdesk-Ticket auf Deutsch.
+Format mit drei fettgedruckten Labels:
+
+**Anliegen:** Was will der Kunde — kurz und konkret (1-2 Zeilen)
+**Aktueller Stand:** Was wurde bereits getan / besprochen
+**Offene Punkte:** Was muss als nächstes passieren
+
+Keine Floskeln, keine Anrede, max 8 Zeilen total. Bei Bedarf erwähne wichtige Detail-Infos (Artikel-Nr, Liefertermin, Kontaktdaten).
+
+--- Ticket-Inhalt ---
+${fullText}`;
+  const raw = await askAI(prompt, { maxTokens: 800, purpose: 'auto_ticket_summary' });
+  const summary = String(raw || '').trim();
+  if (!summary) return false;
+  // Als private Notiz speichern — gleicher Marker wie manuelle KI-Analyse
+  const noteHtml = '<p><strong>' + FD_AI_SUMMARY_MARKER + '</strong> · auto-analysiert am ' + escapeHtml(new Date().toLocaleString('de-DE')) + '</p>' +
+                   '<p>' + escapeHtml(summary).replace(/\n/g, '<br>') + '</p>';
+  await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
+    method: 'POST',
+    body: { body: noteHtml, private: true }
+  });
+  return true;
+}
+
 function _toggleTicketResponderMenu(ticketId) {
   // Andere offene Menüs schließen
   document.querySelectorAll('[id^="ticketResponderMenu_"]').forEach(el => {
@@ -1680,7 +1956,23 @@ async function loadFreshdeskTicketsPreview() {
           }).join('');
           const fdUrl = freshdeskTicketUrl(t.id);
           return `
-            <div data-ticket-id="${t.id}" onclick="openFreshdeskTicket(${t.id})" class="border border-ink-200 rounded-xl px-3 py-3 bg-white hover:bg-ink-50 hover:border-brand-300 hover:shadow-sm cursor-pointer transition group">
+            <div class="swipe-card-wrap relative overflow-hidden rounded-xl border border-ink-200" data-ticket-id="${t.id}" data-requester-id="${t.requester_id || ''}" data-swipe-contact-id="${t.requester_id || ''}">
+              <!-- Action-Panel LINKS (sichtbar bei Swipe nach rechts) — Voice-Notiz -->
+              <div class="swipe-action-left absolute inset-y-0 left-0 w-[200px] flex items-center px-3 bg-gradient-to-r from-purple-600 to-purple-700 z-0">
+                <button type="button" onclick="_swipeOpenVoiceNote(${t.id}, event)" class="flex items-center gap-2 text-white">
+                  <i data-lucide="mic" class="w-6 h-6"></i>
+                  <span class="text-sm font-semibold leading-tight">Sprach-<br>Notiz</span>
+                </button>
+              </div>
+              <!-- Action-Panel RECHTS (sichtbar bei Swipe nach links) — Kunden-Info -->
+              <div class="swipe-action-right absolute inset-y-0 right-0 w-[200px] flex flex-col justify-center px-3 py-2 bg-blue-50 z-0 border-l border-blue-200">
+                <p class="swipe-contact-loading text-[11px] text-ink-500 italic hidden">… lade Anfrager</p>
+                <div class="swipe-contact-data text-xs">
+                  <p class="text-[11px] text-blue-700 italic">← noch nicht geladen</p>
+                </div>
+              </div>
+              <!-- Main Card (verschiebbar) -->
+              <div data-ticket-id="${t.id}" onclick="_swipeCardClick(this.closest('.swipe-card-wrap'), ${t.id}, event)" class="swipe-card relative bg-white hover:bg-ink-50 hover:border-brand-300 hover:shadow-sm cursor-pointer transition group px-3 py-3 z-10" style="touch-action: pan-y;">
               <!-- Zeile 1: Ticket-No + Ext-Link + Status-Badge -->
               <div class="flex items-center justify-between gap-2 mb-1.5">
                 <div class="flex items-center gap-1.5 min-w-0">
@@ -1730,12 +2022,15 @@ async function loadFreshdeskTicketsPreview() {
                   `).join('') || '<p class="px-3 py-2 text-xs text-ink-500 italic">Agenten werden geladen…</p>'}
                 </div>
               </div>
+              </div>
             </div>
           `;
         }).join('')}
       </div>
     `;
     if (window.lucide) lucide.createIcons();
+    // Swipe-Handlers anhängen
+    wrap.querySelectorAll('.swipe-card-wrap').forEach(el => _attachSwipeHandlers(el));
     // Im Hintergrund: pro Ticket prüfen ob KI-Notiz UND/ODER eigene interne Notiz vorhanden.
     // Cache-aware: Tickets mit unverändertem updated_at brauchen keinen API-Call.
     // Concurrency-Limit 5, damit Freshdesk-Rate-Limits nicht angetastet werden.
@@ -1767,7 +2062,10 @@ async function loadFreshdeskTicketsPreview() {
       }
       if (window.lucide) lucide.createIcons();
     });
-    _runWithLimit(tasks, 5).catch(() => {});
+    _runWithLimit(tasks, 5).then(() => {
+      // Nach Note-Scans: Auto-KI-Analyse für Tickets ohne KI-Notiz starten (fire-and-forget)
+      _autoAnalyzeMissingTickets(tickets).catch(()=>{});
+    }).catch(() => {});
   } catch (err) {
     wrap.innerHTML = `
       <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-900">
