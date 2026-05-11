@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.11';
+const APP_VERSION = 'v4.12';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1768,7 +1768,7 @@ async function openMarketingEmailModal(ticketId, opts) {
           <i data-lucide="send" class="w-5 h-5 text-purple-600"></i>
           Marketing-Email senden
         </h3>
-        <button type="button" onclick="closeModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -1860,7 +1860,7 @@ async function openMarketingEmailModal(ticketId, opts) {
         </div>
 
         <div class="flex justify-end gap-2 pt-1">
-          <button type="button" onclick="closeModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
+          <button type="button" onclick="closeTopModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
           <button id="memSendBtn" type="button" onclick="_memSend(${ticketId}, '${escapeHtml(r.email)}', ${fsContactId ? Number(fsContactId) : 'null'}, this)" class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-2">
             <i data-lucide="send" class="w-4 h-4"></i> Senden${fsContactId ? ' + FS-Notiz' : ''}
           </button>
@@ -1930,7 +1930,7 @@ async function _memSend(ticketId, toEmail, fsContactId, btnEl) {
       else toast('Email versendet, aber FS-Notiz konnte nicht angelegt werden (siehe Konsole)', 'warn', 6000);
     }
 
-    closeModal();
+    closeTopModal();
   } catch (e) {
     const m = e.message || String(e);
     let msg = 'Versand fehlgeschlagen: ' + m;
@@ -1955,7 +1955,7 @@ async function openTicketActionMenu(ticketId) {
           <i data-lucide="zap" class="w-5 h-5 text-brand-600"></i>
           Aktionen · FT-${ticketId}
         </h3>
-        <button type="button" onclick="closeModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -2038,17 +2038,17 @@ async function openTicketActionMenu(ticketId) {
       <!-- Aktionen -->
       <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">Aktionen</p>
       <div class="space-y-1.5">
-        ${(mobile || tel) ? `<a href="tel:${escapeHtml(mobile || tel)}" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition">
+        ${(mobile || tel) ? `<a href="tel:${escapeHtml(mobile || tel)}" onclick="closeTopModal()" class="flex items-center gap-3 p-3 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition">
           <i data-lucide="phone" class="w-5 h-5 text-emerald-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-emerald-900">Anrufen</p><p class="text-[11px] text-emerald-700">${escapeHtml(mobile || tel)}</p></div>
           <i data-lucide="arrow-up-right" class="w-4 h-4 text-emerald-600"></i>
         </a>` : ''}
-        ${email ? `<a href="mailto:${escapeHtml(email)}" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
+        ${email ? `<a href="mailto:${escapeHtml(email)}" onclick="closeTopModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
           <i data-lucide="mail" class="w-5 h-5 text-ink-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Email schreiben (lokal)</p><p class="text-[11px] text-ink-600 truncate">${escapeHtml(email)}</p></div>
           <i data-lucide="arrow-up-right" class="w-4 h-4 text-ink-500"></i>
         </a>` : ''}
-        ${email ? `<button type="button" onclick="closeModal();setTimeout(()=>openMarketingEmailModal(${ticketId}, { fsContactId: ${fsContactId ? Number(fsContactId) : 'null'} }), 200)" class="w-full flex items-center gap-3 p-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition text-left">
+        ${email ? `<button type="button" onclick="closeTopModal();setTimeout(()=>openMarketingEmailModal(${ticketId}, { fsContactId: ${fsContactId ? Number(fsContactId) : 'null'} }), 200)" class="w-full flex items-center gap-3 p-3 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition text-left">
           <i data-lucide="send" class="w-5 h-5 text-purple-700 shrink-0"></i>
           <div class="flex-1 min-w-0">
             <p class="text-sm font-semibold text-purple-900">Marketing-Email senden</p>
@@ -2056,26 +2056,26 @@ async function openTicketActionMenu(ticketId) {
           </div>
           <i data-lucide="arrow-up-right" class="w-4 h-4 text-purple-600"></i>
         </button>` : ''}
-        ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
+        ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" onclick="closeTopModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
           <i data-lucide="trending-up" class="w-5 h-5 text-blue-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Im Freshsales-CRM öffnen</p><p class="text-[11px] text-ink-600">Kontakt mit allen Deals + Aktivitäten</p></div>
           <i data-lucide="external-link" class="w-4 h-4 text-ink-500"></i>
         </a>` : ''}
-        ${fdTicketUrl ? `<a href="${escapeHtml(fdTicketUrl)}" target="_blank" rel="noopener" onclick="closeModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
+        ${fdTicketUrl ? `<a href="${escapeHtml(fdTicketUrl)}" target="_blank" rel="noopener" onclick="closeTopModal()" class="flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition">
           <i data-lucide="headphones" class="w-5 h-5 text-ink-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">In Freshdesk öffnen</p><p class="text-[11px] text-ink-600">Original-Ticket im Helpdesk</p></div>
           <i data-lucide="external-link" class="w-4 h-4 text-ink-500"></i>
         </a>` : ''}
-        ${inErp ? `<button type="button" onclick="closeModal();setTimeout(()=>openCustomerModal('${escapeHtml(erpCustomer.id)}'),100)" class="w-full flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition text-left">
+        ${inErp ? `<button type="button" onclick="closeTopModal();setTimeout(()=>openCustomerModal('${escapeHtml(erpCustomer.id)}'),100)" class="w-full flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition text-left">
           <i data-lucide="user-check" class="w-5 h-5 text-emerald-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Kunde im ERP öffnen</p><p class="text-[11px] text-ink-600 truncate">${escapeHtml(erpCustomer.fields?.name1 || '–')}</p></div>
           <i data-lucide="arrow-up-right" class="w-4 h-4 text-ink-500"></i>
-        </button>` : `<button type="button" onclick="closeModal();setTimeout(()=>_qvCreateContactInErp(${ticketId}, null), 200)" class="w-full flex items-center gap-3 p-3 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition text-left">
+        </button>` : `<button type="button" onclick="closeTopModal();setTimeout(()=>_qvCreateContactInErp(${ticketId}, null), 200)" class="w-full flex items-center gap-3 p-3 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition text-left">
           <i data-lucide="user-plus" class="w-5 h-5 text-amber-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-amber-900">Im ERP anlegen + zu CRMs syncen</p><p class="text-[11px] text-amber-700">Mit Vorschau zum Korrigieren</p></div>
           <i data-lucide="arrow-up-right" class="w-4 h-4 text-amber-600"></i>
         </button>`}
-        <button type="button" onclick="closeModal();setTimeout(()=>openFreshdeskTicket(${ticketId}),100)" class="w-full flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition text-left">
+        <button type="button" onclick="closeTopModal();setTimeout(()=>openFreshdeskTicket(${ticketId}),100)" class="w-full flex items-center gap-3 p-3 bg-white hover:bg-ink-50 border border-ink-200 rounded-lg transition text-left">
           <i data-lucide="external-link" class="w-5 h-5 text-ink-700 shrink-0"></i>
           <div class="flex-1 min-w-0"><p class="text-sm font-semibold text-ink-900">Ticket-Details öffnen</p><p class="text-[11px] text-ink-600">Volle Konversation, KI-Zusammenfassung, Quote erzeugen</p></div>
           <i data-lucide="arrow-up-right" class="w-4 h-4 text-ink-500"></i>
@@ -4329,7 +4329,7 @@ function _qvOpenCreatePreview(prefill) {
           <i data-lucide="user-plus" class="w-5 h-5 text-amber-600"></i>
           Kunde + Kontakt im ERP anlegen
         </h3>
-        <button type="button" onclick="closeModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -4409,7 +4409,7 @@ function _qvOpenCreatePreview(prefill) {
         <input type="hidden" name="ticketId" value="${escapeHtml(String(prefill.ticketId))}">
 
         <div class="flex justify-end gap-2 pt-2">
-          <button type="button" onclick="closeModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
+          <button type="button" onclick="closeTopModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
           <button id="qvCreateSubmitBtn" type="button" onclick="_qvSubmitCreateInErp(this)" class="bg-amber-600 hover:bg-amber-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-2">
             <i data-lucide="check" class="w-4 h-4"></i> Anlegen + zu CRMs syncen
           </button>
@@ -4463,7 +4463,7 @@ async function _qvSubmitCreateInErp(btnEl) {
     _syncCustomerOnUse(customer.id);
 
     // Modal schließen + Quick-View aktualisieren
-    closeModal();
+    closeTopModal();
     const tid = get('ticketId');
     if (tid) setTimeout(() => showAiSummaryQuickView(Number(tid)), 200);
   } catch (e) {
@@ -7131,6 +7131,18 @@ function openModal2(html) {
 function closeModal2() {
   document.getElementById('modalBackdrop2').classList.add('hidden');
   document.getElementById('modalBox2').innerHTML = '';
+}
+
+// Schließt das aktuell oberste Modal — bevorzugt das Stack-Modal (modalBox2),
+// falls offen, sonst das Hauptmodal. Wird von Buttons innerhalb von Modalen
+// aufgerufen, damit sie unabhängig vom Stack-Level korrekt schließen.
+function closeTopModal() {
+  const stackBackdrop = document.getElementById('modalBackdrop2');
+  if (stackBackdrop && !stackBackdrop.classList.contains('hidden')) {
+    closeModal2();
+  } else {
+    closeModal();
+  }
 }
 
 /* ============================================================
