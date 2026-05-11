@@ -277,6 +277,15 @@
     max-height: 320px;
     overflow-y: auto;
   }
+  /* Swipe-Hint-Panels: standardmäßig versteckt, nur je nach Swipe-Richtung anzeigen */
+  .swipe-card-wrap .swipe-action-left,
+  .swipe-card-wrap .swipe-action-right {
+    opacity: 0;
+    transition: opacity 0.12s ease-out;
+    pointer-events: none;
+  }
+  .swipe-card-wrap[data-swipe-dir="right"] .swipe-action-left { opacity: 1; }
+  .swipe-card-wrap[data-swipe-dir="left"]  .swipe-action-right { opacity: 1; }
 </style>
 </head>
 <body class="bg-brand-500 text-ink-900">
@@ -613,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.16';
+const APP_VERSION = 'v4.17';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1609,6 +1618,7 @@ function _attachSwipeHandlers(wrapEl) {
     card.style.transition = 'transform 0.2s ease-out';
     card.style.transform = 'translateX(0)';
     wrapEl.dataset.swipeOpen = '';
+    wrapEl.dataset.swipeDir = '';
   };
   // Nach Swipe-Threshold-Überschreitung: Karte direkt zurücksnappen + Action aufrufen.
   // Das Modal überdeckt eh die Karte — keine Zwischen-Rast nötig.
@@ -1660,6 +1670,10 @@ function _attachSwipeHandlers(wrapEl) {
     const clamped = Math.max(-SWIPE_OPEN_DISTANCE, Math.min(SWIPE_OPEN_DISTANCE, dx));
     currentDelta = clamped;
     card.style.transform = 'translateX(' + clamped + 'px)';
+    // Nur das passende Hint-Panel einblenden, sonst überlappen beide auf schmalen Screens
+    if (clamped > 4)       wrapEl.dataset.swipeDir = 'right';
+    else if (clamped < -4) wrapEl.dataset.swipeDir = 'left';
+    else                   wrapEl.dataset.swipeDir = '';
   };
   const onTouchEnd = () => {
     cancelLongPress();
