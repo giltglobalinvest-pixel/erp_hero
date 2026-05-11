@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.20';
+const APP_VERSION = 'v4.21';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3299,26 +3299,47 @@ async function _fdDeleteConversation(ticketId, conversationId, btnEl) {
     btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>';
     if (window.lucide) lucide.createIcons();
   }
+  // Freshdesk DELETE liefert 204 No Content. Manche Val.town-Proxy-Versionen
+  // versuchen trotzdem einen JSON-Body zu setzen und werfen dann
+  // "Response with null body status cannot have body" (TypeError).
+  // → Wir fangen genau diesen Fehler ab und prüfen via GET, ob die Notiz weg ist.
+  const isFalsePositive = (msg) =>
+    /null body status cannot have body/i.test(msg) ||
+    /204/.test(msg);
+  let success = false;
   try {
     await proxyFetch('freshdesk/api/v2/conversations/' + conversationId, { method: 'DELETE' });
-    // Aus dem State-Array entfernen
+    success = true;
+  } catch (e) {
+    if (isFalsePositive(e.message)) {
+      // Verifizieren via GET: wenn 404 zurückkommt, war's erfolgreich
+      try {
+        await freshdeskFetch('conversations/' + conversationId);
+        // Wenn GET klappt → Notiz existiert noch → echter Fehler
+        toast('Löschen vermutlich fehlgeschlagen (Notiz existiert noch). Proxy-Fehler: ' + e.message, 'error', 7000);
+      } catch (verifyErr) {
+        if (/404|not found/i.test(verifyErr.message)) {
+          success = true;   // Notiz ist tatsächlich gelöscht — Proxy-Bug ignorieren
+        } else {
+          toast('Löschen fehlgeschlagen: ' + e.message, 'error', 6000);
+        }
+      }
+    } else {
+      toast('Löschen fehlgeschlagen: ' + e.message, 'error', 6000);
+    }
+  }
+  if (success) {
     if (Array.isArray(_fdTicketState.conversations)) {
       _fdTicketState.conversations = _fdTicketState.conversations.filter(c => c.id !== conversationId);
     }
-    // Cache invalidieren (KI-Note / Own-Note Badges in der Liste)
     _fdAiSummaryCache.delete(ticketId);
     toast('Notiz gelöscht', 'success', 2500);
-    // Re-render Detail-Modal + Liste refresh wenn sichtbar
     if (typeof _renderFreshdeskTicket === 'function') _renderFreshdeskTicket();
     if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
-  } catch (e) {
-    toast('Löschen fehlgeschlagen: ' + e.message, 'error', 6000);
-    // Button zurücksetzen
-    if (btnEl) {
-      btnEl.disabled = false;
-      btnEl.innerHTML = '<i data-lucide="trash-2" class="w-3.5 h-3.5"></i>';
-      if (window.lucide) lucide.createIcons();
-    }
+  } else if (btnEl) {
+    btnEl.disabled = false;
+    btnEl.innerHTML = '<i data-lucide="trash-2" class="w-3.5 h-3.5"></i>';
+    if (window.lucide) lucide.createIcons();
   }
 }
 
