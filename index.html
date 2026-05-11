@@ -613,7 +613,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.15';
+const APP_VERSION = 'v4.16';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1610,20 +1610,18 @@ function _attachSwipeHandlers(wrapEl) {
     card.style.transform = 'translateX(0)';
     wrapEl.dataset.swipeOpen = '';
   };
-  // Nach erfolgreichem Swipe: kurz „Bestätigung" zeigen, dann Action triggern + Karte zurück.
+  // Nach Swipe-Threshold-Überschreitung: Karte direkt zurücksnappen + Action aufrufen.
+  // Das Modal überdeckt eh die Karte — keine Zwischen-Rast nötig.
   const triggerSwipeAction = (direction) => {
     const ticketId = Number(wrapEl.dataset.ticketId);
-    if (!ticketId) { reset(); return; }
-    // Kurz visuell „rasten" lassen, dann Action aufrufen + Card zurück
-    card.style.transition = 'transform 0.18s ease-out';
-    card.style.transform = direction === 'left'
-      ? 'translateX(-' + SWIPE_OPEN_DISTANCE + 'px)'
-      : 'translateX(' + SWIPE_OPEN_DISTANCE + 'px)';
+    reset();
+    if (!ticketId) return;
+    // Kurzer Delay (= halbe Reset-Animation), damit der User die Snap-Back-Bewegung
+    // wahrnimmt bevor das Modal aufgeht.
     setTimeout(() => {
-      reset();
       if (direction === 'left')  openInternalNoteComposer(ticketId);  // Swipe links → Notiz
       if (direction === 'right') openTicketActionMenu(ticketId);      // Swipe rechts → Aktionen
-    }, 180);
+    }, 100);
   };
 
   const onTouchStart = (e) => {
