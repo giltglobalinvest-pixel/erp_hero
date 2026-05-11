@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.18';
+const APP_VERSION = 'v4.19';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3232,14 +3232,19 @@ function _renderFreshdeskTicket() {
                     const isPrivate = !!c.private;
                     const incoming = !!c.incoming;
                     return `
-                      <div class="border ${isPrivate ? 'border-amber-200 bg-amber-50' : incoming ? 'border-ink-200 bg-white' : 'border-brand-200 bg-brand-50/30'} rounded-xl p-3">
+                      <div class="border ${isPrivate ? 'border-amber-200 bg-amber-50' : incoming ? 'border-ink-200 bg-white' : 'border-brand-200 bg-brand-50/30'} rounded-xl p-3" data-conv-id="${c.id}">
                         <div class="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
                           <div class="flex items-center gap-2 flex-wrap">
                             <span class="text-xs font-medium text-ink-900">${incoming ? 'Eingehend' : 'Ausgehend'}</span>
                             ${isPrivate ? '<span class="text-[10px] uppercase tracking-wider bg-amber-200 text-amber-800 px-1.5 py-0.5 rounded font-semibold">Notiz (privat)</span>' : ''}
                             ${c.from_email ? `<span class="text-[11px] text-ink-500 truncate">${escapeHtml(c.from_email)}</span>` : ''}
                           </div>
-                          <span class="text-[11px] text-ink-500 shrink-0">${escapeHtml(_fdFmtDate(c.created_at))}</span>
+                          <div class="flex items-center gap-1.5 shrink-0">
+                            <span class="text-[11px] text-ink-500">${escapeHtml(_fdFmtDate(c.created_at))}</span>
+                            ${isPrivate ? `<button type="button" onclick="_fdDeleteConversation(${_fdTicketState.id}, ${c.id}, this)" class="text-ink-400 hover:text-red-600 hover:bg-red-50 rounded p-1 transition" title="Notiz löschen">
+                              <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                            </button>` : ''}
+                          </div>
                         </div>
                         <div class="text-sm text-ink-800 max-h-[35vh] overflow-y-auto whitespace-pre-wrap leading-relaxed">${(() => {
                           const txt = _fdHtmlToText(c.body || c.body_text || '');
@@ -3279,6 +3284,42 @@ function _renderFreshdeskTicket() {
     </div>
   `;
   if (window.lucide) lucide.createIcons();
+}
+
+// Löscht eine private Notiz im Ticket-Verlauf via DELETE /api/v2/conversations/{id}
+async function _fdDeleteConversation(ticketId, conversationId, btnEl) {
+  if (!ticketId || !conversationId) return;
+  if (!confirm('Notiz wirklich löschen? Das kann nicht rückgängig gemacht werden.')) return;
+  if (!APP_KEYS.proxyV2) {
+    return toast('Löschen benötigt Val.town-Proxy v2', 'error', 7000);
+  }
+  // Button-State: Loading
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>';
+    if (window.lucide) lucide.createIcons();
+  }
+  try {
+    await proxyFetch('freshdesk/api/v2/conversations/' + conversationId, { method: 'DELETE' });
+    // Aus dem State-Array entfernen
+    if (Array.isArray(_fdTicketState.conversations)) {
+      _fdTicketState.conversations = _fdTicketState.conversations.filter(c => c.id !== conversationId);
+    }
+    // Cache invalidieren (KI-Note / Own-Note Badges in der Liste)
+    _fdAiSummaryCache.delete(ticketId);
+    toast('Notiz gelöscht', 'success', 2500);
+    // Re-render Detail-Modal + Liste refresh wenn sichtbar
+    if (typeof _renderFreshdeskTicket === 'function') _renderFreshdeskTicket();
+    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+  } catch (e) {
+    toast('Löschen fehlgeschlagen: ' + e.message, 'error', 6000);
+    // Button zurücksetzen
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = '<i data-lucide="trash-2" class="w-3.5 h-3.5"></i>';
+      if (window.lucide) lucide.createIcons();
+    }
+  }
 }
 
 async function toggleFreshdeskTicketHistory() {
