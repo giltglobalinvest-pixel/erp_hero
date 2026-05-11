@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.17';
+const APP_VERSION = 'v4.18';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1629,7 +1629,7 @@ function _attachSwipeHandlers(wrapEl) {
     // Kurzer Delay (= halbe Reset-Animation), damit der User die Snap-Back-Bewegung
     // wahrnimmt bevor das Modal aufgeht.
     setTimeout(() => {
-      if (direction === 'left')  openInternalNoteComposer(ticketId);  // Swipe links → Notiz
+      if (direction === 'left')  openTicketAiCommand(ticketId);       // Swipe links → KI-Befehl
       if (direction === 'right') openTicketActionMenu(ticketId);      // Swipe rechts → Aktionen
     }, 100);
   };
@@ -2557,8 +2557,13 @@ async function loadFreshdeskTicketsPreview() {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  wrap.innerHTML = '<p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade Tickets von Freshdesk…</p>';
-  if (window.lucide) lucide.createIcons();
+  // Großer zentrierter Loading-State: drehender Kreis + "Lade Anfragen…"
+  wrap.innerHTML = `
+    <div class="flex flex-col items-center justify-center py-16 px-4 gap-4">
+      <div class="w-14 h-14 rounded-full border-[3px] border-ink-200 border-t-brand-500 animate-spin"></div>
+      <p class="text-sm text-ink-600 font-medium">Lade Anfragen…</p>
+    </div>
+  `;
   try {
     const groupId = APP_KEYS.freshdeskSalesGroupId;
     // Status-Filter (siehe _inquiriesStatusFilterQuery) + optional Typ-Filter.
@@ -2677,11 +2682,11 @@ async function loadFreshdeskTicketsPreview() {
                   <span class="text-sm font-bold">Aktionen</span>
                 </div>
               </div>
-              <!-- Hint-Panel RECHTS (sichtbar bei Swipe nach LINKS) — öffnet Notiz-Composer -->
-              <div class="swipe-action-right absolute inset-y-0 right-0 w-[200px] flex items-center justify-center px-3 bg-gradient-to-r from-amber-500 to-amber-600 z-0">
+              <!-- Hint-Panel RECHTS (sichtbar bei Swipe nach LINKS) — öffnet KI-Befehl-Modal -->
+              <div class="swipe-action-right absolute inset-y-0 right-0 w-[200px] flex items-center justify-center px-3 bg-gradient-to-r from-purple-600 to-fuchsia-600 z-0">
                 <div class="flex items-center gap-2 text-white">
-                  <span class="text-sm font-bold text-right leading-tight">Interne<br>Notiz</span>
-                  <i data-lucide="message-square-plus" class="w-6 h-6"></i>
+                  <span class="text-sm font-bold text-right leading-tight">KI-<br>Befehl</span>
+                  <i data-lucide="sparkles" class="w-6 h-6"></i>
                 </div>
               </div>
               <!-- Main Card (verschiebbar) -->
@@ -4277,6 +4282,204 @@ async function openInternalNoteComposer(ticketId) {
   }, 100);
 }
 
+/* ============================================================
+   KI-BEFEHL · Sprach-/Text-Eingabe → Claude parsed → Aktionen
+   ============================================================
+   Aktionen: add_note, set_status, assign_agent, forward_email
+   Status-Codes: open=2, pending=3, resolved=4, closed=5
+*/
+const _AI_CMD_STATUS_MAP = { open: 2, offen: 2, pending: 3, ausstehend: 3, wartend: 3, resolved: 4, geloest: 4, gelöst: 4, closed: 5, geschlossen: 5 };
+
+async function openTicketAiCommand(ticketId) {
+  if (!ticketId) return;
+  // Mic-Helper (qnText/qnMicBtn) wiederverwenden — eigenständiger State
+  _quickNoteState = { ticketId, recognition: null, recording: false, interim: '', saving: false, existingNoteId: null, existingNoteHtml: null };
+  // Agenten parallel anwärmen (für Zuweisung)
+  _loadFdAgents().catch(()=>{});
+  const hasMic = _qnHasSpeechApi();
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5">
+      <div class="flex items-center justify-between mb-3 gap-2">
+        <h3 class="text-base font-bold text-purple-900 flex items-center gap-2">
+          <i data-lucide="sparkles" class="w-5 h-5"></i>
+          KI-Befehl
+          <span class="text-xs font-normal text-ink-500">· FT-${ticketId}</span>
+        </h3>
+        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div class="bg-purple-50 border border-purple-200 rounded-lg p-2.5 mb-3 text-[11px] text-purple-900 leading-snug">
+        Sag oder schreibe was passieren soll. Beispiele:<br>
+        <span class="text-purple-700">· „Notiz: Kunden Montag anrufen wegen Lieferung"<br>
+        · „Status auf wartend setzen"<br>
+        · „Sandra zuweisen und Notiz hinzufügen dass das Angebot dringend ist"<br>
+        · „Auf erledigt setzen"</span>
+      </div>
+      <textarea id="qnText" rows="4" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 resize-y bg-white" placeholder="${hasMic ? 'Schreibe oder klick aufs Mikrofon …' : 'Schreibe was passieren soll …'}"></textarea>
+      <div class="flex gap-2 mt-3 flex-wrap items-center">
+        ${hasMic ? `<button id="qnMicBtn" type="button" onclick="_qnToggleMic(${ticketId})" class="bg-purple-100 text-purple-700 border border-purple-300 hover:bg-purple-200 rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5">
+          <i data-lucide="mic" class="w-4 h-4"></i> Sprache
+        </button>` : ''}
+        <button type="button" onclick="closeTopModal()" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-2 hover:bg-ink-50">Abbrechen</button>
+        <button id="aiCmdSendBtn" type="button" onclick="_aiCmdSend(${ticketId})" class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-1.5 flex-1 min-w-[160px] justify-center">
+          <i data-lucide="wand-sparkles" class="w-4 h-4"></i> KI ausführen
+        </button>
+      </div>
+      <p id="qnStatus" class="text-[11px] text-ink-500 mt-1.5 min-h-[14px]"></p>
+      <div id="aiCmdPreview" class="mt-3"></div>
+    </div>
+  `, { maxWidth: 'max-w-xl' });
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => { document.getElementById('qnText')?.focus(); }, 100);
+}
+
+// Schickt den Befehl an Claude, parsed Aktionen, zeigt Vorschau
+async function _aiCmdSend(ticketId) {
+  // Falls Aufnahme läuft, erst stoppen
+  if (_quickNoteState.recording) {
+    _qnStopRecording();
+    await new Promise(r => setTimeout(r, 350));
+  }
+  const ta = document.getElementById('qnText');
+  const cmd = (ta?.value || '').trim();
+  if (!cmd) { toast('Bitte erst Befehl eingeben oder diktieren', 'warn'); ta?.focus(); return; }
+  const btn = document.getElementById('aiCmdSendBtn');
+  const preview = document.getElementById('aiCmdPreview');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> KI denkt …'; if (window.lucide) lucide.createIcons(); }
+  if (preview) preview.innerHTML = '';
+  try {
+    // Agenten-Liste in den Prompt geben, damit Claude Namen → IDs auflösen kann
+    const agents = await _loadFdAgents().catch(()=>[]) || [];
+    const agentLines = agents.map(a => `- ${a.name}${a.email ? ' <' + a.email + '>' : ''} (id=${a.id})`).join('\n') || '(keine Agenten geladen)';
+    const sys = `Du bist ein Befehls-Parser für ein Helpdesk-Ticket. Wandle die Eingabe in strukturierte Aktionen um.
+
+Verfügbare Aktionen:
+- {"type":"add_note","text":"..."}                       — Interne Notiz hinzufügen
+- {"type":"set_status","status":"open|pending|resolved|closed"} — Ticket-Status setzen
+- {"type":"assign_agent","agent_id":<id>}                — Bearbeiter zuweisen (id muss exakt aus der Agenten-Liste sein)
+- {"type":"forward_email","to":"email@x","subject":"...","body":"..."} — Email weiterleiten
+
+Agenten:
+${agentLines}
+
+Regeln:
+- Antworte AUSSCHLIESSLICH mit gültigem JSON, keine Markdown-Codeblöcke, keine Erklärung.
+- Format: {"summary":"kurze deutsche Zusammenfassung in 1 Satz","actions":[...]}
+- Wenn der Befehl mehrere Sachen enthält → mehrere actions
+- Wenn unklar → "actions":[] und summary erklärt warum
+- Status-Synonyme: "wartend/pending" → pending, "fertig/erledigt/gelöst" → resolved, "zu" → closed, "offen" → open
+- Bei add_note: text klar und knapp, keine Floskeln, deutsche Sprache.`;
+    const user = `Befehl für Ticket FT-${ticketId}:\n"${cmd}"`;
+    const raw = await askAI(sys + '\n\n' + user, { purpose: 'aiCmdParse', maxTokens: 1024 });
+    let parsed;
+    try {
+      // Falls Claude mal doch Codeblöcke zurückgibt — abstreifen
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      parsed = JSON.parse(cleaned);
+    } catch (_) {
+      throw new Error('KI-Antwort konnte nicht geparst werden: ' + raw.slice(0, 200));
+    }
+    const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+    const summary = parsed.summary || '';
+    if (actions.length === 0) {
+      preview.innerHTML = `<div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900"><i data-lucide="triangle-alert" class="inline w-4 h-4"></i> ${escapeHtml(summary || 'Kein klarer Befehl erkannt — bitte präziser formulieren.')}</div>`;
+      if (window.lucide) lucide.createIcons();
+      return;
+    }
+    // Vorschau aufbauen
+    const actionRows = actions.map((a, i) => {
+      let label = '', icon = 'check', color = 'text-ink-700';
+      if (a.type === 'add_note') {
+        label = 'Notiz hinzufügen: ' + escapeHtml((a.text || '').slice(0, 200));
+        icon = 'message-square-plus'; color = 'text-amber-700';
+      } else if (a.type === 'set_status') {
+        const code = _AI_CMD_STATUS_MAP[(a.status || '').toLowerCase()];
+        label = 'Status setzen auf <strong>' + escapeHtml(a.status || '?') + '</strong>' + (code ? '' : ' <span class="text-red-600">(unbekannt!)</span>');
+        icon = 'flag'; color = 'text-blue-700';
+      } else if (a.type === 'assign_agent') {
+        const ag = agents.find(x => Number(x.id) === Number(a.agent_id));
+        label = 'Zuweisen an <strong>' + escapeHtml(ag ? ag.name : ('Agent ' + a.agent_id)) + '</strong>';
+        icon = 'user-cog'; color = 'text-emerald-700';
+      } else if (a.type === 'forward_email') {
+        label = 'Email an <strong>' + escapeHtml(a.to || '?') + '</strong>: ' + escapeHtml((a.subject || '').slice(0, 80));
+        icon = 'forward'; color = 'text-purple-700';
+      } else {
+        label = 'Unbekannte Aktion: <code>' + escapeHtml(a.type || '?') + '</code>';
+        icon = 'help-circle'; color = 'text-red-600';
+      }
+      return `<li class="flex items-start gap-2 ${color}"><i data-lucide="${icon}" class="w-4 h-4 mt-0.5 shrink-0"></i><span class="text-sm leading-snug">${label}</span></li>`;
+    }).join('');
+    preview.innerHTML = `
+      <div class="bg-white border-2 border-purple-300 rounded-lg p-3">
+        ${summary ? `<p class="text-xs text-purple-900 italic mb-2">${escapeHtml(summary)}</p>` : ''}
+        <ul class="space-y-1.5 mb-3">${actionRows}</ul>
+        <div class="flex gap-2 flex-wrap">
+          <button type="button" onclick="document.getElementById('aiCmdPreview').innerHTML='';document.getElementById('aiCmdSendBtn').disabled=false;document.getElementById('aiCmdSendBtn').innerHTML='<i data-lucide=\\'wand-sparkles\\' class=\\'w-4 h-4\\'></i> Erneut';if(window.lucide)lucide.createIcons();" class="text-sm text-ink-700 border border-ink-200 rounded-lg px-3 py-1.5 hover:bg-ink-50">Verwerfen</button>
+          <button id="aiCmdRunBtn" type="button" onclick='_aiCmdExecute(${ticketId}, ${JSON.stringify(actions).replace(/'/g, "&#39;")})' class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-1.5 justify-center"><i data-lucide="check" class="w-4 h-4"></i> Ausführen (${actions.length})</button>
+        </div>
+      </div>
+    `;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    preview.innerHTML = `<div class="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700"><i data-lucide="alert-circle" class="inline w-4 h-4"></i> ${escapeHtml(e.message)}</div>`;
+    if (window.lucide) lucide.createIcons();
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="wand-sparkles" class="w-4 h-4"></i> KI ausführen'; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
+// Führt die geparsten Aktionen sequentiell aus
+async function _aiCmdExecute(ticketId, actions) {
+  if (!Array.isArray(actions) || !actions.length) return;
+  const runBtn = document.getElementById('aiCmdRunBtn');
+  if (runBtn) { runBtn.disabled = true; runBtn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Läuft …'; if (window.lucide) lucide.createIcons(); }
+  let okCount = 0, errCount = 0;
+  for (const a of actions) {
+    try {
+      if (a.type === 'add_note') {
+        const text = (a.text || '').trim();
+        if (!text) continue;
+        const author = APP_KEYS.user?.name ? ' — ' + APP_KEYS.user.name : '';
+        const ts = ' · ' + new Date().toLocaleString('de-DE');
+        const html = '<p><strong>' + FD_INTERNAL_NOTE_MARKER + '</strong>' + escapeHtml(author) + escapeHtml(ts) + '</p><p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
+        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', { method: 'POST', body: { body: html, private: true } });
+        okCount++;
+      } else if (a.type === 'set_status') {
+        const code = _AI_CMD_STATUS_MAP[(a.status || '').toLowerCase()];
+        if (!code) { errCount++; continue; }
+        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, { method: 'PUT', body: { status: code } });
+        okCount++;
+      } else if (a.type === 'assign_agent') {
+        const id = Number(a.agent_id);
+        if (!id) { errCount++; continue; }
+        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, { method: 'PUT', body: { responder_id: id } });
+        okCount++;
+      } else if (a.type === 'forward_email') {
+        if (!a.to) { errCount++; continue; }
+        // Freshdesk-Reply mit cc_emails leer + to_emails = Empfänger → als Forward markieren via Subject
+        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/forward', {
+          method: 'POST',
+          body: { body: (a.body || '').replace(/\n/g, '<br>'), to_emails: [a.to] }
+        });
+        okCount++;
+      } else {
+        errCount++;
+      }
+    } catch (e) {
+      console.warn('[AI-Cmd] Aktion fehlgeschlagen:', a, e);
+      errCount++;
+    }
+  }
+  _fdAiSummaryCache.delete(ticketId);
+  if (okCount && !errCount) toast(`KI-Befehl ausgeführt (${okCount} Aktion${okCount === 1 ? '' : 'en'})`, 'success', 3000);
+  else if (okCount && errCount) toast(`${okCount} OK, ${errCount} fehlgeschlagen`, 'warn', 4500);
+  else toast('KI-Befehl fehlgeschlagen', 'error', 5000);
+  closeTopModal();
+  loadFreshdeskTicketsPreview();
+}
+
 async function showAiSummaryQuickView(ticketId) {
   if (!ticketId) return;
   _quickNoteState = { ticketId, recognition: null, recording: false, interim: '', saving: false, existingNoteId: null, existingNoteHtml: null };
@@ -4304,24 +4507,17 @@ async function showAiSummaryQuickView(ticketId) {
         <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade…</p>
       </div>
 
-      <!-- Quick-Notiz-Section -->
-      <div class="mt-5 border-t border-ink-100 pt-4 bg-amber-50/30 -mx-6 px-6 -mb-2 py-3 rounded-b-xl">
-        <p class="text-xs font-semibold text-amber-900 mb-2 flex items-center gap-1.5">
-          <i data-lucide="${existingOwn ? 'edit-3' : 'message-square-plus'}" class="w-3.5 h-3.5"></i>
-          ${existingOwn ? 'Deine bestehende interne Notiz bearbeiten' : 'Interne Notiz für Mitarbeiter'}
-          ${hasMic ? '<span class="text-ink-500 font-normal">— Text oder Sprache</span>' : '<span class="text-ink-500 font-normal">(Text)</span>'}
+      <!-- KI-Befehl-Section: ersetzt vorherige Quick-Notiz — Sprache/Text → KI parsed → Aktion -->
+      <div class="mt-5 border-t border-ink-100 pt-4 bg-purple-50/30 -mx-6 px-6 -mb-2 py-3 rounded-b-xl">
+        <p class="text-xs font-semibold text-purple-900 mb-2 flex items-center gap-1.5">
+          <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+          KI-Befehl ausführen
+          <span class="text-ink-500 font-normal">— Notiz, Status, Zuweisen, Weiterleiten</span>
         </p>
-        <textarea id="qnText" rows="3" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30 resize-y bg-white" placeholder="${hasMic ? 'Schreibe oder klick auf Sprachnotiz…' : 'Schreibe deine Notiz hier…'}">${escapeHtml(existingText)}</textarea>
-        <div class="flex gap-2 mt-2 flex-wrap items-center">
-          ${hasMic ? `<button id="qnMicBtn" type="button" onclick="_qnToggleMic(${ticketId})" class="bg-purple-100 text-purple-700 border border-purple-300 hover:bg-purple-200 rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5">
-            <i data-lucide="mic" class="w-4 h-4"></i> Sprachnotiz
-          </button>` : ''}
-          <button id="qnSaveBtn" type="button" onclick="_qnSave(${ticketId})" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 text-sm font-semibold inline-flex items-center gap-1.5 flex-1 min-w-[200px] justify-center">
-            <i data-lucide="send" class="w-4 h-4"></i> ${existingOwn ? 'Aktualisieren + zurück zur Übersicht' : 'Speichern + zurück zur Übersicht'}
-          </button>
-        </div>
-        ${existingOwn ? `<p class="text-[11px] text-ink-500 italic mt-1">Wird per <code>PUT /conversations/${existingOwn.id}</code> aktualisiert — keine zweite Notiz im Ticket-Verlauf.</p>` : ''}
-        <p id="qnStatus" class="text-[11px] text-ink-500 mt-1 min-h-[14px]"></p>
+        <button type="button" onclick="openTicketAiCommand(${ticketId})" class="w-full bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-4 py-2.5 text-sm font-semibold inline-flex items-center gap-2 justify-center">
+          <i data-lucide="wand-sparkles" class="w-4 h-4"></i> KI-Befehl per Sprache oder Text
+        </button>
+        ${existingOwn ? `<p class="text-[11px] text-ink-500 italic mt-1.5">Bestehende eigene Notiz vorhanden (${escapeHtml(_timeAgo(existingOwn.created_at) || '')}). KI-Befehl „Notiz hinzufügen" hängt eine neue an.</p>` : ''}
       </div>
 
       <div class="mt-3 flex justify-between gap-2 flex-wrap">
