@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.38';
+const APP_VERSION = 'v4.39';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4941,6 +4941,35 @@ function _tcmSyncInputs() {
     const dEl = document.getElementById('tcmCoDomains');
     if (dEl) ctx.fdCompany.domains = String(dEl.value || '').split(',').map(s => s.trim()).filter(Boolean);
   }
+  // FS-Sales-Account-Inputs
+  if (ctx.fs) {
+    const fMap = {
+      name:    'tcmFsName',
+      phone:   'tcmFsPhone',
+      website: 'tcmFsWebsite',
+      address: 'tcmFsStreet',
+      zipcode: 'tcmFsZipcode',
+      city:    'tcmFsCity',
+      country: 'tcmFsCountry'
+    };
+    Object.entries(fMap).forEach(([f, id]) => {
+      const el = document.getElementById(id);
+      if (el) ctx.fs[f] = el.value;
+    });
+    // Custom Fields
+    ctx.fs.custom_field = ctx.fs.custom_field || ctx.fs.custom_fields || {};
+    const cfMap = {
+      erp_customer_no:  'tcmFsCustomerNo',
+      vat_id:           'tcmFsVatId',
+      payment_terms:    'tcmFsPaymentTerms',
+      delivery_terms:   'tcmFsDeliveryTerms',
+      erp_mandant:      'tcmFsMandant'
+    };
+    Object.entries(cfMap).forEach(([f, id]) => {
+      const el = document.getElementById(id);
+      if (el) ctx.fs.custom_field[f] = el.value;
+    });
+  }
 }
 
 function _tcmRender() {
@@ -5155,7 +5184,7 @@ function _tcmRender() {
     </div>`;
     })() : '');
 
-  // Freshsales-Sales-Account-Block (Master) — read-only Anzeige + Link zum FS-Editor (kommt in v4.37+)
+  // Freshsales-Sales-Account-Block (Master) — Editor mit Inputs + KI-Suggestion-Banner
   const fs = ctx.fs || null;
   const fsContact = ctx.fsContact || null;
   const fsUrl = APP_KEYS.freshsalesSubdomain && fs?.id ? 'https://' + APP_KEYS.freshsalesSubdomain + '.freshworks.com/crm/sales/sales_accounts/' + fs.id : '';
@@ -5171,27 +5200,75 @@ function _tcmRender() {
       </div>
       ${fs ? `
         <div class="space-y-2 text-xs">
-          <div class="grid grid-cols-2 gap-2">
-            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Firma</p><p class="text-ink-900 font-medium">${escapeHtml(fs.name || '–')}</p></div>
-            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Branche</p><p class="text-ink-900">${escapeHtml(fs.industry_type?.name || fs.industry_type_id || '–')}</p></div>
-            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Telefon</p><p class="text-ink-900 font-mono">${escapeHtml(fs.phone || '–')}</p></div>
-            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Website</p><p class="text-ink-900 truncate">${escapeHtml(fs.website || '–')}</p></div>
-            <div class="col-span-2"><p class="text-[10px] uppercase font-semibold text-purple-800">Anschrift</p><p class="text-ink-900">${escapeHtml([fs.address, [fs.zipcode, fs.city].filter(Boolean).join(' '), fs.country].filter(Boolean).join(' · ') || '–')}</p></div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Firma</label>
+            <input id="tcmFsName" type="text" value="${escapeHtml(fs.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            ${sBan('company_name', fs.name)}
           </div>
-          <div class="border-t border-purple-100 pt-2 mt-2">
-            <p class="text-[10px] uppercase font-semibold text-purple-800 mb-1">ERP-Custom-Fields</p>
-            <div class="grid grid-cols-2 gap-2 text-[11px]">
-              <div><span class="text-ink-500">Kundennr:</span> <span class="font-mono">${escapeHtml(fsGetCf('erp_customer_no') || '–')}</span></div>
-              <div><span class="text-ink-500">USt-IdNr:</span> <span class="font-mono">${escapeHtml(fsGetCf('vat_id') || '–')}</span></div>
-              <div><span class="text-ink-500">Zahlungsziel:</span> ${escapeHtml(fsGetCf('payment_terms') || '–')}</div>
-              <div><span class="text-ink-500">Lieferbed.:</span> ${escapeHtml(fsGetCf('delivery_terms') || '–')}</div>
-              <div class="col-span-2"><span class="text-ink-500">Mandant:</span> ${escapeHtml(fsGetCf('erp_mandant') || '–')}</div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Telefon</label>
+              <input id="tcmFsPhone" type="tel" value="${escapeHtml(fs.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm font-mono">
+              ${sBan('company_phone', fs.phone)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Website</label>
+              <input id="tcmFsWebsite" type="url" value="${escapeHtml(fs.website || '')}" placeholder="https://…" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+              ${sBan('company_website', fs.website)}
             </div>
           </div>
-          <div class="flex gap-2 mt-3 flex-wrap">
-            ${fsUrl ? `<a href="${escapeHtml(fsUrl)}" target="_blank" rel="noopener" class="text-xs px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg inline-flex items-center gap-1.5"><i data-lucide="external-link" class="w-3.5 h-3.5"></i> In Freshsales öffnen</a>` : ''}
-            <span class="text-[10px] text-ink-500 italic self-center">Editor + Auto-Push folgt in v4.37</span>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-purple-800 block">Straße + Hausnr.</label>
+            <input id="tcmFsStreet" type="text" value="${escapeHtml(fs.address || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+            ${sBan('company_street', fs.address)}
           </div>
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">PLZ</label>
+              <input id="tcmFsZipcode" type="text" value="${escapeHtml(fs.zipcode || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm font-mono">
+              ${sBan('company_zipcode', fs.zipcode)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Stadt</label>
+              <input id="tcmFsCity" type="text" value="${escapeHtml(fs.city || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+              ${sBan('company_city', fs.city)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-purple-800 block">Land</label>
+              <input id="tcmFsCountry" type="text" value="${escapeHtml(fs.country || '')}" class="w-full mt-1 px-2 py-1.5 border border-purple-200 bg-white rounded text-sm">
+              ${sBan('company_country', fs.country)}
+            </div>
+          </div>
+          <div class="border-t border-purple-100 pt-2 mt-2">
+            <p class="text-[10px] uppercase font-semibold text-purple-800 mb-1.5">ERP-Custom-Fields</p>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-[10px] uppercase font-medium text-purple-700 block">Kundennummer</label>
+                <input id="tcmFsCustomerNo" type="text" value="${escapeHtml(fsGetCf('erp_customer_no'))}" placeholder="K-1042" class="w-full mt-0.5 px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono">
+              </div>
+              <div>
+                <label class="text-[10px] uppercase font-medium text-purple-700 block">USt-IdNr</label>
+                <input id="tcmFsVatId" type="text" value="${escapeHtml(fsGetCf('vat_id'))}" placeholder="DE…" class="w-full mt-0.5 px-2 py-1.5 border border-purple-200 bg-white rounded text-xs font-mono">
+                ${sBan('company_vat_id', fsGetCf('vat_id'))}
+              </div>
+              <div>
+                <label class="text-[10px] uppercase font-medium text-purple-700 block">Zahlungsziel</label>
+                <input id="tcmFsPaymentTerms" type="text" value="${escapeHtml(fsGetCf('payment_terms'))}" placeholder="14 Tage netto" class="w-full mt-0.5 px-2 py-1.5 border border-purple-200 bg-white rounded text-xs">
+              </div>
+              <div>
+                <label class="text-[10px] uppercase font-medium text-purple-700 block">Lieferbedingungen</label>
+                <input id="tcmFsDeliveryTerms" type="text" value="${escapeHtml(fsGetCf('delivery_terms'))}" placeholder="EXW Fellbach" class="w-full mt-0.5 px-2 py-1.5 border border-purple-200 bg-white rounded text-xs">
+              </div>
+              <div class="col-span-2">
+                <label class="text-[10px] uppercase font-medium text-purple-700 block">Mandant (kommt aus Multi-Select unten)</label>
+                <input id="tcmFsMandant" type="text" value="${escapeHtml(fsGetCf('erp_mandant'))}" readonly class="w-full mt-0.5 px-2 py-1.5 border border-purple-100 bg-ink-50 rounded text-xs text-ink-600">
+              </div>
+            </div>
+          </div>
+          <button id="tcmFsSaveBtn" type="button" onclick="_tcmSaveFs(this)" ${ctx.savingFs ? 'disabled' : ''} class="w-full mt-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+            <i data-lucide="${ctx.savingFs ? 'loader-2' : 'save'}" class="w-4 h-4 ${ctx.savingFs ? 'animate-spin' : ''}"></i> ${ctx.savingFs ? 'Speichere…' : 'In Freshsales speichern'}
+          </button>
+          ${fsUrl ? `<a href="${escapeHtml(fsUrl)}" target="_blank" rel="noopener" class="text-[11px] text-purple-700 underline mt-2 inline-flex items-center gap-1"><i data-lucide="external-link" class="w-3 h-3"></i> Direkt in Freshsales öffnen</a>` : ''}
         </div>
       ` : `
         ${fsContact ? `
@@ -5272,7 +5349,8 @@ async function _tcmLoadSuggestions(force) {
     const raw = await _tcmAiSuggest(ctx.fd, ctx.fdCompany, ctx.ticket, conv);
     const norm = {};
     ['name','email','phone','mobile','job_title','address',
-     'company_name','company_domains','company_industry','company_description','company_note'].forEach(f => {
+     'company_name','company_phone','company_website','company_street','company_zipcode','company_city','company_country',
+     'company_domains','company_industry','company_description','company_note','company_vat_id'].forEach(f => {
       const s = raw?.[f];
       if (s && s.value !== undefined && s.value !== null) {
         const v = Array.isArray(s.value) ? s.value.filter(Boolean).join(', ') : String(s.value).trim();
@@ -5332,11 +5410,20 @@ JSON-FORMAT (Felder weglassen wenn unsicher):
   "job_title": {"value": "...", "source": "..."},
   "address":   {"value": "...", "source": "..."},
   "company_name":        {"value": "...", "source": "..."},
+  "company_phone":       {"value": "+49 30 …",   "source": "Hauptnr. in Signatur"},
+  "company_website":     {"value": "https://...","source": "..."},
+  "company_street":      {"value": "Musterstr. 12","source": "Signatur-Adresse"},
+  "company_zipcode":     {"value": "70173",      "source": "..."},
+  "company_city":        {"value": "Stuttgart",  "source": "..."},
+  "company_country":     {"value": "Deutschland","source": "..."},
   "company_domains":     {"value": ["firma.de"], "source": "Email-Domain"},
-  "company_industry":    {"value": "...", "source": "..."},
-  "company_description": {"value": "...", "source": "..."},
-  "company_note":        {"value": "...", "source": "..."}
+  "company_industry":    {"value": "...",        "source": "..."},
+  "company_description": {"value": "...",        "source": "..."},
+  "company_note":        {"value": "...",        "source": "..."},
+  "company_vat_id":      {"value": "DE123…",     "source": "Footer"}
 }
+
+Wichtig: Adresse möglichst NICHT als gesammelter String, sondern STRUKTURIERT in company_street + company_zipcode + company_city + company_country aufteilen, falls eine Firmen-Adresse erkennbar ist. Das address-Feld (oben) ist nur für den Contact (persönliche Adresse falls anders).
 
 TICKET:
 Betreff: ${ticket.subject || ''}
@@ -5366,26 +5453,64 @@ Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text extrahieren ode
 function _tcmApplySuggestion(field, value) {
   const ctx = _tcmCtx;
   if (!ctx) return false;
+  // FS-Account-Felder haben Vorrang (FS = Master). company_* schreibt in FS, fallback FD-Company.
   if (field.startsWith('company_')) {
-    // KRITISCH: Nur in fdCompany schreiben wenn echte ID da ist — sonst täuscht der Render
-    // einen Save-Block vor (Bug bis v4.27).
-    if (!ctx.fdCompany?.id) return false;
     const f = field.replace(/^company_/, '');
+    // Wenn FS-Account verfügbar: dort schreiben
+    if (ctx.fs?.id) {
+      // Map company_* → FS-Felder
+      const fsMap = {
+        name:        () => { ctx.fs.name = value; },
+        phone:       () => { ctx.fs.phone = value; },
+        website:     () => { ctx.fs.website = value; },
+        street:      () => { ctx.fs.address = value; },
+        zipcode:     () => { ctx.fs.zipcode = value; },
+        city:        () => { ctx.fs.city = value; },
+        country:     () => { ctx.fs.country = value; },
+        vat_id:      () => { ctx.fs.custom_field = ctx.fs.custom_field || {}; ctx.fs.custom_field.vat_id = value; },
+        description: () => { ctx.fs.description = value; },
+        note:        () => { ctx.fs.note = value; }
+      };
+      if (fsMap[f]) { fsMap[f](); return true; }
+      // industry → Freshsales nimmt industry_type_id (numerisch) — skip wenn als Text
+      if (f === 'industry' || f === 'domains') return false;
+      return false;
+    }
+    // Fallback: FD-Company
+    if (!ctx.fdCompany?.id) return false;
     if (f === 'domains') {
       ctx.fdCompany.domains = String(value || '').split(',').map(s => s.trim()).filter(Boolean);
     } else if (f === 'industry') {
-      // Freshdesk-Industry ist Enum — nur valid Werte übernehmen
       if (FD_INDUSTRY_VALUES.includes(String(value))) {
         ctx.fdCompany.industry = String(value);
       } else {
-        // Fallback: "Other" wenn KI was ähnliches vorgeschlagen hat, sonst weglassen
         console.warn('[tcm] industry "' + value + '" nicht in FD-Enum, übersprungen');
         return false;
       }
-    } else {
+    } else if (['name','description','note'].includes(f)) {
       ctx.fdCompany[f] = value;
+    } else {
+      // Felder die FD-Company nicht hat (phone, website, street, ...) → skip
+      return false;
     }
   } else {
+    // Personen-Felder: FS-Contact hat Vorrang
+    if (ctx.fsContact?.id) {
+      const fsCMap = {
+        name: () => {
+          const parts = String(value || '').trim().split(/\s+/);
+          ctx.fsContact.first_name = parts.length > 1 ? parts.slice(0, -1).join(' ') : value;
+          ctx.fsContact.last_name  = parts.length > 1 ? parts[parts.length - 1] : '';
+        },
+        email:     () => { ctx.fsContact.email = value; },
+        phone:     () => { ctx.fsContact.work_number = value; },
+        mobile:    () => { ctx.fsContact.mobile_number = value; },
+        job_title: () => { ctx.fsContact.job_title = value; },
+        address:   () => { /* FS-Contact hat eigene Address-Felder, vorerst skip */ }
+      };
+      if (fsCMap[field]) { fsCMap[field](); return true; }
+    }
+    // Fallback: FD-Contact
     ctx.fd = ctx.fd || {};
     ctx.fd[field] = value;
   }
@@ -5408,7 +5533,10 @@ function _tcmAccept(field) {
   _tcmRender();
   const map = {
     name:'tcmName', email:'tcmEmail', phone:'tcmPhone', mobile:'tcmMobile', job_title:'tcmJob', address:'tcmAddress',
-    company_name:'tcmCoName', company_domains:'tcmCoDomains', company_industry:'tcmCoIndustry',
+    company_name:'tcmFsName', company_phone:'tcmFsPhone', company_website:'tcmFsWebsite',
+    company_street:'tcmFsStreet', company_zipcode:'tcmFsZipcode', company_city:'tcmFsCity', company_country:'tcmFsCountry',
+    company_vat_id:'tcmFsVatId',
+    company_domains:'tcmCoDomains', company_industry:'tcmCoIndustry',
     company_description:'tcmCoDesc', company_note:'tcmCoNote'
   };
   setTimeout(() => {
@@ -5615,6 +5743,59 @@ async function _tcmPushFdToFs(btnEl) {
     console.error('[tcmPushFdToFs] failed', e);
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="arrow-right" class="w-4 h-4"></i> Aus Freshdesk in Freshsales anlegen'; if (window.lucide) lucide.createIcons(); }
     toast('Sync fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
+// Speichert FS-Sales-Account inkl. Custom Fields via PUT
+async function _tcmSaveFs(btnEl) {
+  console.log('[tcmSaveFs] entered');
+  const ctx = _tcmCtx;
+  if (!ctx) { toast('Modal-Kontext verloren', 'error'); return; }
+  const accountId = ctx.fs?.id;
+  if (!accountId) { toast('Kein FS-Sales-Account verknüpft', 'error'); return; }
+  if (!APP_KEYS.proxyV2) { toast('Speichern benötigt Val.town-Proxy v2', 'error', 7000); return; }
+  try { _tcmSyncInputs(); } catch (e) { console.error('[tcmSaveFs] sync threw', e); }
+
+  const fs = ctx.fs;
+  // Standardfelder zusammenstellen — nur befüllte Werte schicken
+  const sales = {};
+  const stdFields = { name: fs.name, phone: fs.phone, website: fs.website,
+    address: fs.address, zipcode: fs.zipcode, city: fs.city, country: fs.country };
+  Object.entries(stdFields).forEach(([k, v]) => { const t = String(v || '').trim(); if (t) sales[k] = t; });
+  // Custom Fields
+  const cf = ctx.fs.custom_field || {};
+  const cfPayload = {};
+  ['erp_customer_no', 'vat_id', 'payment_terms', 'delivery_terms', 'erp_mandant'].forEach(k => {
+    const v = String(cf[k] || '').trim();
+    if (v) cfPayload[k] = v;
+  });
+  if (Object.keys(cfPayload).length) sales.custom_field = cfPayload;
+  if (!sales.name) { toast('Firmenname darf nicht leer sein', 'warn'); return; }
+
+  console.log('[tcmSaveFs] PUT /sales_accounts/' + accountId, { sales_account: sales });
+  ctx.savingFs = true;
+  ctx.dirty = true;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
+  toast('Speichere in Freshsales…', 'info', 2500);
+
+  try {
+    const res = await proxyFetch('freshsales/api/sales_accounts/' + accountId, {
+      method: 'PUT',
+      body: { sales_account: sales }
+    });
+    console.log('[tcmSaveFs] PUT OK', res);
+    _fsAccountCache.delete(accountId);
+    // Frisch nachladen
+    const refreshed = await _fsLoadAccount(accountId, true);
+    if (refreshed) ctx.fs = refreshed;
+    ctx.savingFs = false;
+    toast('Freshsales-Account gespeichert ✓', 'success', 3500);
+    _tcmRender();
+  } catch (e) {
+    console.error('[tcmSaveFs] FAILED', e);
+    ctx.savingFs = false;
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> In Freshsales speichern'; if (window.lucide) lucide.createIcons(); }
+    toast('Speichern fehlgeschlagen: ' + (e?.message || e), 'error', 8000);
   }
 }
 
