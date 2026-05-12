@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.37';
+const APP_VERSION = 'v4.38';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1694,6 +1694,106 @@ async function _fsFindAccountByEmail(email) {
   // Letzter Fallback: nichts gefunden — Contact zurück, Account null
   console.log('[fsFindAccount] Kein Account für Contact', contact?.id, '— Contact-Properties:', Object.keys(contact || {}));
   return { fsContact: contact, fsAccount: null };
+}
+
+// Pusht FD-Contact + FD-Company nach Freshsales (initialer Migrations-Schritt).
+// Strategie:
+//   - Wenn kein FS-Contact: POST anlegen (aus FD-Contact)
+//   - Wenn kein FS-Sales-Account: POST anlegen (aus FD-Company falls vorhanden, sonst aus Email-Domain)
+//   - Wenn beides da aber nicht verknüpft: PUT Contact mit sales_accounts-Verknüpfung
+// Returns { fsContact, fsAccount }
+async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
+  if (!APP_KEYS.freshsalesSubdomain) throw new Error('Freshsales nicht konfiguriert');
+  if (!APP_KEYS.proxyV2) throw new Error('Benötigt Val.town-Proxy v2');
+  let { fsContact, fsAccount } = currentFs || {};
+  // 1. Sales Account anlegen wenn nicht vorhanden
+  if (!fsAccount) {
+    const accName = (fdCompany?.name || fdContact?.company_name || '').trim();
+    if (accName) {
+      const addrParts = (fdContact?.address || '').split('\n').map(s => s.trim()).filter(Boolean);
+      // Heuristik: letzte Zeile = Land, vorletzte = PLZ + Ort, davor = Straße
+      const lastLine = addrParts[addrParts.length - 1] || '';
+      const country = /deutschland|germany|österreich|austria|schweiz|switzerland/i.test(lastLine) ? lastLine : '';
+      const zipCityLine = addrParts.find(l => /^\d{4,5}\s/.test(l)) || '';
+      const m = zipCityLine.match(/^(\d{4,5})\s+(.+)$/);
+      const zipcode = m?.[1] || '';
+      const city    = m?.[2] || '';
+      const street  = addrParts.find(l => l !== zipCityLine && l !== country) || '';
+      const dom = (fdContact?.email && fdContact.email.includes('@')) ? fdContact.email.split('@')[1] : '';
+      const accountBody = {
+        sales_account: {
+          name: accName,
+          phone: fdContact?.phone || '',
+          website: dom ? 'https://www.' + dom : '',
+          address: street, city, zipcode, country
+        }
+      };
+      console.log('[fsPushFromFd] POST sales_account', accountBody);
+      try {
+        const res = await proxyFetch('freshsales/api/sales_accounts', { method: 'POST', body: accountBody });
+        fsAccount = res?.sales_account || res;
+      } catch (e) {
+        // Bei "Name not unique" → Lookup
+        if (/already.?exist|409|duplicate|not.?unique/i.test(String(e?.message))) {
+          const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(accName) + '&f=name&entities=sales_account');
+          const list = lookup?.sales_accounts?.sales_accounts || lookup?.accounts || [];
+          const exact = list.find(a => String(a.name || '').toLowerCase() === accName.toLowerCase());
+          if ((exact || list[0])?.id) fsAccount = await _fsLoadAccount((exact || list[0]).id, true);
+        } else throw e;
+      }
+    }
+  }
+
+  // 2. Contact anlegen wenn nicht vorhanden
+  if (!fsContact && fdContact?.email) {
+    const fullName = (fdContact.name || '').trim();
+    const parts = fullName.split(/\s+/);
+    const lastName  = parts.length > 1 ? parts[parts.length - 1] : (fullName || 'Unknown');
+    const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+    const contactBody = {
+      contact: {
+        first_name: firstName,
+        last_name:  lastName,
+        email: fdContact.email,
+        work_number:   fdContact.phone || '',
+        mobile_number: fdContact.mobile || '',
+        job_title: fdContact.job_title || ''
+      }
+    };
+    if (fsAccount?.id) contactBody.contact.sales_accounts = [{ id: fsAccount.id, is_primary: true }];
+    console.log('[fsPushFromFd] POST contact', contactBody);
+    try {
+      const res = await proxyFetch('freshsales/api/contacts', { method: 'POST', body: contactBody });
+      fsContact = res?.contact || res;
+    } catch (e) {
+      if (/already.?exist|409|duplicate|not.?unique/i.test(String(e?.message))) {
+        // Email-Lookup
+        const found = await _fsFindContactByEmail(fdContact.email);
+        if (found?.id) fsContact = await _fsLoadContact(found.id, true);
+      } else throw e;
+    }
+  }
+
+  // 3. Wenn Contact existiert aber keinem Sales Account zugeordnet → verknüpfen
+  if (fsContact?.id && fsAccount?.id) {
+    const sa = fsContact.sales_accounts;
+    const hasLink = Array.isArray(sa) && sa.some(a => (typeof a === 'object' ? a.id : a) === fsAccount.id);
+    if (!hasLink) {
+      console.log('[fsPushFromFd] PUT contact', fsContact.id, '→ verknüpfen mit Sales Account', fsAccount.id);
+      try {
+        await proxyFetch('freshsales/api/contacts/' + fsContact.id, {
+          method: 'PUT',
+          body: { contact: { sales_accounts: [{ id: fsAccount.id, is_primary: true }] } }
+        });
+        // Cache invalidieren + nachladen
+        _fsContactCache.delete(fsContact.id);
+        fsContact = await _fsLoadContact(fsContact.id, true);
+      } catch (e) {
+        console.warn('[fsPushFromFd] Verknüpfung fehlgeschlagen:', e.message);
+      }
+    }
+  }
+  return { fsContact, fsAccount };
 }
 
 // Liefert ERP-Customer-Records mit verknüpfter FS-Account-ID — gruppiert pro Mandant
@@ -5096,12 +5196,17 @@ function _tcmRender() {
       ` : `
         ${fsContact ? `
           <p class="text-xs text-amber-700 mb-2"><strong>⚠ FS-Contact existiert, aber kein verknüpfter Sales-Account.</strong></p>
-          <p class="text-[11px] text-ink-600 mb-2">In Freshsales gibt es zwar einen Contact-Eintrag (${escapeHtml(fsContact.first_name || '')} ${escapeHtml(fsContact.last_name || '')}, ID ${fsContact.id}), aber er ist mit keiner Firma (Sales Account) verknüpft. Bitte im FS-Vertrieb prüfen.</p>
-          ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" class="text-xs px-2.5 py-1.5 border border-purple-300 hover:bg-purple-50 text-purple-700 rounded-lg inline-flex items-center gap-1.5"><i data-lucide="external-link" class="w-3 h-3"></i> Contact in FS öffnen + Firma zuordnen</a>` : ''}
+          <p class="text-[11px] text-ink-600 mb-3">In Freshsales gibt es zwar einen Contact (${escapeHtml(fsContact.first_name || '')} ${escapeHtml(fsContact.last_name || '')}, ID ${fsContact.id}), aber er ist mit keiner Firma verknüpft.</p>
         ` : `
-          <p class="text-xs text-ink-600 mb-2">Kein Freshsales-Sales-Account mit der Email <code>${escapeHtml(ctx.fd?.email || '?')}</code> gefunden.</p>
+          <p class="text-xs text-ink-600 mb-3">Kein Freshsales-Datensatz mit der Email <code>${escapeHtml(ctx.fd?.email || '?')}</code> gefunden.</p>
         `}
-        <p class="text-[11px] text-ink-500 italic mt-2">Editor zum Anlegen folgt in v4.37.</p>
+        <div class="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-2">
+          <p class="text-[11px] text-purple-900 mb-2"><strong>Aus Freshdesk-Daten in Freshsales anlegen:</strong> erstellt Sales-Account (Firma: <strong>${escapeHtml(ctx.fdCompany?.name || ctx.fd?.company_name || '–')}</strong>)${fsContact ? ' und verknüpft den bestehenden Contact' : ' + Contact (' + escapeHtml(ctx.fd?.name || '–') + ')'}.</p>
+          <button type="button" onclick="_tcmPushFdToFs(this)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold rounded-lg">
+            <i data-lucide="arrow-right" class="w-4 h-4"></i> Aus Freshdesk in Freshsales anlegen
+          </button>
+        </div>
+        ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" class="text-xs px-2.5 py-1.5 border border-purple-300 hover:bg-purple-50 text-purple-700 rounded-lg inline-flex items-center gap-1.5"><i data-lucide="external-link" class="w-3 h-3"></i> Manuell in Freshsales öffnen</a>` : ''}
       `}
     </div>` : '';
 
@@ -5483,6 +5588,33 @@ async function _tcmSaveCompany(btnEl) {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Firma in Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
     const msg = String(firstError?.message || firstError || 'Unbekannter Fehler');
     toast('Speichern fehlgeschlagen: ' + msg, 'error', 8000);
+  }
+}
+
+// Pusht FD-Daten nach FS (auf Klick im FS-Block)
+async function _tcmPushFdToFs(btnEl) {
+  const ctx = _tcmCtx;
+  if (!ctx) return;
+  if (!APP_KEYS.freshsalesSubdomain) return toast('Freshsales nicht konfiguriert (Step 9)', 'warn', 6000);
+  if (!APP_KEYS.proxyV2) return toast('Benötigt Val.town-Proxy v2', 'error', 7000);
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Synce nach Freshsales…'; if (window.lucide) lucide.createIcons(); }
+  toast('Erstelle/verknüpfe in Freshsales…', 'info', 2500);
+  try {
+    const result = await _fsPushFromFd(ctx.fd || {}, ctx.fdCompany || null, { fsContact: ctx.fsContact, fsAccount: ctx.fs });
+    ctx.fsContact = result.fsContact || ctx.fsContact;
+    ctx.fs       = result.fsAccount || ctx.fs;
+    ctx.dirty = true;
+    // ERP-Customer-Records aktualisieren
+    if (ctx.fs?.id) ctx.erpCustomers = await _findErpCustomersByFsAccountId(ctx.fs.id);
+    const what = [];
+    if (result.fsAccount?.id) what.push('Sales-Account');
+    if (result.fsContact?.id) what.push('Contact');
+    toast(what.length ? what.join(' + ') + ' in Freshsales angelegt/verknüpft ✓' : 'Sync abgeschlossen', 'success', 4500);
+    _tcmRender();
+  } catch (e) {
+    console.error('[tcmPushFdToFs] failed', e);
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="arrow-right" class="w-4 h-4"></i> Aus Freshdesk in Freshsales anlegen'; if (window.lucide) lucide.createIcons(); }
+    toast('Sync fehlgeschlagen: ' + (e.message || e), 'error', 8000);
   }
 }
 
