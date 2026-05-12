@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.21';
+const APP_VERSION = 'v4.22';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2691,11 +2691,14 @@ async function loadFreshdeskTicketsPreview() {
               </div>
               <!-- Main Card (verschiebbar) -->
               <div data-ticket-id="${t.id}" onclick="_swipeCardClick(this.closest('.swipe-card-wrap'), ${t.id}, event)" class="swipe-card relative bg-white hover:bg-ink-50 hover:border-brand-300 hover:shadow-sm cursor-pointer transition group px-3 py-3 z-10" style="touch-action: pan-y;">
-              <!-- Zeile 1: Ticket-No + Ext-Link + Status-Badge -->
+              <!-- Zeile 1: Ticket-No + Ext-Link + Kontakt-Icon + Status-Badge -->
               <div class="flex items-center justify-between gap-2 mb-1.5">
                 <div class="flex items-center gap-1.5 min-w-0">
                   <span class="text-xs font-mono text-ink-500 shrink-0">${escapeHtml(ticketNo)}</span>
                   ${fdUrl ? `<a href="${escapeHtml(fdUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="text-ink-400 hover:text-brand-700 inline-flex items-center shrink-0" title="In Freshdesk öffnen"><i data-lucide="external-link" class="w-3 h-3"></i></a>` : ''}
+                  <button type="button" onclick="event.stopPropagation();openTicketContactModal(${t.id})" class="text-brand-600 hover:text-brand-800 hover:bg-brand-50 rounded p-0.5 inline-flex items-center shrink-0" title="Kontakt-Details anzeigen">
+                    <i data-lucide="user-round" class="w-3.5 h-3.5"></i>
+                  </button>
                 </div>
                 <div class="relative shrink-0" onclick="event.stopPropagation()">
                   <button type="button" onclick="_toggleTicketStatusMenu(${t.id})" class="text-[10px] uppercase tracking-wider ${statusColor(t.status)} px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition cursor-pointer" title="Status ändern">
@@ -2717,8 +2720,8 @@ async function loadFreshdeskTicketsPreview() {
                   </div>
                 </div>
               </div>
-              <!-- Zeile 1.5: Kunde-Vorschau (Name · Firma) — async lazy geladen -->
-              <p class="ticket-customer-slot text-xs text-blue-800 mb-1 truncate empty:hidden">${(() => {
+              <!-- Zeile 1.5: Kunde-Vorschau (Name · Firma) — async lazy geladen, klickbar → Kontakt-Modal -->
+              <p class="ticket-customer-slot text-xs text-blue-800 mb-1 truncate empty:hidden cursor-pointer hover:underline" onclick="event.stopPropagation();openTicketContactModal(${t.id})" title="Kontakt-Details anzeigen">${(() => {
                 const cachedCt = t.requester_id ? _fdContactCache.get(t.requester_id) : null;
                 if (!cachedCt) return '';
                 const nm = cachedCt.name || '';
@@ -3118,13 +3121,21 @@ function _renderFreshdeskTicket() {
       <!-- Meta-Grid -->
       <div class="grid sm:grid-cols-2 gap-3 text-xs bg-ink-50 rounded-xl p-3">
         ${r ? `
-          <div class="flex items-start gap-2">
+          <div class="flex items-start gap-2 cursor-pointer hover:bg-white rounded-lg p-1 -m-1 transition" onclick="openTicketContactModal(${_fdTicketState.id})" title="Kontakt-Details + ERP-Status anzeigen">
             <i data-lucide="user" class="w-3.5 h-3.5 text-ink-500 mt-0.5"></i>
-            <div class="min-w-0">
-              <p class="text-[10px] uppercase tracking-wider text-ink-500">Anfragender</p>
-              <p class="font-medium text-ink-900 truncate">${escapeHtml(r.name || '–')}</p>
+            <div class="min-w-0 flex-1">
+              <p class="text-[10px] uppercase tracking-wider text-ink-500 flex items-center gap-1">
+                Anfragender
+                ${_fdTicketState.match?.customer?.fields?.customer_no
+                  ? `<span class="ml-1 inline-flex items-center gap-0.5 bg-emerald-100 text-emerald-800 px-1 py-px rounded font-mono text-[10px] font-bold normal-case tracking-normal">✓ ${escapeHtml(_fdTicketState.match.customer.fields.customer_no)}</span>`
+                  : (_fdTicketState.match?.customer
+                      ? '<span class="ml-1 bg-emerald-100 text-emerald-800 px-1 py-px rounded text-[10px] font-bold normal-case">✓ im ERP</span>'
+                      : '<span class="ml-1 bg-amber-100 text-amber-700 px-1 py-px rounded text-[10px] font-bold normal-case">nicht im ERP</span>')}
+                <i data-lucide="chevron-right" class="w-3 h-3 text-ink-400 ml-auto"></i>
+              </p>
+              <p class="font-medium text-ink-900 truncate">${escapeHtml(r.name || '–')}${r.company_name || r.company?.name ? ' · ' + escapeHtml(r.company_name || r.company.name) : ''}</p>
               ${r.email ? `<p class="text-ink-600 truncate">${escapeHtml(r.email)}</p>` : ''}
-              ${r.phone ? `<p class="text-ink-600 truncate">${escapeHtml(r.phone)}</p>` : ''}
+              ${r.phone || r.mobile ? `<p class="text-ink-600 truncate">${escapeHtml([r.phone, r.mobile].filter(Boolean).join(' · '))}</p>` : ''}
             </div>
           </div>
         ` : ''}
@@ -4540,6 +4551,210 @@ async function _aiCmdExecute(ticketId, actions) {
   else toast('KI-Befehl fehlgeschlagen', 'error', 5000);
   closeTopModal();
   loadFreshdeskTicketsPreview();
+}
+
+/* ============================================================
+   TICKET-KONTAKT-MODAL · Vollständige Kontakt-/Firmen-Anzeige
+   ============================================================
+   Zeigt: Firma, Name, Job-Title, Tel, Mobil, Email
+   ERP-Status (Kundennummer K-XXXX) + Aktionen (öffnen / anlegen)
+   KI-Vorschlag aus Ticket-Inhalt, falls FD-Kontakt unvollständig
+*/
+async function openTicketContactModal(ticketId) {
+  if (!ticketId) return;
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5">
+      <div class="flex items-center justify-between mb-3 gap-2">
+        <h3 class="text-base font-bold text-ink-900 flex items-center gap-2">
+          <i data-lucide="user" class="w-5 h-5 text-brand-600"></i>
+          Kontakt
+          <span class="text-xs font-normal text-ink-500">· FT-${ticketId}</span>
+        </h3>
+        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div id="tcmBody" class="space-y-3">
+        <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade Kontaktdaten…</p>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-xl' });
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    // 1. Ticket + Requester via Freshdesk
+    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
+    const requesterEmail = (r?.email || t?.email || '').toLowerCase();
+    const requesterName  = r?.name || '';
+    const requesterPhone = r?.phone || '';
+    const requesterMobile = r?.mobile || '';
+    const requesterJob   = r?.job_title || '';
+    const requesterCompany = r?.company_name || r?.company?.name || '';
+
+    // 2. ERP-Match
+    let erp = null;
+    if (requesterEmail) {
+      try { erp = await _findCustomerContactByEmail(requesterEmail); } catch (_) {}
+    }
+    const erpCustomer = erp?.customer || null;
+    const erpContact  = erp?.contact || null;
+    const customerNo  = erpCustomer?.fields?.customer_no || '';
+    const erpName1    = erpCustomer?.fields?.name1 || '';
+    const erpPhoneC   = erpContact?.fields?.phone || '';
+    const erpMobileC  = erpContact?.fields?.mobile || '';
+
+    // Werte konsolidieren — FD wins, ERP fills gaps
+    const phoneFinal  = requesterPhone  || erpPhoneC;
+    const mobileFinal = requesterMobile || erpMobileC;
+    const companyFinal = requesterCompany || erpName1;
+
+    const body = document.getElementById('tcmBody');
+    if (!body) return;
+    body.innerHTML = `
+      <!-- Firma (groß) -->
+      <div class="bg-gradient-to-br from-brand-50 to-blue-50 border border-brand-200 rounded-xl p-4">
+        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">Firma</p>
+        <p class="text-lg font-bold text-ink-900 leading-tight">${escapeHtml(companyFinal || '— unbekannt —')}</p>
+        ${requesterJob ? `<p class="text-xs text-ink-600 mt-0.5">${escapeHtml(requesterJob)}</p>` : ''}
+      </div>
+
+      <!-- Kontakt -->
+      <div class="bg-white border border-ink-200 rounded-xl p-4">
+        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">Anfragende Person</p>
+        <p class="text-base font-bold text-ink-900">${escapeHtml(requesterName || '— unbekannt —')}</p>
+        <div class="flex flex-col gap-1.5 mt-2.5">
+          ${phoneFinal ? `<a href="tel:${escapeHtml(phoneFinal)}" class="inline-flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
+            <i data-lucide="phone" class="w-4 h-4"></i> ${escapeHtml(phoneFinal)} <span class="text-[10px] font-normal opacity-80">· Festnetz</span>
+          </a>` : ''}
+          ${mobileFinal ? `<a href="tel:${escapeHtml(mobileFinal)}" class="inline-flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
+            <i data-lucide="smartphone" class="w-4 h-4"></i> ${escapeHtml(mobileFinal)} <span class="text-[10px] font-normal opacity-80">· Mobil</span>
+          </a>` : ''}
+          ${requesterEmail ? `<a href="mailto:${escapeHtml(requesterEmail)}" class="inline-flex items-center gap-2 px-3 py-2 bg-white border border-blue-300 hover:bg-blue-50 text-blue-800 text-sm rounded-lg">
+            <i data-lucide="mail" class="w-4 h-4"></i> <span class="truncate">${escapeHtml(requesterEmail)}</span>
+          </a>` : ''}
+          ${!phoneFinal && !mobileFinal && !requesterEmail ? '<p class="text-xs text-ink-500 italic">Keine Kontaktdaten — bitte KI-Vorschlag prüfen unten.</p>' : ''}
+        </div>
+      </div>
+
+      <!-- ERP-Status -->
+      <div class="bg-white border-2 ${erpCustomer ? 'border-emerald-300' : 'border-amber-300'} rounded-xl p-4">
+        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">ERP-Status</p>
+        ${erpCustomer ? `
+          <div class="flex items-center gap-2 mb-2 flex-wrap">
+            <span class="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-xs font-bold px-2 py-1 rounded">
+              <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Im ERP
+            </span>
+            ${customerNo ? `<span class="font-mono text-sm font-bold text-emerald-900">${escapeHtml(customerNo)}</span>` : '<span class="text-xs text-amber-700">⚠ keine Kundennummer</span>'}
+          </div>
+          <p class="text-sm text-ink-800 mb-2">${escapeHtml(erpName1 || '–')}</p>
+          ${erpContact ? `<p class="text-xs text-ink-600 mb-2">Kontakt: ${escapeHtml((erpContact.fields.first_name || '') + ' ' + (erpContact.fields.last_name || '')).trim() || '–'}${erpContact.fields.role ? ' (' + escapeHtml(erpContact.fields.role) + ')' : ''}</p>` : '<p class="text-xs text-amber-700 mb-2">⚠ Kontakt-Eintrag fehlt im ERP — nur Customer vorhanden</p>'}
+          <button type="button" onclick="closeTopModal();setTimeout(()=>openCustomerModal('${erpCustomer.id}'),100)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
+            <i data-lucide="external-link" class="w-4 h-4"></i> Im ERP öffnen
+          </button>
+        ` : `
+          <div class="flex items-center gap-2 mb-2">
+            <span class="inline-flex items-center gap-1 bg-amber-100 text-amber-800 text-xs font-bold px-2 py-1 rounded">
+              <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i> Noch nicht im ERP
+            </span>
+          </div>
+          <p class="text-xs text-ink-600 mb-2">Anlegen erstellt Customer + Contact + synct zu Freshdesk + Freshsales.</p>
+          <button type="button" onclick="closeTopModal();setTimeout(()=>_qvCreateContactInErp(${ticketId}, null),200)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg">
+            <i data-lucide="user-plus" class="w-4 h-4"></i> Im ERP anlegen + CRM-Sync
+          </button>
+        `}
+      </div>
+
+      <!-- KI-Vorschlag aus Ticket-Inhalt (wenn Daten unvollständig oder nicht im ERP) -->
+      ${(!erpCustomer || !phoneFinal || !mobileFinal || !companyFinal) ? `
+        <div class="bg-purple-50 border border-purple-200 rounded-xl p-3">
+          <p class="text-[10px] uppercase tracking-wider text-purple-700 font-semibold mb-1.5 flex items-center gap-1.5">
+            <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> KI-Vorschlag aus Ticket-Inhalt
+          </p>
+          <p class="text-xs text-purple-900 mb-2">Wenn die Daten oben unvollständig sind, kann die KI Firma / Name / Telefon aus Email-Body + Signatur extrahieren.</p>
+          <button id="tcmAiBtn" type="button" onclick="_tcmRunAiExtract(${ticketId})" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold rounded-lg">
+            <i data-lucide="wand-sparkles" class="w-4 h-4"></i> Daten aus Ticket extrahieren
+          </button>
+          <div id="tcmAiResult" class="mt-2"></div>
+        </div>
+      ` : ''}
+    `;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    const body = document.getElementById('tcmBody');
+    if (body) body.innerHTML = `<p class="text-sm text-red-700">Fehler beim Laden: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+// Extrahiert Firma/Kontakt-Daten via KI aus dem Ticket-Body (Email + Signatur).
+async function _tcmRunAiExtract(ticketId) {
+  const btn = document.getElementById('tcmAiBtn');
+  const result = document.getElementById('tcmAiResult');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> KI analysiert …'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // Ticket + erste Conversation als Kontext
+    const t = await freshdeskFetch('tickets/' + ticketId);
+    let conv = [];
+    try { conv = await freshdeskFetch('tickets/' + ticketId + '/conversations'); } catch (_) {}
+    const bodyText = _fdHtmlToText(t?.description || t?.description_text || '');
+    const incoming = (Array.isArray(conv) ? conv : []).filter(c => c?.incoming).map(c => _fdHtmlToText(c.body || c.body_text || '')).join('\n---\n');
+    const fullText = (bodyText + '\n\n' + incoming).slice(0, 6000);
+    const prompt = `Extrahiere aus dem folgenden Email-Text (inkl. Signaturen) die Kontakt-/Firmendaten und antworte AUSSCHLIESSLICH mit JSON:
+{"company":"Firmenname","contact_name":"Vor- und Nachname","email":"email","phone":"Festnetz","mobile":"Mobil","job_title":"Funktion","street":"Straße + Nr","zip":"PLZ","city":"Stadt"}
+
+Leere Felder als "" lassen. Keine Erklärung, kein Markdown.
+
+EMAIL-TEXT:
+"""${fullText}"""`;
+    const raw = await askAI(prompt, { purpose: 'tcmExtract', maxTokens: 600 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    const data = JSON.parse(cleaned);
+    const rows = Object.entries(data)
+      .filter(([_, v]) => v && String(v).trim())
+      .map(([k, v]) => `<tr><td class="py-1 pr-2 text-purple-700 font-medium">${escapeHtml(k)}</td><td class="py-1 text-ink-900">${escapeHtml(String(v))}</td></tr>`)
+      .join('');
+    result.innerHTML = `
+      <div class="bg-white border border-purple-300 rounded-lg p-2.5 mt-2">
+        <table class="text-xs w-full">${rows || '<tr><td class="text-ink-500 italic">Keine Daten erkannt.</td></tr>'}</table>
+        ${rows ? `<button type="button" onclick='_tcmCreateFromAi(${ticketId}, ${JSON.stringify(data).replace(/'/g, "&#39;")})' class="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg"><i data-lucide="user-plus" class="w-4 h-4"></i> Mit diesen Daten anlegen</button>` : ''}
+      </div>
+    `;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    if (result) result.innerHTML = `<p class="text-xs text-red-700 mt-2">${escapeHtml(e.message)}</p>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="wand-sparkles" class="w-4 h-4"></i> Daten aus Ticket extrahieren'; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
+// Übergibt KI-extrahierte Daten an _qvOpenCreatePreview (flat-prefill-Schema)
+async function _tcmCreateFromAi(ticketId, data) {
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+  const customerNo = await nextCustomerNo(cur.id).catch(() => '');
+  const name = (data.contact_name || '').trim();
+  const parts = name.split(/\s+/);
+  const last  = parts.length > 1 ? parts[parts.length - 1] : '';
+  const first = parts.length > 1 ? parts.slice(0, -1).join(' ') : name;
+  closeTopModal();
+  setTimeout(() => _qvOpenCreatePreview({
+    ticketId,
+    customer_no: customerNo,
+    name1: data.company || name,
+    street: data.street || '',
+    zip:    data.zip || '',
+    city:   data.city || '',
+    country: 'Deutschland',
+    vat_id: '',
+    website: '',
+    first_name: first,
+    last_name:  last,
+    email:  data.email || '',
+    phone:  data.phone || '',
+    mobile: data.mobile || '',
+    role:   data.job_title || ''
+  }), 150);
 }
 
 async function showAiSummaryQuickView(ticketId) {
