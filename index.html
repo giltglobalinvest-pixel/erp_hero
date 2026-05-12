@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.23';
+const APP_VERSION = 'v4.24';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1568,6 +1568,32 @@ async function _loadFdContact(contactId) {
     return obj;
   } catch (e) {
     console.warn('[Contact-Cache] ' + contactId + ':', e.message);
+    return null;
+  }
+}
+
+// Freshdesk-Company laden (Name, Notes, Domains, Industry, Description)
+const _fdCompanyCache = new Map();
+async function _loadFdCompany(companyId, force) {
+  if (!companyId) return null;
+  if (!force && _fdCompanyCache.has(companyId)) return _fdCompanyCache.get(companyId);
+  try {
+    const c = await freshdeskFetch('companies/' + companyId);
+    const obj = {
+      id: c.id,
+      name: c.name || '',
+      description: c.description || '',
+      note: c.note || '',
+      domains: Array.isArray(c.domains) ? c.domains : [],
+      industry: c.industry || '',
+      health_score: c.health_score || '',
+      account_tier: c.account_tier || '',
+      custom_fields: c.custom_fields || {}
+    };
+    _fdCompanyCache.set(companyId, obj);
+    return obj;
+  } catch (e) {
+    console.warn('[Company-Cache] ' + companyId + ':', e.message);
     return null;
   }
 }
@@ -4564,13 +4590,14 @@ async function _aiCmdExecute(ticketId, actions) {
    - "Im Freshdesk speichern" (PUT /api/v2/contacts/{id})
    - ERP-Block: Status mit Kundennummer + Anlegen/Öffnen
 */
-let _tcmCtx = null;  // { ticketId, ticket, fd, erp, suggestions, suggestionsLoading, suggestionsError, saving }
+let _tcmCtx = null;  // { ticketId, ticket, fd, fdCompany, erp, suggestions, suggestionsLoading, suggestionsError, saving, savingCompany }
 
 async function openTicketContactModal(ticketId) {
   if (!ticketId) return;
   _tcmCtx = {
-    ticketId, ticket: null, fd: null, erp: null,
-    suggestions: null, suggestionsLoading: false, suggestionsError: null, saving: false
+    ticketId, ticket: null, fd: null, fdCompany: null, erp: null,
+    suggestions: null, suggestionsLoading: false, suggestionsError: null,
+    saving: false, savingCompany: false
   };
   const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
   opener(`
@@ -4607,6 +4634,10 @@ async function openTicketContactModal(ticketId) {
       if (fresh) fd = Object.assign({}, fd || {}, fresh);
     }
     _tcmCtx.fd = fd || { id: t?.requester_id, name: '', email: t?.email || '' };
+    // Freshdesk-Firma laden (falls verknüpft)
+    if (_tcmCtx.fd.company_id) {
+      _tcmCtx.fdCompany = await _loadFdCompany(_tcmCtx.fd.company_id, true).catch(()=>null);
+    }
     // ERP-Match
     if (_tcmCtx.fd.email) {
       try { _tcmCtx.erp = await _findCustomerContactByEmail(_tcmCtx.fd.email); } catch (_) {}
@@ -4620,14 +4651,26 @@ async function openTicketContactModal(ticketId) {
   }
 }
 
-// Liest aktuelle Input-Werte zurück in ctx.fd, damit Re-Render manuelle Edits nicht verschluckt
+// Liest aktuelle Input-Werte zurück in ctx.fd / ctx.fdCompany, damit Re-Render manuelle Edits nicht verschluckt
 function _tcmSyncInputs() {
-  if (!_tcmCtx?.fd) return;
-  const map = { name:'tcmName', email:'tcmEmail', phone:'tcmPhone', mobile:'tcmMobile', job_title:'tcmJob', address:'tcmAddress' };
-  Object.entries(map).forEach(([f, id]) => {
-    const el = document.getElementById(id);
-    if (el) _tcmCtx.fd[f] = el.value;
-  });
+  const ctx = _tcmCtx;
+  if (!ctx) return;
+  if (ctx.fd) {
+    const map = { name:'tcmName', email:'tcmEmail', phone:'tcmPhone', mobile:'tcmMobile', job_title:'tcmJob', address:'tcmAddress' };
+    Object.entries(map).forEach(([f, id]) => {
+      const el = document.getElementById(id);
+      if (el) ctx.fd[f] = el.value;
+    });
+  }
+  if (ctx.fdCompany) {
+    const cMap = { name:'tcmCoName', note:'tcmCoNote', industry:'tcmCoIndustry', description:'tcmCoDesc' };
+    Object.entries(cMap).forEach(([f, id]) => {
+      const el = document.getElementById(id);
+      if (el) ctx.fdCompany[f] = el.value;
+    });
+    const dEl = document.getElementById('tcmCoDomains');
+    if (dEl) ctx.fdCompany.domains = String(dEl.value || '').split(',').map(s => s.trim()).filter(Boolean);
+  }
 }
 
 function _tcmRender() {
@@ -4766,7 +4809,58 @@ function _tcmRender() {
       </div>
     </div>`;
 
-  body.innerHTML = aiTop + erpBlock + fdBlock;
+  // Freshdesk-Firma-Editor (separat vom Contact)
+  const co = ctx.fdCompany || null;
+  const fdCompanyBlock = co ? `
+    <div class="bg-white border-2 border-indigo-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="building-2" class="w-4 h-4 text-indigo-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Firma</h3>
+        <span class="ml-auto text-[10px] text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Company #${co.id || '?'}</span>
+      </div>
+      <div class="space-y-2 text-xs">
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-indigo-800 block">Name</label>
+          <input id="tcmCoName" type="text" value="${escapeHtml(co.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-indigo-200 bg-white rounded text-sm">
+          ${sBan('company_name', co.name)}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-indigo-800 block">Domains <span class="text-ink-500 font-normal normal-case">(Komma-getrennt)</span></label>
+          <input id="tcmCoDomains" type="text" value="${escapeHtml((co.domains || []).join(', '))}" placeholder="example.com, example.de" class="w-full mt-1 px-2 py-1.5 border border-indigo-200 bg-white rounded text-sm font-mono">
+          ${sBan('company_domains', (co.domains || []).join(', '))}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-indigo-800 block">Branche</label>
+          <input id="tcmCoIndustry" type="text" value="${escapeHtml(co.industry || '')}" placeholder="z.B. Aufzugsbau, Hausverwaltung…" class="w-full mt-1 px-2 py-1.5 border border-indigo-200 bg-white rounded text-sm">
+          ${sBan('company_industry', co.industry)}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-indigo-800 block">Beschreibung</label>
+          <textarea id="tcmCoDesc" rows="2" class="w-full mt-1 px-2 py-1.5 border border-indigo-200 bg-white rounded text-sm resize-none">${escapeHtml(co.description || '')}</textarea>
+          ${sBan('company_description', co.description)}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-indigo-800 block">Interne Notiz</label>
+          <textarea id="tcmCoNote" rows="2" class="w-full mt-1 px-2 py-1.5 border border-indigo-200 bg-white rounded text-sm resize-none">${escapeHtml(co.note || '')}</textarea>
+          ${sBan('company_note', co.note)}
+        </div>
+        <button id="tcmSaveCoBtn" type="button" onclick="_tcmSaveCompany(this)" ${ctx.savingCompany ? 'disabled' : ''} class="w-full mt-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+          <i data-lucide="${ctx.savingCompany ? 'loader-2' : 'save'}" class="w-4 h-4 ${ctx.savingCompany ? 'animate-spin' : ''}"></i> ${ctx.savingCompany ? 'Speichere…' : 'Firma in Freshdesk speichern'}
+        </button>
+      </div>
+    </div>` : (ctx.fd?.id ? `
+    <div class="bg-indigo-50 border border-indigo-200 rounded-2xl p-3">
+      <div class="flex items-center gap-2 mb-2">
+        <i data-lucide="building-2" class="w-4 h-4 text-indigo-700"></i>
+        <p class="text-sm font-semibold text-indigo-900">Keine Firma verknüpft</p>
+      </div>
+      <p class="text-[11px] text-ink-600 mb-2">Dieser Freshdesk-Kontakt hat noch keine Firma. Du kannst eine neue Firma in Freshdesk anlegen und mit dem Kontakt verknüpfen.</p>
+      <button id="tcmCreateCoBtn" type="button" onclick="_tcmCreateCompanyFromCtx(this)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg">
+        <i data-lucide="plus-circle" class="w-4 h-4"></i> Firma in Freshdesk anlegen
+      </button>
+    </div>` : '');
+
+  body.innerHTML = aiTop + erpBlock + fdBlock + fdCompanyBlock;
   if (window.lucide) lucide.createIcons();
 }
 
@@ -4781,12 +4875,14 @@ async function _tcmLoadSuggestions(force) {
     // Conversations für Signaturen + Verlauf
     let conv = [];
     try { conv = await freshdeskFetch('tickets/' + ctx.ticketId + '/conversations'); } catch (_) {}
-    const raw = await _tcmAiSuggest(ctx.fd, ctx.ticket, conv);
+    const raw = await _tcmAiSuggest(ctx.fd, ctx.fdCompany, ctx.ticket, conv);
     const norm = {};
-    ['name','email','phone','mobile','job_title','address'].forEach(f => {
+    ['name','email','phone','mobile','job_title','address',
+     'company_name','company_domains','company_industry','company_description','company_note'].forEach(f => {
       const s = raw?.[f];
-      if (s && s.value && String(s.value).trim()) {
-        norm[f] = { value: String(s.value).trim(), source: String(s.source || 'KI-Analyse').slice(0, 80), accepted: false };
+      if (s && s.value !== undefined && s.value !== null) {
+        const v = Array.isArray(s.value) ? s.value.filter(Boolean).join(', ') : String(s.value).trim();
+        if (v) norm[f] = { value: v, source: String(s.source || 'KI-Analyse').slice(0, 80), accepted: false };
       }
     });
     ctx.suggestions = norm;
@@ -4798,21 +4894,28 @@ async function _tcmLoadSuggestions(force) {
   }
 }
 
-async function _tcmAiSuggest(contact, ticket, conv) {
+async function _tcmAiSuggest(contact, company, ticket, conv) {
   const desc = _fdHtmlToText(ticket.description_text || ticket.description || '').slice(0, 2500);
   const convText = (Array.isArray(conv) ? conv : [])
     .slice().sort((a,b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
     .map(c => (c.private ? '[Notiz] ' : '') + (c.incoming ? 'Kunde' : 'Agent') + ': ' + _fdHtmlToText(c.body_text || c.body || '').slice(0, 1500))
     .join('\n\n');
-  const cur = {
+  const curContact = {
     name: contact.name || null, email: contact.email || null,
     phone: contact.phone || null, mobile: contact.mobile || null,
     job_title: contact.job_title || null, address: contact.address || null,
   };
-  const prompt = `Du extrahierst Kontaktdaten aus einem Helpdesk-Ticket. Analysiere Betreff, Anfragen, Konversation und vor allem EMAIL-SIGNATUREN am Ende von Nachrichten — die enthalten meist Name, Position, Firma, Telefonnummern, Adresse.
+  const curCompany = company ? {
+    name: company.name || null, domains: company.domains || [],
+    industry: company.industry || null, description: company.description || null, note: company.note || null,
+  } : null;
+  const prompt = `Du extrahierst Kontakt- UND Firmendaten aus einem Helpdesk-Ticket. Analysiere Betreff, Anfragen, Konversation und vor allem EMAIL-SIGNATUREN am Ende von Nachrichten — die enthalten meist Name, Position, Firma, Telefonnummern, Adresse, Domain.
 
 AKTUELLE KONTAKTDATEN (überschreibe nur wenn du wirklich bessere/präzisere Werte findest):
-${JSON.stringify(cur, null, 2)}
+${JSON.stringify(curContact, null, 2)}
+
+AKTUELLE FIRMENDATEN${curCompany ? ' (mit Kontakt verknüpft)' : ' (keine Firma verknüpft)'}:
+${JSON.stringify(curCompany, null, 2)}
 
 REGELN:
 - Schlage nur Werte vor, die du KLAR aus dem Text belegen kannst.
@@ -4820,15 +4923,22 @@ REGELN:
 - Telefonnummern bevorzugt im internationalen Format (+49 …) wenn erkennbar.
 - Bei Telefon: erkenne Festnetz vs Mobil (Mobil = +491XX, 015X, 016X, 017X bei Deutschland).
 - Adresse als ein zusammenhängender String mit Zeilenumbrüchen \\n (Straße, PLZ Ort, Land).
-- Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":"…","source":"woraus du es ablesen konntest, max 60 Zeichen"}.
+- Firma-Felder NUR vorschlagen wenn neue Info da ist oder bestehende klar verbessert werden.
+- Domains aus Email-Adressen ableiten (z.B. max@firma.de → "firma.de"). Mehrere als Array.
+- Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":…,"source":"woraus, max 60 Zeichen"}.
 
 JSON-FORMAT (Felder weglassen wenn unsicher):
 {
-  "name":      {"value": "...", "source": "Signatur in Email 2"},
-  "phone":     {"value": "+49 30 …", "source": "Footer Email 1"},
+  "name":      {"value": "...", "source": "Signatur"},
+  "phone":     {"value": "+49 30 …", "source": "..."},
   "mobile":    {"value": "+49 170 …", "source": "..."},
   "job_title": {"value": "...", "source": "..."},
-  "address":   {"value": "...", "source": "..."}
+  "address":   {"value": "...", "source": "..."},
+  "company_name":        {"value": "...", "source": "..."},
+  "company_domains":     {"value": ["firma.de"], "source": "Email-Domain"},
+  "company_industry":    {"value": "...", "source": "..."},
+  "company_description": {"value": "...", "source": "..."},
+  "company_note":        {"value": "...", "source": "..."}
 }
 
 TICKET:
@@ -4840,9 +4950,9 @@ ${desc}
 
 ${convText ? 'Verlauf:\n' + convText : ''}
 
-Welche Kontaktdaten kannst du sicher aus diesem Text extrahieren oder verbessern?`;
+Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text extrahieren oder verbessern?`;
 
-  const raw = await askAI(prompt, { purpose: 'tcmSuggest', maxTokens: 1500 });
+  const raw = await askAI(prompt, { purpose: 'tcmSuggest', maxTokens: 2000 });
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
   try { return JSON.parse(cleaned); }
   catch (_) {
@@ -4853,15 +4963,37 @@ Welche Kontaktdaten kannst du sicher aus diesem Text extrahieren oder verbessern
   }
 }
 
+// Schreibt einen Vorschlagswert in den passenden Slot (Contact oder Company)
+function _tcmApplySuggestion(field, value) {
+  const ctx = _tcmCtx;
+  if (!ctx) return;
+  if (field.startsWith('company_')) {
+    const f = field.replace(/^company_/, '');
+    ctx.fdCompany = ctx.fdCompany || {};
+    if (f === 'domains') {
+      ctx.fdCompany.domains = String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+    } else {
+      ctx.fdCompany[f] = value;
+    }
+  } else {
+    ctx.fd = ctx.fd || {};
+    ctx.fd[field] = value;
+  }
+}
+
 function _tcmAccept(field) {
   const ctx = _tcmCtx;
   const s = ctx?.suggestions?.[field];
   if (!s) return;
   _tcmSyncInputs();
-  ctx.fd[field] = s.value;
+  _tcmApplySuggestion(field, s.value);
   s.accepted = true;
   _tcmRender();
-  const map = { name:'tcmName', email:'tcmEmail', phone:'tcmPhone', mobile:'tcmMobile', job_title:'tcmJob', address:'tcmAddress' };
+  const map = {
+    name:'tcmName', email:'tcmEmail', phone:'tcmPhone', mobile:'tcmMobile', job_title:'tcmJob', address:'tcmAddress',
+    company_name:'tcmCoName', company_domains:'tcmCoDomains', company_industry:'tcmCoIndustry',
+    company_description:'tcmCoDesc', company_note:'tcmCoNote'
+  };
   setTimeout(() => {
     const el = document.getElementById(map[field]);
     if (el) {
@@ -4879,13 +5011,13 @@ function _tcmAcceptAll() {
   Object.keys(ctx.suggestions).forEach(f => {
     const s = ctx.suggestions[f];
     if (s && !s.accepted) {
-      ctx.fd[f] = s.value;
+      _tcmApplySuggestion(f, s.value);
       s.accepted = true;
       count++;
     }
   });
   _tcmRender();
-  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt unten „Im Freshdesk speichern"', 'success', 4000);
+  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt „Speichern" je Block', 'success', 4000);
 }
 
 async function _tcmSaveFd(btnEl) {
@@ -4924,6 +5056,78 @@ async function _tcmSaveFd(btnEl) {
     ctx.saving = false;
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Im Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
     toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+// Speichert die Freshdesk-Firma (PUT /api/v2/companies/{id})
+async function _tcmSaveCompany(btnEl) {
+  const ctx = _tcmCtx;
+  if (!ctx?.fdCompany?.id) return;
+  _tcmSyncInputs();
+  const co = ctx.fdCompany;
+  const fields = {
+    name:        (co.name || '').trim(),
+    note:        (co.note || '').trim() || null,
+    description: (co.description || '').trim() || null,
+    industry:    (co.industry || '').trim() || null,
+    domains:     Array.isArray(co.domains) ? co.domains : [],
+  };
+  if (!fields.name) return toast('Firmenname darf nicht leer sein', 'warn');
+  if (!APP_KEYS.proxyV2) return toast('Speichern benötigt Val.town-Proxy v2', 'error', 7000);
+  ctx.savingCompany = true;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    await proxyFetch('freshdesk/api/v2/companies/' + co.id, { method: 'PUT', body: fields });
+    _fdCompanyCache.delete(co.id);
+    // Contact-Cache aktualisieren (company_name kann sich geändert haben)
+    if (ctx.fd?.id) {
+      const cached = _fdContactCache.get(ctx.fd.id);
+      if (cached) { cached.company_name = fields.name; _fdContactCache.set(ctx.fd.id, cached); }
+    }
+    ctx.savingCompany = false;
+    toast('Freshdesk-Firma gespeichert', 'success', 3000);
+    _tcmRender();
+    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+  } catch (e) {
+    ctx.savingCompany = false;
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Firma in Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+  }
+}
+
+// Legt eine neue Freshdesk-Firma an (POST /api/v2/companies) und verknüpft sie mit dem Contact
+async function _tcmCreateCompanyFromCtx(btnEl) {
+  const ctx = _tcmCtx;
+  if (!ctx?.fd?.id) return;
+  _tcmSyncInputs();
+  // Default-Name aus Contact-Name oder Email-Domain ableiten
+  let defaultName = '';
+  if (ctx.fd.email && ctx.fd.email.includes('@')) {
+    const dom = ctx.fd.email.split('@')[1] || '';
+    defaultName = dom.replace(/\.[a-z]{2,}$/i, '').replace(/[-.]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+  const name = prompt('Firmenname in Freshdesk anlegen:', defaultName || '');
+  if (!name || !name.trim()) return;
+  if (!APP_KEYS.proxyV2) return toast('Anlegen benötigt Val.town-Proxy v2', 'error', 7000);
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // Domains aus Email ableiten
+    const domains = ctx.fd.email && ctx.fd.email.includes('@') ? [ctx.fd.email.split('@')[1]] : [];
+    const created = await proxyFetch('freshdesk/api/v2/companies', { method: 'POST', body: { name: name.trim(), domains } });
+    // Contact mit Firma verknüpfen
+    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: { company_id: created.id } });
+    // Lokal nachziehen
+    ctx.fd.company_id = created.id;
+    ctx.fdCompany = await _loadFdCompany(created.id, true);
+    _fdContactCache.delete(ctx.fd.id);
+    toast('Firma angelegt + verknüpft', 'success', 3000);
+    _tcmRender();
+    // KI-Suggestions neu laden, weil jetzt Company-Felder dazukommen
+    _tcmLoadSuggestions(true).catch(()=>{});
+    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+  } catch (e) {
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="plus-circle" class="w-4 h-4"></i> Firma in Freshdesk anlegen'; if (window.lucide) lucide.createIcons(); }
+    toast('Anlegen fehlgeschlagen: ' + e.message, 'error', 6000);
   }
 }
 
