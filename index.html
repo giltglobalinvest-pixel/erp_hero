@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.40';
+const APP_VERSION = 'v4.41';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1641,11 +1641,16 @@ async function _fsFindAccountByEmail(email) {
   const contact = full || c;
 
   // Verschiedene Property-Pfade prüfen (FS-API gibt mal Object-Array, mal ID-Array zurück)
+  console.log('[fsFindAccount] Contact-Properties:', Object.keys(contact || {}));
+  console.log('[fsFindAccount] sales_accounts raw:', contact?.sales_accounts, '| sales_accounts_ids:', contact?.sales_accounts_ids, '| sales_account_id:', contact?.sales_account_id);
   let accountId = null;
   const sa = contact?.sales_accounts;
   if (Array.isArray(sa) && sa.length) {
     const first = sa[0];
     accountId = (typeof first === 'object') ? first.id : first;
+  }
+  if (!accountId && Array.isArray(contact?.sales_accounts_ids) && contact.sales_accounts_ids[0]) {
+    accountId = contact.sales_accounts_ids[0];
   }
   if (!accountId) accountId = contact?.sales_account_id || contact?.primary_sales_account_id || null;
 
@@ -1775,22 +1780,46 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
   }
 
   // 3. Wenn Contact existiert aber keinem Sales Account zugeordnet → verknüpfen
+  //    Freshsales-Format variiert je nach Version → mehrere probieren bis eines klappt
   if (fsContact?.id && fsAccount?.id) {
     const sa = fsContact.sales_accounts;
     const hasLink = Array.isArray(sa) && sa.some(a => (typeof a === 'object' ? a.id : a) === fsAccount.id);
     if (!hasLink) {
       console.log('[fsPushFromFd] PUT contact', fsContact.id, '→ verknüpfen mit Sales Account', fsAccount.id);
-      try {
-        await proxyFetch('freshsales/api/contacts/' + fsContact.id, {
-          method: 'PUT',
-          body: { contact: { sales_accounts: [{ id: fsAccount.id, is_primary: true }] } }
-        });
-        // Cache invalidieren + nachladen
-        _fsContactCache.delete(fsContact.id);
-        fsContact = await _fsLoadContact(fsContact.id, true);
-      } catch (e) {
-        console.warn('[fsPushFromFd] Verknüpfung fehlgeschlagen:', e.message);
+      const tryBodies = [
+        { contact: { sales_accounts: [{ id: fsAccount.id, is_primary: true }] } },
+        { contact: { sales_account_id: fsAccount.id } },
+        { contact: { sales_accounts_ids: [fsAccount.id] } }
+      ];
+      let linked = false;
+      for (const body of tryBodies) {
+        try {
+          console.log('[fsPushFromFd] versuche Body:', body);
+          const res = await proxyFetch('freshsales/api/contacts/' + fsContact.id, { method: 'PUT', body });
+          console.log('[fsPushFromFd] PUT-Response:', res);
+          linked = true;
+          break;
+        } catch (e) {
+          console.warn('[fsPushFromFd] Body-Variante fehlgeschlagen:', e.message);
+        }
       }
+      if (!linked) {
+        // Letzter Versuch: dedizierte Association-API
+        try {
+          await proxyFetch('freshsales/api/contacts/' + fsContact.id + '/sales_accounts', {
+            method: 'POST',
+            body: { sales_account_id: fsAccount.id }
+          });
+          linked = true;
+        } catch (e) {
+          console.warn('[fsPushFromFd] Association-API auch fehlgeschlagen:', e.message);
+        }
+      }
+      _fsContactCache.delete(fsContact.id);
+      fsContact = await _fsLoadContact(fsContact.id, true);
+      console.log('[fsPushFromFd] Contact nach Reload:', fsContact);
+    } else {
+      console.log('[fsPushFromFd] Bereits verknüpft, kein PUT nötig');
     }
   }
   return { fsContact, fsAccount };
@@ -5298,7 +5327,12 @@ function _tcmRender() {
             <i data-lucide="arrow-right" class="w-4 h-4"></i> Aus Freshdesk in Freshsales anlegen
           </button>
         </div>
-        ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" class="text-xs px-2.5 py-1.5 border border-purple-300 hover:bg-purple-50 text-purple-700 rounded-lg inline-flex items-center gap-1.5"><i data-lucide="external-link" class="w-3 h-3"></i> Manuell in Freshsales öffnen</a>` : ''}
+        <div class="flex gap-2 flex-wrap mt-2">
+          <button type="button" onclick="_tcmReloadFs(this)" class="text-xs px-2.5 py-1.5 border border-purple-300 hover:bg-purple-50 text-purple-700 rounded-lg inline-flex items-center gap-1.5">
+            <i data-lucide="refresh-cw" class="w-3 h-3"></i> FS erneut suchen
+          </button>
+          ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" class="text-xs px-2.5 py-1.5 border border-purple-300 hover:bg-purple-50 text-purple-700 rounded-lg inline-flex items-center gap-1.5"><i data-lucide="external-link" class="w-3 h-3"></i> Manuell in Freshsales öffnen</a>` : ''}
+        </div>
       `}
     </div>` : '';
 
@@ -5775,6 +5809,32 @@ async function _tcmSaveCompany(btnEl) {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Firma in Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
     const msg = String(firstError?.message || firstError || 'Unbekannter Fehler');
     toast('Speichern fehlgeschlagen: ' + msg, 'error', 8000);
+  }
+}
+
+// Lädt FS-Account + FS-Contact frisch — Cache leeren + neue Suche
+async function _tcmReloadFs(btnEl) {
+  const ctx = _tcmCtx;
+  if (!ctx?.fd?.email) return toast('Kein Email-Adresse zum Suchen', 'warn');
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lade…'; if (window.lucide) lucide.createIcons(); }
+  // Caches leeren
+  _fsAccountCache.clear();
+  _fsContactCache.clear();
+  console.log('[tcmReloadFs] Suche frisch für', ctx.fd.email);
+  try {
+    const res = await _fsFindAccountByEmail(ctx.fd.email);
+    console.log('[tcmReloadFs] Ergebnis:', res);
+    ctx.fsContact = res?.fsContact || null;
+    ctx.fs = res?.fsAccount || null;
+    if (ctx.fs?.id) ctx.erpCustomers = await _findErpCustomersByFsAccountId(ctx.fs.id);
+    if (ctx.fs) toast('FS-Account gefunden: ' + (ctx.fs.name || '?'), 'success', 3000);
+    else if (ctx.fsContact) toast('FS-Contact gefunden, aber kein Sales-Account verknüpft', 'warn', 4500);
+    else toast('Kein FS-Datensatz für diese Email gefunden', 'info', 4000);
+    _tcmRender();
+  } catch (e) {
+    console.error('[tcmReloadFs] failed', e);
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="refresh-cw" class="w-3 h-3"></i> FS erneut suchen'; if (window.lucide) lucide.createIcons(); }
+    toast('Suche fehlgeschlagen: ' + (e.message || e), 'error', 6000);
   }
 }
 
