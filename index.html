@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.26';
+const APP_VERSION = 'v4.27';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5057,65 +5057,91 @@ async function _tcmSaveFd(btnEl) {
 
 // Speichert die Freshdesk-Firma (PUT /api/v2/companies/{id})
 async function _tcmSaveCompany(btnEl) {
-  console.log('[tcmSaveCompany] click', { ctx: _tcmCtx, btnEl });
+  console.log('[tcmSaveCompany] entered');
   const ctx = _tcmCtx;
-  if (!ctx) return toast('Modal-Kontext verloren — bitte Modal neu öffnen', 'error');
-  if (!ctx.fdCompany) return toast('Keine Firma geladen — bitte Modal neu öffnen', 'error');
-  if (!ctx.fdCompany.id) return toast('Firma hat keine ID — bitte Modal neu öffnen', 'error');
-  if (!APP_KEYS.proxyV2) return toast('Speichern benötigt Val.town-Proxy v2 (Admin → Einstellungen)', 'error', 7000);
-  _tcmSyncInputs();
-  const co = ctx.fdCompany;
-  console.log('[tcmSaveCompany] fdCompany after sync', co);
+  if (!ctx) { toast('Modal-Kontext verloren — bitte Modal neu öffnen', 'error'); return; }
+  // ID SOFORT in lokale Variable, bevor irgendwas anderes ctx.fdCompany ändern kann
+  const companyId = ctx.fdCompany?.id || ctx.fd?.company_id;
+  console.log('[tcmSaveCompany] companyId resolved as', companyId);
+  if (!companyId) { toast('Firma hat keine ID — bitte Modal neu öffnen', 'error'); return; }
+  if (!APP_KEYS.proxyV2) { toast('Speichern benötigt Val.town-Proxy v2 (Admin → Einstellungen)', 'error', 7000); return; }
+
+  // Sync mit Try-Catch
+  try { _tcmSyncInputs(); }
+  catch (syncErr) { console.error('[tcmSaveCompany] sync threw', syncErr); }
+
+  const co = ctx.fdCompany || {};
   const raw = {
     name:        String(co.name || '').trim(),
     note:        String(co.note || '').trim(),
     description: String(co.description || '').trim(),
     industry:    String(co.industry || '').trim(),
   };
-  if (!raw.name) return toast('Firmenname darf nicht leer sein', 'warn');
-  // Nur befüllte Felder; Domains nur wenn nicht-leer
+  if (!raw.name) { toast('Firmenname darf nicht leer sein', 'warn'); return; }
   const fields = {};
   Object.entries(raw).forEach(([k, v]) => { if (v) fields[k] = v; });
   if (Array.isArray(co.domains) && co.domains.length) fields.domains = co.domains;
-  console.log('[tcmSaveCompany] PUT body', fields);
+  console.log('[tcmSaveCompany] PUT', '/companies/' + companyId, fields);
+
   ctx.savingCompany = true;
   ctx.dirty = true;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
-  // Visueller Quick-Feedback dass der Click ankam
-  toast('Speichere Firma in Freshdesk…', 'info', 2000);
+  toast('Speichere Firma in Freshdesk…', 'info', 2500);
+
+  let saveOk = false;
+  let firstError = null;
+
+  // Schritt 1: PUT versuchen
   try {
-    const res = await proxyFetch('freshdesk/api/v2/companies/' + co.id, { method: 'PUT', body: fields });
-    console.log('[tcmSaveCompany] OK', res);
-    _fdCompanyCache.delete(co.id);
+    const res = await proxyFetch('freshdesk/api/v2/companies/' + companyId, { method: 'PUT', body: fields });
+    console.log('[tcmSaveCompany] PUT OK', res);
+    saveOk = true;
+  } catch (e) {
+    firstError = e;
+    console.error('[tcmSaveCompany] PUT FAILED', e);
+    // Null-body-204-Bug: PUT auf Freshdesk-Company gibt evtl. 204 zurück, Proxy stolpert
+    if (/null body status cannot have body/i.test(String(e?.message)) || /\b204\b/.test(String(e?.message))) {
+      console.log('[tcmSaveCompany] 204-Bug erkannt — verifiziere via GET');
+      try {
+        _fdCompanyCache.delete(companyId);
+        const verify = await _loadFdCompany(companyId, true);
+        console.log('[tcmSaveCompany] verify result', verify);
+        if (verify && String(verify.name || '').trim() === fields.name.trim()) {
+          saveOk = true;
+        }
+      } catch (verErr) {
+        console.error('[tcmSaveCompany] verify threw', verErr);
+      }
+    }
+  }
+
+  ctx.savingCompany = false;
+
+  if (saveOk) {
+    _fdCompanyCache.delete(companyId);
     if (ctx.fd?.id) {
       const cached = _fdContactCache.get(ctx.fd.id);
       if (cached) { cached.company_name = fields.name; _fdContactCache.set(ctx.fd.id, cached); }
     }
-    ctx.savingCompany = false;
-    // Frisch vom Server neu laden, damit das Modal die echten gespeicherten Werte zeigt
-    const refreshed = await _loadFdCompany(co.id, true).catch(()=>null);
-    if (refreshed) ctx.fdCompany = refreshed;
+    // Frisch nachladen, aber nur übernehmen wenn ID identisch
+    try {
+      const refreshed = await _loadFdCompany(companyId, true);
+      if (refreshed && refreshed.id === companyId) {
+        ctx.fdCompany = refreshed;
+      } else {
+        // Fallback: minimal Object mit unserer ID + gespeicherten Werten
+        ctx.fdCompany = Object.assign({}, ctx.fdCompany, fields, { id: companyId });
+      }
+    } catch (reloadErr) {
+      console.warn('[tcmSaveCompany] reload after success failed', reloadErr);
+      ctx.fdCompany = Object.assign({}, ctx.fdCompany, fields, { id: companyId });
+    }
     toast('Freshdesk-Firma gespeichert', 'success', 3000);
     _tcmRender();
-  } catch (e) {
-    console.error('[tcmSaveCompany] FAILED', e);
-    ctx.savingCompany = false;
+  } else {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Firma in Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
-    const m = String(e?.message || e || 'Unbekannter Fehler');
-    // Proxy null-body-Bug: trotzdem prüfen ob die Änderung durchging
-    if (/null body status cannot have body/i.test(m) || /\b204\b/.test(m)) {
-      _fdCompanyCache.delete(co.id);
-      const refreshed = await _loadFdCompany(co.id, true).catch(()=>null);
-      if (refreshed && String(refreshed.name).trim() === fields.name.trim()) {
-        ctx.fdCompany = refreshed;
-        toast('Firma gespeichert (Proxy-Warnung ignoriert)', 'success', 3000);
-        _tcmRender();
-        return;
-      }
-      toast('Speichern unklar: ' + m + ' — bitte Modal schließen + neu öffnen', 'warn', 7000);
-      return;
-    }
-    toast('Speichern fehlgeschlagen: ' + m, 'error', 7000);
+    const msg = String(firstError?.message || firstError || 'Unbekannter Fehler');
+    toast('Speichern fehlgeschlagen: ' + msg, 'error', 8000);
   }
 }
 
