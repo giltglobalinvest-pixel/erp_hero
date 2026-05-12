@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.31';
+const APP_VERSION = 'v4.32';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5241,14 +5241,40 @@ async function _tcmCreateCompanyFromCtx(btnEl) {
 
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
   try {
-    const created = await proxyFetch('freshdesk/api/v2/companies', { method: 'POST', body: { name: name.trim(), domains } });
-    if (!created?.id) throw new Error('Freshdesk hat keine Company-ID zurückgegeben');
-    // Contact mit Firma verknüpfen
-    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: { company_id: created.id } });
+    let createdId = null;
+    let reusedExisting = false;
+    try {
+      const created = await proxyFetch('freshdesk/api/v2/companies', { method: 'POST', body: { name: name.trim(), domains } });
+      if (!created?.id) throw new Error('Freshdesk hat keine Company-ID zurückgegeben');
+      createdId = created.id;
+    } catch (postErr) {
+      // 409: Name nicht eindeutig — Freshdesk gibt die existierende company_id in additional_info mit
+      const m = String(postErr?.message || '');
+      const idMatch = m.match(/"company_id"\s*:\s*(\d+)/);
+      const isDup = /409/.test(m) && /duplicate_value|not unique/i.test(m);
+      if (isDup && idMatch) {
+        createdId = Number(idMatch[1]);
+        reusedExisting = true;
+        console.log('[tcmCreate] Firma existiert bereits in FD — nutze ID', createdId);
+      } else if (isDup) {
+        // Fallback: Suche nach Name via /api/v2/search/companies
+        try {
+          const q = encodeURIComponent(`"${name.trim().replace(/"/g, '\\"')}"`);
+          const search = await proxyFetch('freshdesk/api/v2/search/companies?query=' + q);
+          const hit = (search?.results || search?.companies || []).find(c => String(c.name || '').trim().toLowerCase() === name.trim().toLowerCase());
+          if (hit?.id) { createdId = hit.id; reusedExisting = true; }
+        } catch (_) {}
+        if (!createdId) throw postErr;
+      } else {
+        throw postErr;
+      }
+    }
+    // Contact mit Firma verknüpfen (egal ob neu oder existierend)
+    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: { company_id: createdId } });
     // Lokal nachziehen
-    ctx.fd.company_id = created.id;
-    const fresh = await _loadFdCompany(created.id, true);
-    ctx.fdCompany = fresh || { id: created.id, name: name.trim(), domains, description: '', note: '', industry: '' };
+    ctx.fd.company_id = createdId;
+    const fresh = await _loadFdCompany(createdId, true);
+    ctx.fdCompany = fresh || { id: createdId, name: name.trim(), domains, description: '', note: '', industry: '' };
     _fdContactCache.delete(ctx.fd.id);
     ctx.dirty = true;
 
@@ -5267,10 +5293,11 @@ async function _tcmCreateCompanyFromCtx(btnEl) {
 
     _tcmRender();
 
+    const verb = reusedExisting ? 'verknüpft (existierte bereits)' : 'angelegt + verknüpft';
     if (autoCount) {
-      toast('Firma angelegt + ' + autoCount + ' KI-Vorschlag' + (autoCount===1?'':'e') + ' übernommen — jetzt „Firma speichern" tippen', 'success', 5500);
+      toast('Firma ' + verb + ' + ' + autoCount + ' KI-Vorschlag' + (autoCount===1?'':'e') + ' übernommen — jetzt „Firma speichern"', 'success', 5500);
     } else {
-      toast('Firma angelegt + verknüpft', 'success', 3000);
+      toast('Firma ' + verb, 'success', 3500);
     }
   } catch (e) {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="plus-circle" class="w-4 h-4"></i> Firma in Freshdesk anlegen'; if (window.lucide) lucide.createIcons(); }
