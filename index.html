@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.29';
+const APP_VERSION = 'v4.30';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4643,8 +4643,7 @@ async function openTicketContactModal(ticketId) {
       try { _tcmCtx.erp = await _findCustomerContactByEmail(_tcmCtx.fd.email); } catch (_) {}
     }
     _tcmRender();
-    // KI-Suggestions im Hintergrund
-    _tcmLoadSuggestions().catch(e => console.warn('Suggestions failed:', e.message));
+    // KI-Suggestions NICHT automatisch starten — User klickt selbst „Analysieren" wenn er sie braucht.
   } catch (e) {
     const body = document.getElementById('tcmBody');
     if (body) body.innerHTML = `<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">Fehler: ${escapeHtml(e.message || 'Laden fehlgeschlagen')}</div>`;
@@ -4727,7 +4726,7 @@ function _tcmRender() {
                   : (suggAccepted > 0
                     ? `<p class="text-[11px] text-emerald-700"><i data-lucide="check-circle-2" class="w-3 h-3 inline"></i> ${suggAccepted} Vorschlag${suggAccepted===1?'':'e'} übernommen — jetzt unten „Im Freshdesk speichern" tippen.</p>`
                     : `<p class="text-[11px] text-emerald-700">Alle Felder sehen gut aus — keine Vervollständigung nötig.</p>`))
-                : `<p class="text-[11px] text-ink-500">Vorschläge aus Ticket-Kontext werden generiert…</p>`}
+                : `<p class="text-[11px] text-ink-600">Klick „Analysieren" — die KI liest Betreff, Anfragen und Email-Signaturen und schlägt Werte für leere/unsichere Felder vor.</p>`}
         </div>
         ${!ctx.suggestionsLoading ? `
           <div class="flex flex-col gap-1 shrink-0">
