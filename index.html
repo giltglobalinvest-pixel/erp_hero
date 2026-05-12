@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.33';
+const APP_VERSION = 'v4.34';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10706,6 +10706,168 @@ function _renderAiCostsAggCard(title, icon, entries) {
     </div>`;
 }
 
+/* ============================================================
+   FRESHSALES CUSTOM FIELDS · Status-Check + Auto-Setup-Versuch
+   ============================================================
+   Erwartete Felder am Sales Account (für ERP-Integration).
+   FS prefixt Custom Fields intern oft mit "cf_" → wir prüfen beide Varianten.
+*/
+const FS_REQUIRED_CUSTOM_FIELDS = [
+  { apiName: 'erp_customer_no',  label: 'Kundennummer ERP',  hint: 'K-1042 etc.',          example: 'K-1042' },
+  { apiName: 'vat_id',           label: 'USt-IdNr',          hint: 'DE123456789',          example: 'DE123456789' },
+  { apiName: 'payment_terms',    label: 'Zahlungsziel',      hint: '14 Tage netto',        example: '14 Tage netto' },
+  { apiName: 'delivery_terms',   label: 'Lieferbedingungen', hint: 'EXW Fellbach',         example: 'EXW Fellbach' },
+  { apiName: 'erp_mandant',      label: 'Mandant',           hint: 'FLP Lift Parts GmbH',  example: 'FLP Lift Parts GmbH' }
+];
+
+let _fsCustomFieldsStatus = null;   // Cache: { fieldName: 'ok' | 'missing' | 'unknown' }
+
+// Status pro Feld prüfen — versucht erst /settings/forms/sales_account, fällt zurück auf
+// das Auslesen eines beliebigen Sales-Accounts und schaut in dessen custom_field-Property.
+async function _fsCheckCustomFieldsStatus(force) {
+  if (!force && _fsCustomFieldsStatus) return _fsCustomFieldsStatus;
+  if (!APP_KEYS.freshsalesSubdomain) {
+    _fsCustomFieldsStatus = { _error: 'Freshsales nicht konfiguriert (Step 9 zuerst)' };
+    return _fsCustomFieldsStatus;
+  }
+  const status = {};
+  FS_REQUIRED_CUSTOM_FIELDS.forEach(f => { status[f.apiName] = 'unknown'; });
+
+  // Strategie 1: Settings/Selector/Form-Definition holen
+  const tryEndpoints = [
+    'freshsales/api/settings/forms/sales_account',
+    'freshsales/api/selector/sales_account',
+    'freshsales/api/admin/forms/sales_account'
+  ];
+  let formData = null;
+  for (const ep of tryEndpoints) {
+    try {
+      const res = await proxyFetch(ep);
+      if (res) { formData = res; break; }
+    } catch (_) { /* try next */ }
+  }
+  if (formData) {
+    // Verschiedene FS-Versionen geben unterschiedliche Strukturen zurück
+    const allFields = (formData.fields || formData.form?.fields || formData.lookup_fields || []);
+    const names = new Set();
+    allFields.forEach(f => {
+      const n = String(f.name || f.api_name || f.field_name || '');
+      if (n) names.add(n.toLowerCase());
+      const ln = String(f.label || f.display_label || '').toLowerCase();
+      if (ln) names.add(ln);
+    });
+    FS_REQUIRED_CUSTOM_FIELDS.forEach(f => {
+      const variants = [f.apiName.toLowerCase(), 'cf_' + f.apiName.toLowerCase(), f.label.toLowerCase()];
+      status[f.apiName] = variants.some(v => names.has(v)) ? 'ok' : 'missing';
+    });
+    _fsCustomFieldsStatus = status;
+    return status;
+  }
+
+  // Strategie 2: Fallback — einen Sales Account holen + custom_field property untersuchen
+  try {
+    const lookup = await proxyFetch('freshsales/api/lookup?q=*&f=name&entities=sales_account&limit=1');
+    const acc = (lookup?.sales_accounts?.sales_accounts || lookup?.sales_accounts || lookup?.accounts || []);
+    let sample = Array.isArray(acc) && acc.length ? acc[0] : null;
+    if (sample?.id) {
+      const detail = await proxyFetch('freshsales/api/sales_accounts/' + sample.id);
+      const acct = detail?.sales_account || detail;
+      const cf = acct?.custom_field || acct?.custom_fields || {};
+      const names = new Set(Object.keys(cf).map(k => k.toLowerCase()));
+      FS_REQUIRED_CUSTOM_FIELDS.forEach(f => {
+        const variants = [f.apiName.toLowerCase(), 'cf_' + f.apiName.toLowerCase()];
+        status[f.apiName] = variants.some(v => names.has(v)) ? 'ok' : 'missing';
+      });
+      _fsCustomFieldsStatus = status;
+      return status;
+    }
+  } catch (e) {
+    console.warn('[fsCheck] fallback lookup failed', e.message);
+  }
+
+  // Strategie 3: Konnten nicht entscheiden → alle als unknown lassen
+  _fsCustomFieldsStatus = status;
+  return status;
+}
+
+// Versucht ein Custom Field via Settings-API anzulegen.
+// Bei Growth-Plan oft nicht möglich (403/404) — Caller muss graceful handeln.
+async function _fsCreateCustomField(field) {
+  const tryEndpoints = [
+    {
+      path: 'freshsales/api/settings/sales_accounts/fields',
+      body: { field: { name: field.apiName, label: field.label, type: 'text' } }
+    },
+    {
+      path: 'freshsales/api/admin/sales_accounts/fields',
+      body: { custom_field: { name: field.apiName, label: field.label, field_type: 'custom_text' } }
+    }
+  ];
+  let lastErr = null;
+  for (const attempt of tryEndpoints) {
+    try {
+      const res = await proxyFetch(attempt.path, { method: 'POST', body: attempt.body });
+      if (res) return { ok: true, via: attempt.path };
+    } catch (e) {
+      lastErr = e;
+      // Bei 4xx anderen als 404 ggf. weiter probieren, sonst exit
+      if (!/404|405|not.?allowed/i.test(String(e?.message))) {
+        // 403 oder Validation — vermutlich vom Plan blockiert
+        break;
+      }
+    }
+  }
+  return { ok: false, error: lastErr };
+}
+
+// Wird im Settings-Step 10 vom Auto-Setup-Button aufgerufen.
+async function fsAutoSetupCustomFields(btnEl) {
+  if (!APP_KEYS.freshsalesSubdomain) return toast('Bitte erst Step 9 (Freshsales-Subdomain) konfigurieren', 'warn', 6000);
+  if (!APP_KEYS.proxyV2) return toast('Setup benötigt Val.town-Proxy v2', 'error', 7000);
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
+  toast('Versuche Custom-Fields per API anzulegen…', 'info', 2500);
+  const status = await _fsCheckCustomFieldsStatus(true);
+  const missing = FS_REQUIRED_CUSTOM_FIELDS.filter(f => status[f.apiName] !== 'ok');
+  if (!missing.length) {
+    toast('Alle Custom-Fields sind bereits vorhanden ✓', 'success', 3500);
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="zap" class="w-4 h-4"></i> Automatisch anlegen'; if (window.lucide) lucide.createIcons(); }
+    renderAdminSettings();
+    return;
+  }
+  let okCount = 0, failCount = 0, lastErr = null;
+  for (const f of missing) {
+    const res = await _fsCreateCustomField(f);
+    if (res.ok) okCount++; else { failCount++; lastErr = res.error; }
+  }
+  // Status neu prüfen
+  _fsCustomFieldsStatus = null;
+  await _fsCheckCustomFieldsStatus(true);
+  if (failCount === 0) {
+    toast('Alle ' + okCount + ' Custom-Fields angelegt ✓', 'success', 4000);
+  } else if (okCount > 0) {
+    toast(okCount + ' angelegt, ' + failCount + ' nicht möglich — bitte manuell anlegen', 'warn', 6000);
+  } else {
+    const m = String(lastErr?.message || '');
+    if (/403|forbidden/i.test(m)) {
+      toast('Freshsales-Plan (Growth) erlaubt kein Field-Management per API. Bitte manuell in FS-Admin anlegen.', 'warn', 7000);
+    } else if (/404|405/i.test(m)) {
+      toast('Freshsales-API-Endpoint nicht verfügbar. Bitte manuell in FS-Admin anlegen.', 'warn', 7000);
+    } else {
+      toast('Auto-Setup nicht möglich: ' + (m || 'Unbekannter Fehler') + '. Bitte manuell anlegen.', 'warn', 8000);
+    }
+  }
+  if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="zap" class="w-4 h-4"></i> Erneut versuchen'; if (window.lucide) lucide.createIcons(); }
+  renderAdminSettings();
+}
+
+async function fsRecheckCustomFields(btnEl) {
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Prüfe…'; if (window.lucide) lucide.createIcons(); }
+  _fsCustomFieldsStatus = null;
+  await _fsCheckCustomFieldsStatus(true);
+  if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu prüfen'; if (window.lucide) lucide.createIcons(); }
+  renderAdminSettings();
+}
+
 async function renderAdminSettings() {
   setPageTitle('Einstellungen');
   if (!APP_KEYS.user?.is_admin) {
@@ -10965,6 +11127,88 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
                 <i data-lucide="activity" class="w-3.5 h-3.5"></i> Verbindung testen
               </button>` : ''}
             </div>
+          </div>
+        </div>`;
+      })()}
+
+      <!-- ============ STEP 10 — Freshsales Custom Fields (für ERP-Sync) ============ -->
+      ${(() => {
+        const fsDomain = APP_KEYS.freshsalesSubdomain || '';
+        if (!fsDomain) return '';   // Step 10 nur anzeigen wenn Step 9 erledigt
+        const st = _fsCustomFieldsStatus || {};
+        const okCount   = FS_REQUIRED_CUSTOM_FIELDS.filter(f => st[f.apiName] === 'ok').length;
+        const missCount = FS_REQUIRED_CUSTOM_FIELDS.filter(f => st[f.apiName] === 'missing').length;
+        const unkCount  = FS_REQUIRED_CUSTOM_FIELDS.filter(f => st[f.apiName] === 'unknown' || !st[f.apiName]).length;
+        const total = FS_REQUIRED_CUSTOM_FIELDS.length;
+        const allOk = okCount === total;
+        const statusBadgeText = allOk ? '✓ alle ' + total + ' OK' : (missCount ? missCount + ' fehlen' : 'noch nicht geprüft');
+        const statusBadgeColor = allOk ? 'bg-emerald-100 text-emerald-700' : (missCount ? 'bg-amber-100 text-amber-700' : 'bg-ink-100 text-ink-600');
+        const fsAdminUrl = 'https://' + fsDomain + '.freshworks.com/crm/sales/admin/business-process/sales_accounts/fields';
+        return `
+        <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+          ${stepHeader(10, 'Freshsales Custom Fields (ERP-Integration)', '<span class="text-[10px] uppercase tracking-wider ' + statusBadgeColor + ' px-1.5 py-0.5 rounded font-semibold">' + statusBadgeText + '</span>')}
+          <div class="pl-11">
+            <p class="text-sm text-ink-700 mb-2">Damit ERP-Daten (Kundennummer, USt-IdNr, Zahlungsziel, Lieferbedingungen, Mandant) im Freshsales-Sales-Account gespeichert werden können, brauchen wir 5 Custom Fields.</p>
+
+            <!-- Status-Liste -->
+            <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-3">
+              <ul class="space-y-1.5">
+                ${FS_REQUIRED_CUSTOM_FIELDS.map(f => {
+                  const s = st[f.apiName] || 'unknown';
+                  const icon = s === 'ok' ? '<i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-600"></i>'
+                             : s === 'missing' ? '<i data-lucide="x-circle" class="w-4 h-4 text-amber-600"></i>'
+                             : '<i data-lucide="help-circle" class="w-4 h-4 text-ink-400"></i>';
+                  const stText = s === 'ok' ? '<span class="text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold">OK</span>'
+                              : s === 'missing' ? '<span class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-semibold">fehlt</span>'
+                              : '<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded">unbekannt</span>';
+                  return `<li class="flex items-center gap-2 text-xs">
+                    ${icon}
+                    <code class="font-mono text-ink-900">${escapeHtml(f.apiName)}</code>
+                    <span class="text-ink-500">→ „${escapeHtml(f.label)}"</span>
+                    <span class="ml-auto">${stText}</span>
+                  </li>`;
+                }).join('')}
+              </ul>
+            </div>
+
+            <div class="flex gap-2 flex-wrap mb-3">
+              <button type="button" onclick="fsAutoSetupCustomFields(this)" class="bg-purple-600 hover:bg-purple-700 text-white rounded-lg px-3 py-2 text-sm font-medium inline-flex items-center gap-1.5">
+                <i data-lucide="zap" class="w-4 h-4"></i> ${allOk ? 'Bereits alle OK' : 'Automatisch anlegen'}
+              </button>
+              <button type="button" onclick="fsRecheckCustomFields(this)" class="border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg px-3 py-2 text-xs inline-flex items-center gap-1.5">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu prüfen
+              </button>
+              <a href="${escapeHtml(fsAdminUrl)}" target="_blank" rel="noopener" class="border border-ink-200 hover:bg-ink-50 text-ink-700 rounded-lg px-3 py-2 text-xs inline-flex items-center gap-1.5">
+                <i data-lucide="external-link" class="w-3.5 h-3.5"></i> FS-Admin öffnen
+              </a>
+            </div>
+
+            <!-- Manuelle Anleitung (immer sichtbar — falls Auto-Setup nicht klappt) -->
+            <details class="bg-blue-50 border border-blue-200 rounded-lg p-3" ${allOk ? '' : 'open'}>
+              <summary class="cursor-pointer text-sm font-semibold text-blue-900 select-none">📋 Manuelle Anleitung (für Growth-Plan, falls Auto-Setup nicht funktioniert)</summary>
+              <div class="mt-2 text-[12px] text-blue-900 space-y-2">
+                <p><strong>So legst du die Custom Fields in Freshsales selbst an:</strong></p>
+                <ol class="list-decimal pl-5 space-y-1">
+                  <li>FS-Admin öffnen (Button oben rechts „FS-Admin öffnen") oder via Freshsales → <strong>Settings → Sales Accounts → Fields</strong></li>
+                  <li>Pro Feld unten: rechts oben <strong>„+ Create custom field"</strong> klicken</li>
+                  <li>Pro Feld: <strong>Type = „Single-line Text"</strong>, dann Label + API-Name eintragen (siehe Tabelle unten):</li>
+                </ol>
+                <table class="text-[11px] mt-2 w-full bg-white border border-blue-200 rounded">
+                  <thead class="bg-blue-100">
+                    <tr><th class="px-2 py-1 text-left">Label (zeigen)</th><th class="px-2 py-1 text-left">API Name (intern)</th><th class="px-2 py-1 text-left">Beispiel</th></tr>
+                  </thead>
+                  <tbody>
+                    ${FS_REQUIRED_CUSTOM_FIELDS.map(f => `<tr class="border-t border-blue-100">
+                      <td class="px-2 py-1">${escapeHtml(f.label)}</td>
+                      <td class="px-2 py-1"><code class="bg-blue-50 px-1 rounded">${escapeHtml(f.apiName)}</code></td>
+                      <td class="px-2 py-1 text-ink-600">${escapeHtml(f.example)}</td>
+                    </tr>`).join('')}
+                  </tbody>
+                </table>
+                <p class="text-[10px] text-ink-500 italic">Hinweis: FS prefixt API-Namen intern oft mit <code>cf_</code>. Unser Code erkennt beide Varianten automatisch.</p>
+                <p class="text-[10px] mt-2">Wenn fertig: oben „Neu prüfen" klicken — Status sollte auf ✓ springen.</p>
+              </div>
+            </details>
           </div>
         </div>`;
       })()}
