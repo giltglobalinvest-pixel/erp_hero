@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.35';
+const APP_VERSION = 'v4.36';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1570,6 +1570,86 @@ async function _loadFdContact(contactId) {
     console.warn('[Contact-Cache] ' + contactId + ':', e.message);
     return null;
   }
+}
+
+/* ============================================================
+   FRESHSALES Helper · Account + Contact laden/speichern
+   ============================================================ */
+const _fsAccountCache = new Map();   // accountId → account-Object
+const _fsContactCache = new Map();   // contactId → contact-Object
+
+async function _fsLoadAccount(accountId, force) {
+  if (!accountId) return null;
+  if (!force && _fsAccountCache.has(accountId)) return _fsAccountCache.get(accountId);
+  if (!APP_KEYS.freshsalesSubdomain) return null;
+  try {
+    const res = await proxyFetch('freshsales/api/sales_accounts/' + accountId);
+    const acc = res?.sales_account || res || null;
+    if (acc) _fsAccountCache.set(accountId, acc);
+    return acc;
+  } catch (e) {
+    console.warn('[fsLoadAccount] ' + accountId + ':', e.message);
+    return null;
+  }
+}
+
+async function _fsLoadContact(contactId, force) {
+  if (!contactId) return null;
+  if (!force && _fsContactCache.has(contactId)) return _fsContactCache.get(contactId);
+  if (!APP_KEYS.freshsalesSubdomain) return null;
+  try {
+    const res = await proxyFetch('freshsales/api/contacts/' + contactId);
+    const c = res?.contact || res || null;
+    if (c) _fsContactCache.set(contactId, c);
+    return c;
+  } catch (e) {
+    console.warn('[fsLoadContact] ' + contactId + ':', e.message);
+    return null;
+  }
+}
+
+async function _fsFindContactByEmail(email) {
+  if (!email || !APP_KEYS.freshsalesSubdomain) return null;
+  try {
+    const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(email) + '&f=email&entities=contact');
+    const cands = (Array.isArray(lookup?.contacts?.contacts) ? lookup.contacts.contacts : null)
+      || (Array.isArray(lookup?.contacts) ? lookup.contacts : null) || [];
+    const exact = cands.find(c => String(c.email || '').toLowerCase() === email.toLowerCase());
+    const found = exact || cands[0] || null;
+    return found?.id ? found : null;
+  } catch (e) {
+    console.warn('[fsFindContactByEmail]', e.message);
+    return null;
+  }
+}
+
+// Findet FS-Sales-Account für eine Email (über FS-Contact → sales_account_id)
+async function _fsFindAccountByEmail(email) {
+  const c = await _fsFindContactByEmail(email);
+  if (!c) return null;
+  // Contact-Lookup gibt evtl. nur die Basis-Felder zurück → für sales_account_id den vollen Contact ziehen
+  const full = await _fsLoadContact(c.id, true);
+  const accountId = full?.sales_accounts?.[0]?.id || full?.sales_account_id || c?.sales_accounts?.[0]?.id;
+  if (!accountId) return { fsContact: full || c, fsAccount: null };
+  const account = await _fsLoadAccount(accountId, true);
+  return { fsContact: full || c, fsAccount: account };
+}
+
+// Liefert ERP-Customer-Records mit verknüpfter FS-Account-ID — gruppiert pro Mandant
+async function _findErpCustomersByFsAccountId(fsAccountId) {
+  if (!fsAccountId) return [];
+  try {
+    const customers = await readData('Customer');
+    return customers.filter(c => String(c?.fields?.freshsales_account_id || '') === String(fsAccountId));
+  } catch (_) { return []; }
+}
+
+// Listet alle aktiven ERP-Mandanten (= Companies in Airtable)
+async function _listActiveMandants() {
+  try {
+    const companies = await readData('Company');
+    return companies.filter(c => !c?.fields?.archived).sort((a, b) => (a?.fields?.name || '').localeCompare(b?.fields?.name || '', 'de'));
+  } catch (_) { return []; }
 }
 
 // Freshdesk-Standard-Industries (Enum-Liste — Freitext wird mit 400 abgelehnt)
@@ -4602,12 +4682,16 @@ async function _aiCmdExecute(ticketId, actions) {
    - "Im Freshdesk speichern" (PUT /api/v2/contacts/{id})
    - ERP-Block: Status mit Kundennummer + Anlegen/Öffnen
 */
-let _tcmCtx = null;  // { ticketId, ticket, fd, fdCompany, erp, suggestions, suggestionsLoading, suggestionsError, saving, savingCompany }
+let _tcmCtx = null;  // { ticketId, ticket, fd, fdCompany, fs, fsContact, mandants, erpCustomers, erp, suggestions, ... }
 
 async function openTicketContactModal(ticketId) {
   if (!ticketId) return;
   _tcmCtx = {
-    ticketId, ticket: null, fd: null, fdCompany: null, erp: null,
+    ticketId, ticket: null,
+    fd: null, fdCompany: null,
+    fs: null, fsContact: null,            // FS-Sales-Account + FS-Contact
+    mandants: [], erpCustomers: [],       // alle aktiven Mandanten + alle ERP-Customer-Records die auf FS verlinken
+    erp: null,
     suggestions: null, suggestionsLoading: false, suggestionsError: null,
     saving: false, savingCompany: false
   };
@@ -4654,7 +4738,21 @@ async function openTicketContactModal(ticketId) {
     if (_tcmCtx.fd.email) {
       try { _tcmCtx.erp = await _findCustomerContactByEmail(_tcmCtx.fd.email); } catch (_) {}
     }
+    // Mandanten-Liste (für Multi-Select) parallel laden
+    _listActiveMandants().then(list => { _tcmCtx.mandants = list; _tcmRender(); }).catch(() => {});
     _tcmRender();
+    // Freshsales-Daten im Hintergrund laden (Email → Contact → Account)
+    if (APP_KEYS.freshsalesSubdomain && _tcmCtx.fd.email) {
+      _fsFindAccountByEmail(_tcmCtx.fd.email).then(async (res) => {
+        _tcmCtx.fsContact = res?.fsContact || null;
+        _tcmCtx.fs = res?.fsAccount || null;
+        // ERP-Customer-Records die auf diese FS-ID verlinken
+        if (_tcmCtx.fs?.id) {
+          _tcmCtx.erpCustomers = await _findErpCustomersByFsAccountId(_tcmCtx.fs.id);
+        }
+        _tcmRender();
+      }).catch(e => console.warn('[tcm] FS-Load fehlgeschlagen:', e.message));
+    }
     // KI-Suggestions NICHT automatisch starten — User klickt selbst „Analysieren" wenn er sie braucht.
   } catch (e) {
     const body = document.getElementById('tcmBody');
@@ -4896,7 +4994,95 @@ function _tcmRender() {
     </div>`;
     })() : '');
 
-  body.innerHTML = aiTop + erpBlock + fdBlock + fdCompanyBlock;
+  // Freshsales-Sales-Account-Block (Master) — read-only Anzeige + Link zum FS-Editor (kommt in v4.37+)
+  const fs = ctx.fs || null;
+  const fsContact = ctx.fsContact || null;
+  const fsUrl = APP_KEYS.freshsalesSubdomain && fs?.id ? 'https://' + APP_KEYS.freshsalesSubdomain + '.freshworks.com/crm/sales/sales_accounts/' + fs.id : '';
+  const fsContactUrl = APP_KEYS.freshsalesSubdomain && fsContact?.id ? 'https://' + APP_KEYS.freshsalesSubdomain + '.freshworks.com/crm/sales/contacts/' + fsContact.id : '';
+  const fsCustomFields = fs?.custom_field || fs?.custom_fields || {};
+  const fsGetCf = (apiName) => fsCustomFields[apiName] ?? fsCustomFields['cf_' + apiName] ?? '';
+  const fsBlock = APP_KEYS.freshsalesSubdomain ? `
+    <div class="bg-white border-2 border-purple-300 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="briefcase" class="w-4 h-4 text-purple-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshsales-Sales-Account <span class="text-[10px] text-purple-700 font-normal normal-case">(Master)</span></h3>
+        ${fs?.id ? `<span class="ml-auto text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">FS #${fs.id}</span>` : '<span class="ml-auto text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">nicht verknüpft</span>'}
+      </div>
+      ${fs ? `
+        <div class="space-y-2 text-xs">
+          <div class="grid grid-cols-2 gap-2">
+            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Firma</p><p class="text-ink-900 font-medium">${escapeHtml(fs.name || '–')}</p></div>
+            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Branche</p><p class="text-ink-900">${escapeHtml(fs.industry_type?.name || fs.industry_type_id || '–')}</p></div>
+            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Telefon</p><p class="text-ink-900 font-mono">${escapeHtml(fs.phone || '–')}</p></div>
+            <div><p class="text-[10px] uppercase font-semibold text-purple-800">Website</p><p class="text-ink-900 truncate">${escapeHtml(fs.website || '–')}</p></div>
+            <div class="col-span-2"><p class="text-[10px] uppercase font-semibold text-purple-800">Anschrift</p><p class="text-ink-900">${escapeHtml([fs.address, [fs.zipcode, fs.city].filter(Boolean).join(' '), fs.country].filter(Boolean).join(' · ') || '–')}</p></div>
+          </div>
+          <div class="border-t border-purple-100 pt-2 mt-2">
+            <p class="text-[10px] uppercase font-semibold text-purple-800 mb-1">ERP-Custom-Fields</p>
+            <div class="grid grid-cols-2 gap-2 text-[11px]">
+              <div><span class="text-ink-500">Kundennr:</span> <span class="font-mono">${escapeHtml(fsGetCf('erp_customer_no') || '–')}</span></div>
+              <div><span class="text-ink-500">USt-IdNr:</span> <span class="font-mono">${escapeHtml(fsGetCf('vat_id') || '–')}</span></div>
+              <div><span class="text-ink-500">Zahlungsziel:</span> ${escapeHtml(fsGetCf('payment_terms') || '–')}</div>
+              <div><span class="text-ink-500">Lieferbed.:</span> ${escapeHtml(fsGetCf('delivery_terms') || '–')}</div>
+              <div class="col-span-2"><span class="text-ink-500">Mandant:</span> ${escapeHtml(fsGetCf('erp_mandant') || '–')}</div>
+            </div>
+          </div>
+          <div class="flex gap-2 mt-3 flex-wrap">
+            ${fsUrl ? `<a href="${escapeHtml(fsUrl)}" target="_blank" rel="noopener" class="text-xs px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg inline-flex items-center gap-1.5"><i data-lucide="external-link" class="w-3.5 h-3.5"></i> In Freshsales öffnen</a>` : ''}
+            <span class="text-[10px] text-ink-500 italic self-center">Editor + Auto-Push folgt in v4.37</span>
+          </div>
+        </div>
+      ` : `
+        <p class="text-xs text-ink-600 mb-2">Kein Freshsales-Sales-Account mit der Email <code>${escapeHtml(ctx.fd?.email || '?')}</code> gefunden.</p>
+        <p class="text-[11px] text-ink-500 italic">Editor zum Anlegen folgt in v4.37.</p>
+      `}
+    </div>` : '';
+
+  const fsContactBlock = (APP_KEYS.freshsalesSubdomain && fsContact) ? `
+    <div class="bg-white border-2 border-purple-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="user-square" class="w-4 h-4 text-purple-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshsales-Contact <span class="text-[10px] text-purple-700 font-normal normal-case">(Master)</span></h3>
+        <span class="ml-auto text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">FS #${fsContact.id}</span>
+      </div>
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div><p class="text-[10px] uppercase font-semibold text-purple-800">Vorname</p><p class="text-ink-900">${escapeHtml(fsContact.first_name || '–')}</p></div>
+        <div><p class="text-[10px] uppercase font-semibold text-purple-800">Nachname</p><p class="text-ink-900">${escapeHtml(fsContact.last_name || '–')}</p></div>
+        <div><p class="text-[10px] uppercase font-semibold text-purple-800">Festnetz</p><p class="text-ink-900 font-mono">${escapeHtml(fsContact.work_number || '–')}</p></div>
+        <div><p class="text-[10px] uppercase font-semibold text-purple-800">Mobil</p><p class="text-ink-900 font-mono">${escapeHtml(fsContact.mobile_number || '–')}</p></div>
+        <div class="col-span-2"><p class="text-[10px] uppercase font-semibold text-purple-800">Position</p><p class="text-ink-900">${escapeHtml(fsContact.job_title || '–')}</p></div>
+      </div>
+      ${fsContactUrl ? `<a href="${escapeHtml(fsContactUrl)}" target="_blank" rel="noopener" class="mt-3 text-xs px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg inline-flex items-center gap-1.5"><i data-lucide="external-link" class="w-3.5 h-3.5"></i> Contact in FS öffnen</a>` : ''}
+    </div>` : '';
+
+  // Mandanten-Multi-Select-Block — zeigt welche ERP-Mandanten für diesen Kunden existieren
+  const mandants = ctx.mandants || [];
+  const erpCusts = ctx.erpCustomers || [];
+  const mandantsBlock = (mandants.length && fs?.id) ? `
+    <div class="bg-white border-2 border-indigo-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <i data-lucide="layers" class="w-4 h-4 text-indigo-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">ERP-Mandanten</h3>
+        <span class="ml-auto text-[10px] text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">${erpCusts.length} / ${mandants.length}</span>
+      </div>
+      <p class="text-[11px] text-ink-600 mb-3">In welchen FLP-Mandanten soll dieser Kunde als ERP-Customer geführt werden? Pro Mandant entsteht ein eigener Customer-Record (mit eigener K-Nummer + Zahlungsziel).</p>
+      <ul class="space-y-1.5">
+        ${mandants.map(m => {
+          const existingCust = erpCusts.find(c => (c.fields.company_id || [])[0] === m.id);
+          const isLinked = !!existingCust;
+          const cn = existingCust?.fields?.customer_no || '';
+          return `
+            <li class="flex items-center gap-2 text-xs p-2 rounded ${isLinked ? 'bg-emerald-50' : 'bg-ink-50'}">
+              <input type="checkbox" id="tcmM_${m.id}" ${isLinked ? 'checked disabled' : ''} class="w-4 h-4">
+              <label for="tcmM_${m.id}" class="flex-1 cursor-pointer">${escapeHtml(m.fields.name || '–')}</label>
+              ${isLinked ? `<span class="font-mono text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">${escapeHtml(cn || 'verknüpft')}</span>` : '<span class="text-[10px] text-ink-500 italic">nicht verknüpft</span>'}
+            </li>`;
+        }).join('')}
+      </ul>
+      <p class="text-[10px] text-ink-500 italic mt-3">Anlegen-Funktion (Klick → ERP-Customer-Record erstellen + mit FS-Account verknüpfen) folgt in v4.37.</p>
+    </div>` : '';
+
+  body.innerHTML = aiTop + fsBlock + fsContactBlock + mandantsBlock + erpBlock + fdBlock + fdCompanyBlock;
   if (window.lucide) lucide.createIcons();
 }
 
