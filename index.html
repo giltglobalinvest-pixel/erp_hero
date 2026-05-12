@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.43';
+const APP_VERSION = 'v4.44';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1810,7 +1810,13 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
       }
       // Strategie B: PUT auf Contact (kann an Pflicht-Custom-Fields scheitern, ist aber ein Fallback)
       if (!linked) {
+        // Auto-Fill für einzigartiges custom_field cf_kontaktid (FLP-FS hat das Feld unique)
+        const cfAutoFill = {};
+        const existingCf = fsContact.custom_field || {};
+        const needsAutoFill = ['cf_kontaktid', 'cf_kontakt_id'].find(k => !existingCf[k]);
+        if (needsAutoFill) cfAutoFill[needsAutoFill] = String(fsContact.id);
         const tryContactBodies = [
+          { contact: { sales_accounts: [{ id: fsAccount.id, is_primary: true }], ...(Object.keys(cfAutoFill).length ? { custom_field: { ...existingCf, ...cfAutoFill } } : {}) } },
           { contact: { sales_accounts: [{ id: fsAccount.id, is_primary: true }] } },
           { contact: { sales_account_id: fsAccount.id } },
           { contact: { sales_accounts_ids: [fsAccount.id] } }
@@ -5994,9 +6000,9 @@ async function _tcmSaveFsContact(btnEl) {
       console.log('[tcmSaveFsContact] PUT OK (slim body)', res);
     } catch (slimErr) {
       const m = String(slimErr?.message || '');
-      // Pflicht-Custom-Field-Validation? Dann mit vollem Contact-Body wiederholen
+      // Validation: einzigartig-Custom-Field (z.B. cf_kontaktid) muss befüllt sein — auto-setzen
       if (/ausfüllen|required|mandatory|400/i.test(m)) {
-        console.warn('[tcmSaveFsContact] slim PUT failed:', m, '— versuche full PUT');
+        console.warn('[tcmSaveFsContact] slim PUT failed:', m, '— versuche full PUT mit auto-fill für einzigartige Custom-Fields');
         const current = await _fsLoadContact(contactId, true);
         if (current) {
           const full = {
@@ -6007,11 +6013,23 @@ async function _tcmSaveFsContact(btnEl) {
             mobile_number: contactBody.mobile_number || current.mobile_number || '',
             job_title:  contactBody.job_title  || current.job_title  || ''
           };
-          // Bestehende Custom-Fields beibehalten — kritisch für Pflicht-Felder
-          if (current.custom_field && typeof current.custom_field === 'object') {
-            full.custom_field = current.custom_field;
+          // Bestehende Custom-Fields beibehalten
+          full.custom_field = (current.custom_field && typeof current.custom_field === 'object') ? { ...current.custom_field } : {};
+          // Einzigartig-Custom-Field-Auto-Fill: erkennt Feldname aus Fehlermeldung (Label)
+          // Bekannter Fall im FLP-FS: "Kontakt-ID" → cf_kontaktid (einzigartig, sonst 400)
+          const autoFillCandidates = [
+            { keys: ['cf_kontaktid', 'cf_kontakt_id', 'kontaktid', 'kontakt_id'], value: String(contactId) }
+            // Hier können später weitere bekannte einzigartige Felder ergänzt werden
+          ];
+          for (const cand of autoFillCandidates) {
+            for (const k of cand.keys) {
+              if (!full.custom_field[k] || full.custom_field[k] === '') {
+                console.log('[tcmSaveFsContact] Auto-Fill für einzigartiges Feld', k, '=', cand.value);
+                full.custom_field[k] = cand.value;
+              }
+            }
           }
-          console.log('[tcmSaveFsContact] PUT mit vollem Body inkl. custom_field:', full);
+          console.log('[tcmSaveFsContact] PUT full body:', full);
           res = await proxyFetch('freshsales/api/contacts/' + contactId, {
             method: 'PUT',
             body: { contact: full }
