@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.41';
+const APP_VERSION = 'v4.42';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1716,7 +1716,6 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
     const accName = (fdCompany?.name || fdContact?.company_name || '').trim();
     if (accName) {
       const addrParts = (fdContact?.address || '').split('\n').map(s => s.trim()).filter(Boolean);
-      // Heuristik: letzte Zeile = Land, vorletzte = PLZ + Ort, davor = Straße
       const lastLine = addrParts[addrParts.length - 1] || '';
       const country = /deutschland|germany|österreich|austria|schweiz|switzerland/i.test(lastLine) ? lastLine : '';
       const zipCityLine = addrParts.find(l => /^\d{4,5}\s/.test(l)) || '';
@@ -1725,26 +1724,33 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
       const city    = m?.[2] || '';
       const street  = addrParts.find(l => l !== zipCityLine && l !== country) || '';
       const dom = (fdContact?.email && fdContact.email.includes('@')) ? fdContact.email.split('@')[1] : '';
-      const accountBody = {
-        sales_account: {
-          name: accName,
-          phone: fdContact?.phone || '',
-          website: dom ? 'https://www.' + dom : '',
-          address: street, city, zipcode, country
-        }
-      };
+      // Nur befüllte Felder schicken — leere Strings haben FS auf 400 Validierung getriggert
+      const fields = { name: accName };
+      if (fdContact?.phone) fields.phone = fdContact.phone;
+      if (dom) fields.website = 'https://www.' + dom;
+      if (street)  fields.address = street;
+      if (city)    fields.city = city;
+      if (zipcode) fields.zipcode = zipcode;
+      if (country) fields.country = country;
+      const accountBody = { sales_account: fields };
       console.log('[fsPushFromFd] POST sales_account', accountBody);
       try {
         const res = await proxyFetch('freshsales/api/sales_accounts', { method: 'POST', body: accountBody });
         fsAccount = res?.sales_account || res;
       } catch (e) {
-        // Bei "Name not unique" → Lookup
-        if (/already.?exist|409|duplicate|not.?unique/i.test(String(e?.message))) {
+        // Bei "Name not unique" oder beliebigem Fehler → Lookup nach existierender Firma
+        console.warn('[fsPushFromFd] POST sales_account failed:', e.message, '— versuche Lookup');
+        try {
           const lookup = await proxyFetch('freshsales/api/lookup?q=' + encodeURIComponent(accName) + '&f=name&entities=sales_account');
           const list = lookup?.sales_accounts?.sales_accounts || lookup?.accounts || [];
           const exact = list.find(a => String(a.name || '').toLowerCase() === accName.toLowerCase());
-          if ((exact || list[0])?.id) fsAccount = await _fsLoadAccount((exact || list[0]).id, true);
-        } else throw e;
+          if ((exact || list[0])?.id) {
+            fsAccount = await _fsLoadAccount((exact || list[0]).id, true);
+            console.log('[fsPushFromFd] Lookup fand existierenden Account:', fsAccount?.id);
+          } else throw e;
+        } catch (lookupErr) {
+          throw e;
+        }
       }
     }
   }
@@ -1780,31 +1786,47 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
   }
 
   // 3. Wenn Contact existiert aber keinem Sales Account zugeordnet → verknüpfen
-  //    Freshsales-Format variiert je nach Version → mehrere probieren bis eines klappt
+  //    PUT auf Contact triggert oft Pflicht-Custom-Field-Validierung ("Kontakt-ID ausfüllen").
+  //    Daher zuerst über die SALES-ACCOUNT-Seite verknüpfen (das umgeht Contact-Pflichtfelder).
   if (fsContact?.id && fsAccount?.id) {
     const sa = fsContact.sales_accounts;
     const hasLink = Array.isArray(sa) && sa.some(a => (typeof a === 'object' ? a.id : a) === fsAccount.id);
     if (!hasLink) {
-      console.log('[fsPushFromFd] PUT contact', fsContact.id, '→ verknüpfen mit Sales Account', fsAccount.id);
-      const tryBodies = [
-        { contact: { sales_accounts: [{ id: fsAccount.id, is_primary: true }] } },
-        { contact: { sales_account_id: fsAccount.id } },
-        { contact: { sales_accounts_ids: [fsAccount.id] } }
-      ];
+      console.log('[fsPushFromFd] verknüpfe Contact', fsContact.id, '↔ Sales Account', fsAccount.id);
       let linked = false;
-      for (const body of tryBodies) {
+      // Strategie A: PUT /sales_accounts/{id} mit contacts-Array
+      const tryAccountBodies = [
+        { sales_account: { contacts: [{ id: fsContact.id, is_primary: true }] } },
+        { sales_account: { contact_ids: [fsContact.id] } }
+      ];
+      for (const body of tryAccountBodies) {
         try {
-          console.log('[fsPushFromFd] versuche Body:', body);
-          const res = await proxyFetch('freshsales/api/contacts/' + fsContact.id, { method: 'PUT', body });
-          console.log('[fsPushFromFd] PUT-Response:', res);
-          linked = true;
-          break;
+          console.log('[fsPushFromFd] PUT /sales_accounts versuche Body:', body);
+          await proxyFetch('freshsales/api/sales_accounts/' + fsAccount.id, { method: 'PUT', body });
+          linked = true; break;
         } catch (e) {
-          console.warn('[fsPushFromFd] Body-Variante fehlgeschlagen:', e.message);
+          console.warn('[fsPushFromFd] Sales-Account-PUT fehlgeschlagen:', e.message);
         }
       }
+      // Strategie B: PUT auf Contact (kann an Pflicht-Custom-Fields scheitern, ist aber ein Fallback)
       if (!linked) {
-        // Letzter Versuch: dedizierte Association-API
+        const tryContactBodies = [
+          { contact: { sales_accounts: [{ id: fsAccount.id, is_primary: true }] } },
+          { contact: { sales_account_id: fsAccount.id } },
+          { contact: { sales_accounts_ids: [fsAccount.id] } }
+        ];
+        for (const body of tryContactBodies) {
+          try {
+            console.log('[fsPushFromFd] PUT /contacts versuche Body:', body);
+            await proxyFetch('freshsales/api/contacts/' + fsContact.id, { method: 'PUT', body });
+            linked = true; break;
+          } catch (e) {
+            console.warn('[fsPushFromFd] Contact-PUT fehlgeschlagen:', e.message);
+          }
+        }
+      }
+      // Strategie C: Association-API
+      if (!linked) {
         try {
           await proxyFetch('freshsales/api/contacts/' + fsContact.id + '/sales_accounts', {
             method: 'POST',
@@ -1812,14 +1834,22 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
           });
           linked = true;
         } catch (e) {
-          console.warn('[fsPushFromFd] Association-API auch fehlgeschlagen:', e.message);
+          console.warn('[fsPushFromFd] Association-API fehlgeschlagen:', e.message);
         }
       }
+      // Caches leeren + Reload
+      _fsAccountCache.delete(fsAccount.id);
       _fsContactCache.delete(fsContact.id);
-      fsContact = await _fsLoadContact(fsContact.id, true);
-      console.log('[fsPushFromFd] Contact nach Reload:', fsContact);
+      fsAccount = await _fsLoadAccount(fsAccount.id, true) || fsAccount;
+      fsContact = await _fsLoadContact(fsContact.id, true) || fsContact;
+      console.log('[fsPushFromFd] Nach Verknüpfung — Account-Contacts:', fsAccount?.contacts || fsAccount?.contact_ids,
+                  '| Contact-SalesAccounts:', fsContact?.sales_accounts);
+      if (!linked) {
+        // Soft-Failure: User-Hinweis statt Exception
+        toast('FS-Verknüpfung per API fehlgeschlagen — bitte einmal manuell in Freshsales (Contact öffnen → Accounts → KONE GmbH zuordnen)', 'warn', 9000);
+      }
     } else {
-      console.log('[fsPushFromFd] Bereits verknüpft, kein PUT nötig');
+      console.log('[fsPushFromFd] Bereits verknüpft, nichts zu tun');
     }
   }
   return { fsContact, fsAccount };
