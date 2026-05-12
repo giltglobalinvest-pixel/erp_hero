@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.32';
+const APP_VERSION = 'v4.33';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1571,6 +1571,18 @@ async function _loadFdContact(contactId) {
     return null;
   }
 }
+
+// Freshdesk-Standard-Industries (Enum-Liste — Freitext wird mit 400 abgelehnt)
+const FD_INDUSTRY_VALUES = [
+  'Automotive', 'Consumer Durables and Apparel', 'Diversified Consumer Services',
+  'Hotels, Restaurant and Leisure', 'Media', 'Retailing', 'Banks', 'Capital Markets',
+  'Diversified Financial Services', 'Insurance', 'Healthcare Equipment & Supplies',
+  'Healthcare Providers & Services', 'Pharmaceuticals & Biotechnology',
+  'Aerospace & Defense', 'Building Products', 'Construction & Engineering',
+  'Industrial Conglomerates', 'Machinery', 'Internet Software & Services',
+  'IT Services', 'Software', 'Oil, Gas & Consumable Fuels', 'Chemicals',
+  'Real Estate', 'Telecommunications', 'Other'
+];
 
 // Freshdesk-Company laden (Name, Notes, Domains, Industry, Description)
 const _fdCompanyCache = new Map();
@@ -4831,7 +4843,10 @@ function _tcmRender() {
         </div>
         <div>
           <label class="text-[10px] uppercase font-semibold text-indigo-800 block">Branche</label>
-          <input id="tcmCoIndustry" type="text" value="${escapeHtml(co.industry || '')}" placeholder="z.B. Aufzugsbau, Hausverwaltung…" class="w-full mt-1 px-2 py-1.5 border border-indigo-200 bg-white rounded text-sm">
+          <select id="tcmCoIndustry" class="w-full mt-1 px-2 py-1.5 border border-indigo-200 bg-white rounded text-sm">
+            <option value="">— keine —</option>
+            ${FD_INDUSTRY_VALUES.map(v => `<option value="${escapeHtml(v)}" ${co.industry === v ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}
+          </select>
           ${sBan('company_industry', co.industry)}
         </div>
         <div>
@@ -4946,6 +4961,9 @@ REGELN:
 - Adresse als ein zusammenhängender String mit Zeilenumbrüchen \\n (Straße, PLZ Ort, Land).
 - Firma-Felder NUR vorschlagen wenn neue Info da ist oder bestehende klar verbessert werden.
 - Domains aus Email-Adressen ableiten (z.B. max@firma.de → "firma.de"). Mehrere als Array.
+- company_industry MUSS EXAKT einer dieser Werte sein (sonst Feld komplett weglassen):
+  ${JSON.stringify(FD_INDUSTRY_VALUES)}
+  Für unklare Branchen "Other" verwenden oder Feld weglassen.
 - Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":…,"source":"woraus, max 60 Zeichen"}.
 
 JSON-FORMAT (Felder weglassen wenn unsicher):
@@ -4997,6 +5015,15 @@ function _tcmApplySuggestion(field, value) {
     const f = field.replace(/^company_/, '');
     if (f === 'domains') {
       ctx.fdCompany.domains = String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+    } else if (f === 'industry') {
+      // Freshdesk-Industry ist Enum — nur valid Werte übernehmen
+      if (FD_INDUSTRY_VALUES.includes(String(value))) {
+        ctx.fdCompany.industry = String(value);
+      } else {
+        // Fallback: "Other" wenn KI was ähnliches vorgeschlagen hat, sonst weglassen
+        console.warn('[tcm] industry "' + value + '" nicht in FD-Enum, übersprungen');
+        return false;
+      }
     } else {
       ctx.fdCompany[f] = value;
     }
@@ -5135,6 +5162,13 @@ async function _tcmSaveCompany(btnEl) {
   const fields = {};
   Object.entries(raw).forEach(([k, v]) => { if (v) fields[k] = v; });
   if (Array.isArray(co.domains) && co.domains.length) fields.domains = co.domains;
+  // Industry: Freshdesk akzeptiert nur Werte aus FD_INDUSTRY_VALUES — sonst 400 "Validation failed"
+  if (fields.industry && !FD_INDUSTRY_VALUES.includes(fields.industry)) {
+    const bad = fields.industry;
+    console.warn('[tcmSaveCompany] industry "' + bad + '" nicht in Freshdesk-Enum, wird weggelassen');
+    delete fields.industry;
+    toast('Branche „' + bad + '" ist kein Standard-Wert in Freshdesk — wurde nicht gespeichert', 'warn', 6000);
+  }
   console.log('[tcmSaveCompany] PUT', '/companies/' + companyId, fields);
 
   ctx.savingCompany = true;
