@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.24';
+const APP_VERSION = 'v4.25';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4608,7 +4608,7 @@ async function openTicketContactModal(ticketId) {
           Kontakt bearbeiten
           <span class="text-xs font-normal text-ink-500">· FT-${ticketId}</span>
         </h3>
-        <button type="button" onclick="closeTopModal();_tcmCtx=null;" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+        <button type="button" onclick="_tcmClose()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
@@ -5024,34 +5024,30 @@ async function _tcmSaveFd(btnEl) {
   const ctx = _tcmCtx;
   if (!ctx?.fd?.id) return;
   _tcmSyncInputs();
-  const fields = {
+  // Nur befüllte Felder schicken (Freshdesk nimmt manchmal null nicht klaglos)
+  const raw = {
     name:      (ctx.fd.name || '').trim(),
-    email:     (ctx.fd.email || '').trim() || null,
-    phone:     (ctx.fd.phone || '').trim() || null,
-    mobile:    (ctx.fd.mobile || '').trim() || null,
-    job_title: (ctx.fd.job_title || '').trim() || null,
-    address:   (ctx.fd.address || '').trim() || null,
+    email:     (ctx.fd.email || '').trim(),
+    phone:     (ctx.fd.phone || '').trim(),
+    mobile:    (ctx.fd.mobile || '').trim(),
+    job_title: (ctx.fd.job_title || '').trim(),
+    address:   (ctx.fd.address || '').trim(),
   };
-  if (!fields.name) return toast('Name darf nicht leer sein', 'warn');
+  if (!raw.name) return toast('Name darf nicht leer sein', 'warn');
+  const fields = {};
+  Object.entries(raw).forEach(([k, v]) => { if (v) fields[k] = v; });
   if (!APP_KEYS.proxyV2) return toast('Speichern benötigt Val.town-Proxy v2', 'error', 7000);
   ctx.saving = true;
+  ctx.dirty = true;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
   try {
-    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, {
-      method: 'PUT',
-      body: fields
-    });
-    // Cache invalidieren + neu laden, damit Ticket-Liste / Detail aktualisiert sind
+    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: fields });
     _fdContactCache.delete(ctx.fd.id);
     _fdAiSummaryCache.delete(ctx.ticketId);
+    ctx.saving = false;
     toast('Freshdesk-Kontakt gespeichert', 'success', 3000);
-    closeTopModal();
-    _tcmCtx = null;
-    // Detail-Modal + Liste refresh wenn sichtbar
-    if (_fdTicketState.id === ctx.ticketId && typeof openFreshdeskTicket === 'function') {
-      try { openFreshdeskTicket(ctx.ticketId); } catch (_) {}
-    }
-    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+    // Modal bleibt offen — nur Render aktualisieren mit den neuen Werten
+    _tcmRender();
   } catch (e) {
     ctx.saving = false;
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Im Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
@@ -5065,21 +5061,24 @@ async function _tcmSaveCompany(btnEl) {
   if (!ctx?.fdCompany?.id) return;
   _tcmSyncInputs();
   const co = ctx.fdCompany;
-  const fields = {
+  const raw = {
     name:        (co.name || '').trim(),
-    note:        (co.note || '').trim() || null,
-    description: (co.description || '').trim() || null,
-    industry:    (co.industry || '').trim() || null,
-    domains:     Array.isArray(co.domains) ? co.domains : [],
+    note:        (co.note || '').trim(),
+    description: (co.description || '').trim(),
+    industry:    (co.industry || '').trim(),
   };
-  if (!fields.name) return toast('Firmenname darf nicht leer sein', 'warn');
+  if (!raw.name) return toast('Firmenname darf nicht leer sein', 'warn');
+  // Nur befüllte Felder + Domains nur wenn nicht leer
+  const fields = {};
+  Object.entries(raw).forEach(([k, v]) => { if (v) fields[k] = v; });
+  if (Array.isArray(co.domains) && co.domains.length) fields.domains = co.domains;
   if (!APP_KEYS.proxyV2) return toast('Speichern benötigt Val.town-Proxy v2', 'error', 7000);
   ctx.savingCompany = true;
+  ctx.dirty = true;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
   try {
     await proxyFetch('freshdesk/api/v2/companies/' + co.id, { method: 'PUT', body: fields });
     _fdCompanyCache.delete(co.id);
-    // Contact-Cache aktualisieren (company_name kann sich geändert haben)
     if (ctx.fd?.id) {
       const cached = _fdContactCache.get(ctx.fd.id);
       if (cached) { cached.company_name = fields.name; _fdContactCache.set(ctx.fd.id, cached); }
@@ -5087,11 +5086,33 @@ async function _tcmSaveCompany(btnEl) {
     ctx.savingCompany = false;
     toast('Freshdesk-Firma gespeichert', 'success', 3000);
     _tcmRender();
-    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
   } catch (e) {
     ctx.savingCompany = false;
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Firma in Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
-    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
+    // Spezifischer Hinweis bei null-body-Bug
+    const m = e.message || '';
+    if (/null body status cannot have body/i.test(m)) {
+      // Best-effort: Cache neu laden um zu prüfen, ob es trotzdem funktioniert hat
+      _fdCompanyCache.delete(co.id);
+      const refreshed = await _loadFdCompany(co.id, true).catch(()=>null);
+      if (refreshed && refreshed.name === fields.name) {
+        ctx.fdCompany = refreshed;
+        toast('Firma gespeichert (Proxy-Warnung ignoriert)', 'success', 3000);
+        _tcmRender();
+        return;
+      }
+    }
+    toast('Speichern fehlgeschlagen: ' + m, 'error', 6000);
+  }
+}
+
+// Schließt das Kontakt-Modal sauber + triggert Refresh wenn was geändert wurde
+function _tcmClose() {
+  const wasDirty = !!_tcmCtx?.dirty;
+  closeTopModal();
+  _tcmCtx = null;
+  if (wasDirty && typeof loadFreshdeskTicketsPreview === 'function') {
+    setTimeout(() => loadFreshdeskTicketsPreview(), 100);
   }
 }
 
