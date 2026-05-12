@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.44';
+const APP_VERSION = 'v4.45';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1699,6 +1699,65 @@ async function _fsFindAccountByEmail(email) {
   // Letzter Fallback: nichts gefunden — Contact zurück, Account null
   console.log('[fsFindAccount] Kein Account für Contact', contact?.id, '— Contact-Properties:', Object.keys(contact || {}));
   return { fsContact: contact, fsAccount: null };
+}
+
+// Verknüpft einen FS-Contact mit einem FS-Sales-Account.
+// Probiert mehrere FS-API-Formate durch — Sales-Account-Seite zuerst (umgeht Contact-Validierung),
+// dann Contact-Seite mit cf_kontaktid-Auto-Fill, dann Association-API.
+// Returns true wenn erfolgreich, false sonst.
+async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
+  if (!contactId || !accountId) return false;
+  const sa = currentContact?.sales_accounts;
+  const hasLink = Array.isArray(sa) && sa.some(a => (typeof a === 'object' ? a.id : a) === accountId);
+  if (hasLink) {
+    console.log('[fsLink] bereits verknüpft', contactId, '↔', accountId);
+    return true;
+  }
+  console.log('[fsLink] verknüpfe Contact', contactId, '↔ Sales Account', accountId);
+  // Strategie A: PUT auf Sales-Account (umgeht Contact-Pflichtfeld-Validation)
+  const tryAccountBodies = [
+    { sales_account: { contacts: [{ id: contactId, is_primary: true }] } },
+    { sales_account: { contact_ids: [contactId] } }
+  ];
+  for (const body of tryAccountBodies) {
+    try {
+      console.log('[fsLink] PUT /sales_accounts versuche:', body);
+      await proxyFetch('freshsales/api/sales_accounts/' + accountId, { method: 'PUT', body });
+      _fsAccountCache.delete(accountId);
+      return true;
+    } catch (e) { console.warn('[fsLink] Sales-Account-PUT fehlgeschlagen:', e.message); }
+  }
+  // Strategie B: PUT auf Contact mit Auto-Fill für einzigartige Custom-Fields
+  const existingCf = currentContact?.custom_field || {};
+  const cfAutoFill = { ...existingCf };
+  if (!existingCf.cf_kontaktid && !existingCf.cf_kontakt_id) {
+    cfAutoFill.cf_kontaktid = String(contactId);
+  }
+  const tryContactBodies = [
+    { contact: { sales_accounts: [{ id: accountId, is_primary: true }], custom_field: cfAutoFill } },
+    { contact: { sales_accounts: [{ id: accountId, is_primary: true }] } },
+    { contact: { sales_account_id: accountId } },
+    { contact: { sales_accounts_ids: [accountId] } }
+  ];
+  for (const body of tryContactBodies) {
+    try {
+      console.log('[fsLink] PUT /contacts versuche:', body);
+      await proxyFetch('freshsales/api/contacts/' + contactId, { method: 'PUT', body });
+      _fsContactCache.delete(contactId);
+      return true;
+    } catch (e) { console.warn('[fsLink] Contact-PUT fehlgeschlagen:', e.message); }
+  }
+  // Strategie C: dedizierte Association-API
+  try {
+    console.log('[fsLink] POST Association-API');
+    await proxyFetch('freshsales/api/contacts/' + contactId + '/sales_accounts', {
+      method: 'POST',
+      body: { sales_account_id: accountId }
+    });
+    _fsContactCache.delete(contactId);
+    return true;
+  } catch (e) { console.warn('[fsLink] Association-API fehlgeschlagen:', e.message); }
+  return false;
 }
 
 // Pusht FD-Contact + FD-Company nach Freshsales (initialer Migrations-Schritt).
@@ -5940,11 +5999,32 @@ async function _tcmSaveFs(btnEl) {
     });
     console.log('[tcmSaveFs] PUT OK', res);
     _fsAccountCache.delete(accountId);
-    // Frisch nachladen
+    // Wenn FS-Contact vorhanden + noch nicht mit diesem Account verknüpft → verknüpfen
+    let linkStatus = null;
+    if (ctx.fsContact?.id) {
+      const sa = ctx.fsContact.sales_accounts;
+      const hasLink = Array.isArray(sa) && sa.some(a => (typeof a === 'object' ? a.id : a) === accountId);
+      if (!hasLink) {
+        const linked = await _fsLinkContactToAccount(ctx.fsContact.id, accountId, ctx.fsContact);
+        linkStatus = linked ? 'linked' : 'failed';
+        if (linked) {
+          // Contact frisch nachladen
+          const refreshedContact = await _fsLoadContact(ctx.fsContact.id, true);
+          if (refreshedContact) ctx.fsContact = refreshedContact;
+        }
+      }
+    }
+    // Account frisch nachladen
     const refreshed = await _fsLoadAccount(accountId, true);
     if (refreshed) ctx.fs = refreshed;
     ctx.savingFs = false;
-    toast('Freshsales-Account gespeichert ✓', 'success', 3500);
+    if (linkStatus === 'linked') {
+      toast('Freshsales-Account gespeichert + mit Contact verknüpft ✓', 'success', 4000);
+    } else if (linkStatus === 'failed') {
+      toast('Account gespeichert, aber Verknüpfung mit Contact nicht möglich — bitte einmal manuell in FS verknüpfen', 'warn', 8000);
+    } else {
+      toast('Freshsales-Account gespeichert ✓', 'success', 3500);
+    }
     _tcmRender();
   } catch (e) {
     console.error('[tcmSaveFs] FAILED', e);
