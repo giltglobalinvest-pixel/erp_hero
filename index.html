@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.22';
+const APP_VERSION = 'v4.23';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1549,7 +1549,8 @@ async function _loadFdContact(contactId) {
       mobile: c.mobile || '',
       company_id: c.company_id || null,
       company_name: '',
-      job_title: c.job_title || ''
+      job_title: c.job_title || '',
+      address: c.address || ''
     };
     _fdContactCache.set(contactId, obj);
     // Company-Name nachladen (best-effort)
@@ -4554,177 +4555,375 @@ async function _aiCmdExecute(ticketId, actions) {
 }
 
 /* ============================================================
-   TICKET-KONTAKT-MODAL · Vollständige Kontakt-/Firmen-Anzeige
+   TICKET-KONTAKT-MODAL · Editor mit KI-Vervollständigung
    ============================================================
-   Zeigt: Firma, Name, Job-Title, Tel, Mobil, Email
-   ERP-Status (Kundennummer K-XXXX) + Aktionen (öffnen / anlegen)
-   KI-Vorschlag aus Ticket-Inhalt, falls FD-Kontakt unvollständig
+   Inspiriert vom Freshdesk-Hero-Muster:
+   - Inputs: Name, Email, Festnetz, Mobil, Job-Titel, Adresse
+   - KI-Suggestion-Banner pro Feld (lila, mit Quellenangabe + Übernehmen-Btn)
+   - Bulk-Aktion "Alle (N)" übernehmen
+   - "Im Freshdesk speichern" (PUT /api/v2/contacts/{id})
+   - ERP-Block: Status mit Kundennummer + Anlegen/Öffnen
 */
+let _tcmCtx = null;  // { ticketId, ticket, fd, erp, suggestions, suggestionsLoading, suggestionsError, saving }
+
 async function openTicketContactModal(ticketId) {
   if (!ticketId) return;
+  _tcmCtx = {
+    ticketId, ticket: null, fd: null, erp: null,
+    suggestions: null, suggestionsLoading: false, suggestionsError: null, saving: false
+  };
   const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
   opener(`
     <div class="p-5">
       <div class="flex items-center justify-between mb-3 gap-2">
         <h3 class="text-base font-bold text-ink-900 flex items-center gap-2">
-          <i data-lucide="user" class="w-5 h-5 text-brand-600"></i>
-          Kontakt
+          <i data-lucide="user-cog" class="w-5 h-5 text-brand-600"></i>
+          Kontakt bearbeiten
           <span class="text-xs font-normal text-ink-500">· FT-${ticketId}</span>
         </h3>
-        <button type="button" onclick="closeTopModal()" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
+        <button type="button" onclick="closeTopModal();_tcmCtx=null;" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
       </div>
-      <div id="tcmBody" class="space-y-3">
-        <p class="text-sm text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lade Kontaktdaten…</p>
+      <div id="tcmBody" class="space-y-3 max-h-[75vh] overflow-y-auto -mx-1 px-1">
+        <div class="text-center py-10">
+          <div class="w-10 h-10 mx-auto rounded-full border-[3px] border-ink-200 border-t-brand-500 animate-spin"></div>
+          <p class="text-sm text-ink-500 mt-3">Lade Kontaktdaten…</p>
+        </div>
       </div>
     </div>
-  `, { maxWidth: 'max-w-xl' });
+  `, { maxWidth: 'max-w-2xl' });
   if (window.lucide) lucide.createIcons();
 
   try {
-    // 1. Ticket + Requester via Freshdesk
+    // Ticket + Requester laden
     const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
-    const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
-    const requesterEmail = (r?.email || t?.email || '').toLowerCase();
-    const requesterName  = r?.name || '';
-    const requesterPhone = r?.phone || '';
-    const requesterMobile = r?.mobile || '';
-    const requesterJob   = r?.job_title || '';
-    const requesterCompany = r?.company_name || r?.company?.name || '';
-
-    // 2. ERP-Match
-    let erp = null;
-    if (requesterEmail) {
-      try { erp = await _findCustomerContactByEmail(requesterEmail); } catch (_) {}
+    _tcmCtx.ticket = t;
+    let fd = t?.requester || null;
+    // Force-Refresh des Contacts (Adresse fehlt manchmal im Ticket-include)
+    if (t?.requester_id && (!fd || !fd.address)) {
+      _fdContactCache.delete(t.requester_id);
+      const fresh = await _loadFdContact(t.requester_id).catch(()=>null);
+      if (fresh) fd = Object.assign({}, fd || {}, fresh);
     }
-    const erpCustomer = erp?.customer || null;
-    const erpContact  = erp?.contact || null;
-    const customerNo  = erpCustomer?.fields?.customer_no || '';
-    const erpName1    = erpCustomer?.fields?.name1 || '';
-    const erpPhoneC   = erpContact?.fields?.phone || '';
-    const erpMobileC  = erpContact?.fields?.mobile || '';
-
-    // Werte konsolidieren — FD wins, ERP fills gaps
-    const phoneFinal  = requesterPhone  || erpPhoneC;
-    const mobileFinal = requesterMobile || erpMobileC;
-    const companyFinal = requesterCompany || erpName1;
-
-    const body = document.getElementById('tcmBody');
-    if (!body) return;
-    body.innerHTML = `
-      <!-- Firma (groß) -->
-      <div class="bg-gradient-to-br from-brand-50 to-blue-50 border border-brand-200 rounded-xl p-4">
-        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">Firma</p>
-        <p class="text-lg font-bold text-ink-900 leading-tight">${escapeHtml(companyFinal || '— unbekannt —')}</p>
-        ${requesterJob ? `<p class="text-xs text-ink-600 mt-0.5">${escapeHtml(requesterJob)}</p>` : ''}
-      </div>
-
-      <!-- Kontakt -->
-      <div class="bg-white border border-ink-200 rounded-xl p-4">
-        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">Anfragende Person</p>
-        <p class="text-base font-bold text-ink-900">${escapeHtml(requesterName || '— unbekannt —')}</p>
-        <div class="flex flex-col gap-1.5 mt-2.5">
-          ${phoneFinal ? `<a href="tel:${escapeHtml(phoneFinal)}" class="inline-flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
-            <i data-lucide="phone" class="w-4 h-4"></i> ${escapeHtml(phoneFinal)} <span class="text-[10px] font-normal opacity-80">· Festnetz</span>
-          </a>` : ''}
-          ${mobileFinal ? `<a href="tel:${escapeHtml(mobileFinal)}" class="inline-flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
-            <i data-lucide="smartphone" class="w-4 h-4"></i> ${escapeHtml(mobileFinal)} <span class="text-[10px] font-normal opacity-80">· Mobil</span>
-          </a>` : ''}
-          ${requesterEmail ? `<a href="mailto:${escapeHtml(requesterEmail)}" class="inline-flex items-center gap-2 px-3 py-2 bg-white border border-blue-300 hover:bg-blue-50 text-blue-800 text-sm rounded-lg">
-            <i data-lucide="mail" class="w-4 h-4"></i> <span class="truncate">${escapeHtml(requesterEmail)}</span>
-          </a>` : ''}
-          ${!phoneFinal && !mobileFinal && !requesterEmail ? '<p class="text-xs text-ink-500 italic">Keine Kontaktdaten — bitte KI-Vorschlag prüfen unten.</p>' : ''}
-        </div>
-      </div>
-
-      <!-- ERP-Status -->
-      <div class="bg-white border-2 ${erpCustomer ? 'border-emerald-300' : 'border-amber-300'} rounded-xl p-4">
-        <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">ERP-Status</p>
-        ${erpCustomer ? `
-          <div class="flex items-center gap-2 mb-2 flex-wrap">
-            <span class="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-xs font-bold px-2 py-1 rounded">
-              <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Im ERP
-            </span>
-            ${customerNo ? `<span class="font-mono text-sm font-bold text-emerald-900">${escapeHtml(customerNo)}</span>` : '<span class="text-xs text-amber-700">⚠ keine Kundennummer</span>'}
-          </div>
-          <p class="text-sm text-ink-800 mb-2">${escapeHtml(erpName1 || '–')}</p>
-          ${erpContact ? `<p class="text-xs text-ink-600 mb-2">Kontakt: ${escapeHtml((erpContact.fields.first_name || '') + ' ' + (erpContact.fields.last_name || '')).trim() || '–'}${erpContact.fields.role ? ' (' + escapeHtml(erpContact.fields.role) + ')' : ''}</p>` : '<p class="text-xs text-amber-700 mb-2">⚠ Kontakt-Eintrag fehlt im ERP — nur Customer vorhanden</p>'}
-          <button type="button" onclick="closeTopModal();setTimeout(()=>openCustomerModal('${erpCustomer.id}'),100)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
-            <i data-lucide="external-link" class="w-4 h-4"></i> Im ERP öffnen
-          </button>
-        ` : `
-          <div class="flex items-center gap-2 mb-2">
-            <span class="inline-flex items-center gap-1 bg-amber-100 text-amber-800 text-xs font-bold px-2 py-1 rounded">
-              <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i> Noch nicht im ERP
-            </span>
-          </div>
-          <p class="text-xs text-ink-600 mb-2">Anlegen erstellt Customer + Contact + synct zu Freshdesk + Freshsales.</p>
-          <button type="button" onclick="closeTopModal();setTimeout(()=>_qvCreateContactInErp(${ticketId}, null),200)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg">
-            <i data-lucide="user-plus" class="w-4 h-4"></i> Im ERP anlegen + CRM-Sync
-          </button>
-        `}
-      </div>
-
-      <!-- KI-Vorschlag aus Ticket-Inhalt (wenn Daten unvollständig oder nicht im ERP) -->
-      ${(!erpCustomer || !phoneFinal || !mobileFinal || !companyFinal) ? `
-        <div class="bg-purple-50 border border-purple-200 rounded-xl p-3">
-          <p class="text-[10px] uppercase tracking-wider text-purple-700 font-semibold mb-1.5 flex items-center gap-1.5">
-            <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> KI-Vorschlag aus Ticket-Inhalt
-          </p>
-          <p class="text-xs text-purple-900 mb-2">Wenn die Daten oben unvollständig sind, kann die KI Firma / Name / Telefon aus Email-Body + Signatur extrahieren.</p>
-          <button id="tcmAiBtn" type="button" onclick="_tcmRunAiExtract(${ticketId})" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold rounded-lg">
-            <i data-lucide="wand-sparkles" class="w-4 h-4"></i> Daten aus Ticket extrahieren
-          </button>
-          <div id="tcmAiResult" class="mt-2"></div>
-        </div>
-      ` : ''}
-    `;
-    if (window.lucide) lucide.createIcons();
+    _tcmCtx.fd = fd || { id: t?.requester_id, name: '', email: t?.email || '' };
+    // ERP-Match
+    if (_tcmCtx.fd.email) {
+      try { _tcmCtx.erp = await _findCustomerContactByEmail(_tcmCtx.fd.email); } catch (_) {}
+    }
+    _tcmRender();
+    // KI-Suggestions im Hintergrund
+    _tcmLoadSuggestions().catch(e => console.warn('Suggestions failed:', e.message));
   } catch (e) {
     const body = document.getElementById('tcmBody');
-    if (body) body.innerHTML = `<p class="text-sm text-red-700">Fehler beim Laden: ${escapeHtml(e.message)}</p>`;
+    if (body) body.innerHTML = `<div class="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">Fehler: ${escapeHtml(e.message || 'Laden fehlgeschlagen')}</div>`;
   }
 }
 
-// Extrahiert Firma/Kontakt-Daten via KI aus dem Ticket-Body (Email + Signatur).
-async function _tcmRunAiExtract(ticketId) {
-  const btn = document.getElementById('tcmAiBtn');
-  const result = document.getElementById('tcmAiResult');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> KI analysiert …'; if (window.lucide) lucide.createIcons(); }
-  try {
-    // Ticket + erste Conversation als Kontext
-    const t = await freshdeskFetch('tickets/' + ticketId);
-    let conv = [];
-    try { conv = await freshdeskFetch('tickets/' + ticketId + '/conversations'); } catch (_) {}
-    const bodyText = _fdHtmlToText(t?.description || t?.description_text || '');
-    const incoming = (Array.isArray(conv) ? conv : []).filter(c => c?.incoming).map(c => _fdHtmlToText(c.body || c.body_text || '')).join('\n---\n');
-    const fullText = (bodyText + '\n\n' + incoming).slice(0, 6000);
-    const prompt = `Extrahiere aus dem folgenden Email-Text (inkl. Signaturen) die Kontakt-/Firmendaten und antworte AUSSCHLIESSLICH mit JSON:
-{"company":"Firmenname","contact_name":"Vor- und Nachname","email":"email","phone":"Festnetz","mobile":"Mobil","job_title":"Funktion","street":"Straße + Nr","zip":"PLZ","city":"Stadt"}
+// Liest aktuelle Input-Werte zurück in ctx.fd, damit Re-Render manuelle Edits nicht verschluckt
+function _tcmSyncInputs() {
+  if (!_tcmCtx?.fd) return;
+  const map = { name:'tcmName', email:'tcmEmail', phone:'tcmPhone', mobile:'tcmMobile', job_title:'tcmJob', address:'tcmAddress' };
+  Object.entries(map).forEach(([f, id]) => {
+    const el = document.getElementById(id);
+    if (el) _tcmCtx.fd[f] = el.value;
+  });
+}
 
-Leere Felder als "" lassen. Keine Erklärung, kein Markdown.
+function _tcmRender() {
+  const ctx = _tcmCtx;
+  if (!ctx) return;
+  const body = document.getElementById('tcmBody');
+  if (!body) return;
+  const c = ctx.fd || {};
+  const erp = ctx.erp;
+  const erpCustomer = erp?.customer || null;
+  const erpContact  = erp?.contact || null;
+  const customerNo  = erpCustomer?.fields?.customer_no || '';
+  const erpName1    = erpCustomer?.fields?.name1 || '';
 
-EMAIL-TEXT:
-"""${fullText}"""`;
-    const raw = await askAI(prompt, { purpose: 'tcmExtract', maxTokens: 600 });
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-    const data = JSON.parse(cleaned);
-    const rows = Object.entries(data)
-      .filter(([_, v]) => v && String(v).trim())
-      .map(([k, v]) => `<tr><td class="py-1 pr-2 text-purple-700 font-medium">${escapeHtml(k)}</td><td class="py-1 text-ink-900">${escapeHtml(String(v))}</td></tr>`)
-      .join('');
-    result.innerHTML = `
-      <div class="bg-white border border-purple-300 rounded-lg p-2.5 mt-2">
-        <table class="text-xs w-full">${rows || '<tr><td class="text-ink-500 italic">Keine Daten erkannt.</td></tr>'}</table>
-        ${rows ? `<button type="button" onclick='_tcmCreateFromAi(${ticketId}, ${JSON.stringify(data).replace(/'/g, "&#39;")})' class="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg"><i data-lucide="user-plus" class="w-4 h-4"></i> Mit diesen Daten anlegen</button>` : ''}
+  // Per-Feld KI-Vorschlag-Banner
+  const sugg = ctx.suggestions || {};
+  const sBan = (field, currentVal) => {
+    const s = sugg[field];
+    if (!s || s.accepted) return '';
+    if (String(s.value).trim() === String(currentVal || '').trim()) return '';
+    return `
+      <div class="bg-purple-50 border border-purple-200 rounded-lg p-2 mt-1 flex items-start gap-2">
+        <i data-lucide="sparkles" class="w-3 h-3 text-purple-600 shrink-0 mt-0.5"></i>
+        <div class="flex-1 min-w-0">
+          <p class="text-[11px] text-purple-900 font-medium leading-tight whitespace-pre-wrap break-words">${escapeHtml(s.value)}</p>
+          <p class="text-[10px] text-purple-700 italic mt-0.5">aus: ${escapeHtml(s.source)}</p>
+        </div>
+        <button type="button" onclick="_tcmAccept('${field}')" class="shrink-0 inline-flex items-center gap-1 px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-[10px] font-semibold">
+          <i data-lucide="arrow-down" class="w-3 h-3"></i> Übernehmen
+        </button>
+      </div>`;
+  };
+
+  // Top-Block: KI-Vervollständigung
+  const suggList = Object.values(sugg);
+  const suggOpen     = suggList.filter(s => !s.accepted).length;
+  const suggAccepted = suggList.filter(s =>  s.accepted).length;
+  const subject = ctx.ticket?.subject || '';
+  const aiTop = `
+    <div class="bg-gradient-to-br from-purple-50 via-brand-50 to-purple-50 border-2 ${suggOpen ? 'border-purple-300' : 'border-purple-100'} rounded-2xl p-3">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-brand-600 flex items-center justify-center text-white shrink-0">
+          <i data-lucide="sparkles" class="w-4 h-4"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-semibold text-ink-900">KI-Vervollständigung</p>
+          ${ctx.suggestionsLoading
+            ? `<p class="text-[11px] text-purple-700 flex items-center gap-1"><i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Analysiere Ticket + Email-Signaturen…</p>`
+            : ctx.suggestionsError
+              ? `<p class="text-[11px] text-red-700">Fehler: ${escapeHtml(ctx.suggestionsError)}</p>`
+              : ctx.suggestions
+                ? (suggOpen
+                  ? `<p class="text-[11px] text-purple-700">${suggOpen} Vorschlag${suggOpen===1?'':'e'} unter den Feldern — einzeln oder alle übernehmen.</p>`
+                  : (suggAccepted > 0
+                    ? `<p class="text-[11px] text-emerald-700"><i data-lucide="check-circle-2" class="w-3 h-3 inline"></i> ${suggAccepted} Vorschlag${suggAccepted===1?'':'e'} übernommen — jetzt unten „Im Freshdesk speichern" tippen.</p>`
+                    : `<p class="text-[11px] text-emerald-700">Alle Felder sehen gut aus — keine Vervollständigung nötig.</p>`))
+                : `<p class="text-[11px] text-ink-500">Vorschläge aus Ticket-Kontext werden generiert…</p>`}
+        </div>
+        ${!ctx.suggestionsLoading ? `
+          <div class="flex flex-col gap-1 shrink-0">
+            ${suggOpen ? `<button type="button" onclick="_tcmAcceptAll()" class="text-[11px] bg-purple-600 hover:bg-purple-700 text-white px-2.5 py-1.5 rounded inline-flex items-center gap-1 font-semibold"><i data-lucide="check-check" class="w-3 h-3"></i>Alle (${suggOpen})</button>` : ''}
+            <button type="button" onclick="_tcmLoadSuggestions(true)" class="text-[11px] bg-white border border-purple-300 text-purple-700 px-2.5 py-1.5 rounded inline-flex items-center gap-1"><i data-lucide="refresh-cw" class="w-3 h-3"></i>${ctx.suggestions ? 'Neu' : 'Analysieren'}</button>
+          </div>` : ''}
       </div>
-    `;
-    if (window.lucide) lucide.createIcons();
+      <p class="text-[10px] text-ink-500 mt-2 italic truncate">Quelle: Ticket #${ctx.ticket?.id || '?'}${subject ? ' — „' + escapeHtml(subject.slice(0, 80)) + (subject.length > 80 ? '…' : '') + '"' : ''}</p>
+    </div>`;
+
+  // ERP-Block
+  const erpBlock = `
+    <div class="bg-white border-2 ${erpCustomer ? 'border-emerald-200' : 'border-amber-200'} rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <i data-lucide="${erpCustomer ? 'building-2' : 'user-plus'}" class="w-4 h-4 ${erpCustomer ? 'text-emerald-700' : 'text-amber-700'}"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">ERP-Status</h3>
+        <span class="ml-auto text-[10px] ${erpCustomer ? 'text-emerald-700 bg-emerald-100' : 'text-amber-700 bg-amber-100'} px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">
+          ${erpCustomer ? (customerNo ? escapeHtml(customerNo) : '✓ im ERP') : '⚠ nicht im ERP'}
+        </span>
+      </div>
+      ${erpCustomer ? `
+        <p class="text-sm text-ink-800 mb-1.5">${escapeHtml(erpName1 || '–')}</p>
+        ${erpContact ? `<p class="text-xs text-ink-600 mb-2">Kontakt: ${escapeHtml(((erpContact.fields.first_name || '') + ' ' + (erpContact.fields.last_name || '')).trim() || '–')}${erpContact.fields.role ? ' (' + escapeHtml(erpContact.fields.role) + ')' : ''}</p>` : '<p class="text-xs text-amber-700 mb-2">⚠ Kein Contact-Eintrag — nur Customer</p>'}
+        <button type="button" onclick="closeTopModal();_tcmCtx=null;setTimeout(()=>openCustomerModal('${erpCustomer.id}'),100)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
+          <i data-lucide="external-link" class="w-4 h-4"></i> Im ERP öffnen
+        </button>
+      ` : `
+        <p class="text-xs text-ink-600 mb-2">Anlegen erstellt Customer + Contact + synct zu Freshdesk + Freshsales.</p>
+        <button type="button" onclick="closeTopModal();_tcmCtx=null;setTimeout(()=>_qvCreateContactInErp(${ctx.ticketId}, null),200)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg">
+          <i data-lucide="user-plus" class="w-4 h-4"></i> Im ERP anlegen + CRM-Sync
+        </button>
+      `}
+    </div>`;
+
+  // Freshdesk-Kontakt-Editor
+  const fdBlock = `
+    <div class="bg-white border-2 border-brand-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="user" class="w-4 h-4 text-brand-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Freshdesk-Kontakt</h3>
+        <span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">Contact #${c.id || '?'}</span>
+      </div>
+      <div class="space-y-2 text-xs">
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Name</label>
+          <input id="tcmName" type="text" value="${escapeHtml(c.name || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('name', c.name)}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email</label>
+          <input id="tcmEmail" type="email" value="${escapeHtml(c.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('email', c.email)}
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Festnetz</label>
+            <input id="tcmPhone" type="tel" value="${escapeHtml(c.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('phone', c.phone)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mobil</label>
+            <input id="tcmMobile" type="tel" value="${escapeHtml(c.mobile || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('mobile', c.mobile)}
+          </div>
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Job-Titel</label>
+          <input id="tcmJob" type="text" value="${escapeHtml(c.job_title || '')}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('job_title', c.job_title)}
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Adresse</label>
+          <textarea id="tcmAddress" rows="2" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm resize-none">${escapeHtml(c.address || '')}</textarea>
+          ${sBan('address', c.address)}
+        </div>
+        <button id="tcmSaveBtn" type="button" onclick="_tcmSaveFd(this)" ${ctx.saving ? 'disabled' : ''} class="w-full mt-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-60 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+          <i data-lucide="${ctx.saving ? 'loader-2' : 'save'}" class="w-4 h-4 ${ctx.saving ? 'animate-spin' : ''}"></i> ${ctx.saving ? 'Speichere…' : 'Im Freshdesk speichern'}
+        </button>
+      </div>
+    </div>`;
+
+  body.innerHTML = aiTop + erpBlock + fdBlock;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function _tcmLoadSuggestions(force) {
+  const ctx = _tcmCtx;
+  if (!ctx?.ticket || !ctx?.fd) return;
+  if (force) _tcmSyncInputs();
+  ctx.suggestionsLoading = true;
+  ctx.suggestionsError = null;
+  _tcmRender();
+  try {
+    // Conversations für Signaturen + Verlauf
+    let conv = [];
+    try { conv = await freshdeskFetch('tickets/' + ctx.ticketId + '/conversations'); } catch (_) {}
+    const raw = await _tcmAiSuggest(ctx.fd, ctx.ticket, conv);
+    const norm = {};
+    ['name','email','phone','mobile','job_title','address'].forEach(f => {
+      const s = raw?.[f];
+      if (s && s.value && String(s.value).trim()) {
+        norm[f] = { value: String(s.value).trim(), source: String(s.source || 'KI-Analyse').slice(0, 80), accepted: false };
+      }
+    });
+    ctx.suggestions = norm;
   } catch (e) {
-    if (result) result.innerHTML = `<p class="text-xs text-red-700 mt-2">${escapeHtml(e.message)}</p>`;
+    ctx.suggestionsError = e.message;
   } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="wand-sparkles" class="w-4 h-4"></i> Daten aus Ticket extrahieren'; if (window.lucide) lucide.createIcons(); }
+    ctx.suggestionsLoading = false;
+    _tcmRender();
+  }
+}
+
+async function _tcmAiSuggest(contact, ticket, conv) {
+  const desc = _fdHtmlToText(ticket.description_text || ticket.description || '').slice(0, 2500);
+  const convText = (Array.isArray(conv) ? conv : [])
+    .slice().sort((a,b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
+    .map(c => (c.private ? '[Notiz] ' : '') + (c.incoming ? 'Kunde' : 'Agent') + ': ' + _fdHtmlToText(c.body_text || c.body || '').slice(0, 1500))
+    .join('\n\n');
+  const cur = {
+    name: contact.name || null, email: contact.email || null,
+    phone: contact.phone || null, mobile: contact.mobile || null,
+    job_title: contact.job_title || null, address: contact.address || null,
+  };
+  const prompt = `Du extrahierst Kontaktdaten aus einem Helpdesk-Ticket. Analysiere Betreff, Anfragen, Konversation und vor allem EMAIL-SIGNATUREN am Ende von Nachrichten — die enthalten meist Name, Position, Firma, Telefonnummern, Adresse.
+
+AKTUELLE KONTAKTDATEN (überschreibe nur wenn du wirklich bessere/präzisere Werte findest):
+${JSON.stringify(cur, null, 2)}
+
+REGELN:
+- Schlage nur Werte vor, die du KLAR aus dem Text belegen kannst.
+- Lass Felder weg, für die du unsicher bist (lieber gar nichts als raten).
+- Telefonnummern bevorzugt im internationalen Format (+49 …) wenn erkennbar.
+- Bei Telefon: erkenne Festnetz vs Mobil (Mobil = +491XX, 015X, 016X, 017X bei Deutschland).
+- Adresse als ein zusammenhängender String mit Zeilenumbrüchen \\n (Straße, PLZ Ort, Land).
+- Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":"…","source":"woraus du es ablesen konntest, max 60 Zeichen"}.
+
+JSON-FORMAT (Felder weglassen wenn unsicher):
+{
+  "name":      {"value": "...", "source": "Signatur in Email 2"},
+  "phone":     {"value": "+49 30 …", "source": "Footer Email 1"},
+  "mobile":    {"value": "+49 170 …", "source": "..."},
+  "job_title": {"value": "...", "source": "..."},
+  "address":   {"value": "...", "source": "..."}
+}
+
+TICKET:
+Betreff: ${ticket.subject || ''}
+Von: ${ticket.requester?.name || '?'}${ticket.requester?.email ? ' <' + ticket.requester.email + '>' : ''}
+
+Erste Anfrage:
+${desc}
+
+${convText ? 'Verlauf:\n' + convText : ''}
+
+Welche Kontaktdaten kannst du sicher aus diesem Text extrahieren oder verbessern?`;
+
+  const raw = await askAI(prompt, { purpose: 'tcmSuggest', maxTokens: 1500 });
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  try { return JSON.parse(cleaned); }
+  catch (_) {
+    // Fallback: ersten {…} Block extrahieren
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (m) return JSON.parse(m[0]);
+    throw new Error('KI-Antwort konnte nicht geparst werden');
+  }
+}
+
+function _tcmAccept(field) {
+  const ctx = _tcmCtx;
+  const s = ctx?.suggestions?.[field];
+  if (!s) return;
+  _tcmSyncInputs();
+  ctx.fd[field] = s.value;
+  s.accepted = true;
+  _tcmRender();
+  const map = { name:'tcmName', email:'tcmEmail', phone:'tcmPhone', mobile:'tcmMobile', job_title:'tcmJob', address:'tcmAddress' };
+  setTimeout(() => {
+    const el = document.getElementById(map[field]);
+    if (el) {
+      el.classList.add('ring-2', 'ring-purple-400');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-purple-400'), 1500);
+    }
+  }, 30);
+}
+
+function _tcmAcceptAll() {
+  const ctx = _tcmCtx;
+  if (!ctx?.suggestions) return;
+  _tcmSyncInputs();
+  let count = 0;
+  Object.keys(ctx.suggestions).forEach(f => {
+    const s = ctx.suggestions[f];
+    if (s && !s.accepted) {
+      ctx.fd[f] = s.value;
+      s.accepted = true;
+      count++;
+    }
+  });
+  _tcmRender();
+  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt unten „Im Freshdesk speichern"', 'success', 4000);
+}
+
+async function _tcmSaveFd(btnEl) {
+  const ctx = _tcmCtx;
+  if (!ctx?.fd?.id) return;
+  _tcmSyncInputs();
+  const fields = {
+    name:      (ctx.fd.name || '').trim(),
+    email:     (ctx.fd.email || '').trim() || null,
+    phone:     (ctx.fd.phone || '').trim() || null,
+    mobile:    (ctx.fd.mobile || '').trim() || null,
+    job_title: (ctx.fd.job_title || '').trim() || null,
+    address:   (ctx.fd.address || '').trim() || null,
+  };
+  if (!fields.name) return toast('Name darf nicht leer sein', 'warn');
+  if (!APP_KEYS.proxyV2) return toast('Speichern benötigt Val.town-Proxy v2', 'error', 7000);
+  ctx.saving = true;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, {
+      method: 'PUT',
+      body: fields
+    });
+    // Cache invalidieren + neu laden, damit Ticket-Liste / Detail aktualisiert sind
+    _fdContactCache.delete(ctx.fd.id);
+    _fdAiSummaryCache.delete(ctx.ticketId);
+    toast('Freshdesk-Kontakt gespeichert', 'success', 3000);
+    closeTopModal();
+    _tcmCtx = null;
+    // Detail-Modal + Liste refresh wenn sichtbar
+    if (_fdTicketState.id === ctx.ticketId && typeof openFreshdeskTicket === 'function') {
+      try { openFreshdeskTicket(ctx.ticketId); } catch (_) {}
+    }
+    if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+  } catch (e) {
+    ctx.saving = false;
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Im Freshdesk speichern'; if (window.lucide) lucide.createIcons(); }
+    toast('Speichern fehlgeschlagen: ' + e.message, 'error', 6000);
   }
 }
 
