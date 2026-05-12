@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.28';
+const APP_VERSION = 'v4.29';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4966,16 +4966,14 @@ Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text extrahieren ode
 
 // Schreibt einen Vorschlagswert in den passenden Slot (Contact oder Company).
 // Returns false wenn das Ziel nicht existiert (z.B. Company-Vorschlag ohne verknüpfte Firma).
+// Wirft KEINE Toasts (würde sonst beim "Alle" zu Spam führen) — Caller toastet aggregiert.
 function _tcmApplySuggestion(field, value) {
   const ctx = _tcmCtx;
   if (!ctx) return false;
   if (field.startsWith('company_')) {
     // KRITISCH: Nur in fdCompany schreiben wenn echte ID da ist — sonst täuscht der Render
     // einen Save-Block vor (Bug bis v4.27).
-    if (!ctx.fdCompany?.id) {
-      toast('Firma muss erst in Freshdesk angelegt werden (Button unten), dann kannst du Firma-Vorschläge übernehmen', 'warn', 6000);
-      return false;
-    }
+    if (!ctx.fdCompany?.id) return false;
     const f = field.replace(/^company_/, '');
     if (f === 'domains') {
       ctx.fdCompany.domains = String(value || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -4994,7 +4992,13 @@ function _tcmAccept(field) {
   const s = ctx?.suggestions?.[field];
   if (!s) return;
   _tcmSyncInputs();
-  if (!_tcmApplySuggestion(field, s.value)) return;   // ohne Erfolg nicht als accepted markieren
+  if (!_tcmApplySuggestion(field, s.value)) {
+    // Einzelner Fall: hier darf der Toast kommen, weil's nur einmal triggert
+    if (field.startsWith('company_') && !ctx.fdCompany?.id) {
+      toast('Firma muss erst in Freshdesk angelegt werden (Button unten)', 'warn', 5000);
+    }
+    return;
+  }
   s.accepted = true;
   _tcmRender();
   const map = {
@@ -5029,7 +5033,14 @@ function _tcmAcceptAll() {
     }
   });
   _tcmRender();
-  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen' + (skipped ? ` (${skipped} übersprungen — Firma fehlt)` : '') + ' — jetzt „Speichern"', 'success', 4500);
+  // EIN aggregierter Toast statt N Spam-Toasts
+  if (count && skipped) {
+    toast(count + ' übernommen · ' + skipped + ' Firma-Vorschläge übersprungen (erst Firma anlegen)', 'info', 5500);
+  } else if (count) {
+    toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt „Speichern"', 'success', 4000);
+  } else if (skipped) {
+    toast('Alle ' + skipped + ' Firma-Vorschläge übersprungen — bitte erst „Firma in Freshdesk anlegen"', 'warn', 5500);
+  }
 }
 
 async function _tcmSaveFd(btnEl) {
