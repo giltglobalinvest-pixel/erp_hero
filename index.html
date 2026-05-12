@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.42';
+const APP_VERSION = 'v4.43';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5983,11 +5983,43 @@ async function _tcmSaveFsContact(btnEl) {
   toast('Speichere Contact in Freshsales…', 'info', 2500);
 
   try {
-    const res = await proxyFetch('freshsales/api/contacts/' + contactId, {
-      method: 'PUT',
-      body: { contact: contactBody }
-    });
-    console.log('[tcmSaveFsContact] PUT OK', res);
+    // 1. Erst Versuch: nur geänderte Felder. Wenn FS mit Pflicht-Custom-Field-Validation
+    //    bricht, holen wir den vollen Contact und senden ihn komplett.
+    let res;
+    try {
+      res = await proxyFetch('freshsales/api/contacts/' + contactId, {
+        method: 'PUT',
+        body: { contact: contactBody }
+      });
+      console.log('[tcmSaveFsContact] PUT OK (slim body)', res);
+    } catch (slimErr) {
+      const m = String(slimErr?.message || '');
+      // Pflicht-Custom-Field-Validation? Dann mit vollem Contact-Body wiederholen
+      if (/ausfüllen|required|mandatory|400/i.test(m)) {
+        console.warn('[tcmSaveFsContact] slim PUT failed:', m, '— versuche full PUT');
+        const current = await _fsLoadContact(contactId, true);
+        if (current) {
+          const full = {
+            first_name: contactBody.first_name || current.first_name || '',
+            last_name:  contactBody.last_name  || current.last_name  || current.first_name || 'Unknown',
+            email:      contactBody.email      || current.email      || null,
+            work_number:   contactBody.work_number   || current.work_number   || '',
+            mobile_number: contactBody.mobile_number || current.mobile_number || '',
+            job_title:  contactBody.job_title  || current.job_title  || ''
+          };
+          // Bestehende Custom-Fields beibehalten — kritisch für Pflicht-Felder
+          if (current.custom_field && typeof current.custom_field === 'object') {
+            full.custom_field = current.custom_field;
+          }
+          console.log('[tcmSaveFsContact] PUT mit vollem Body inkl. custom_field:', full);
+          res = await proxyFetch('freshsales/api/contacts/' + contactId, {
+            method: 'PUT',
+            body: { contact: full }
+          });
+          console.log('[tcmSaveFsContact] PUT OK (full body)', res);
+        } else throw slimErr;
+      } else throw slimErr;
+    }
     _fsContactCache.delete(contactId);
     const refreshed = await _fsLoadContact(contactId, true);
     if (refreshed) ctx.fsContact = refreshed;
@@ -5998,7 +6030,13 @@ async function _tcmSaveFsContact(btnEl) {
     console.error('[tcmSaveFsContact] FAILED', e);
     ctx.savingFsContact = false;
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Contact in Freshsales speichern'; if (window.lucide) lucide.createIcons(); }
-    toast('Speichern fehlgeschlagen: ' + (e?.message || e), 'error', 8000);
+    const m = String(e?.message || e);
+    // Spezifische User-freundliche Meldung bei Pflicht-Custom-Field-Block
+    if (/Kontakt-ID|ausfüllen|required|mandatory/i.test(m)) {
+      toast('FS-Pflichtfeld „Kontakt-ID" blockiert Update. Bitte in FS-Admin → Contacts → Fields → „Kontakt-ID" auf optional setzen (Required-Häkchen entfernen).', 'error', 12000);
+    } else {
+      toast('Speichern fehlgeschlagen: ' + m, 'error', 8000);
+    }
   }
 }
 
