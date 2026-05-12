@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.27';
+const APP_VERSION = 'v4.28';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4809,8 +4809,9 @@ function _tcmRender() {
       </div>
     </div>`;
 
-  // Freshdesk-Firma-Editor (separat vom Contact)
-  const co = ctx.fdCompany || null;
+  // Freshdesk-Firma-Editor (separat vom Contact).
+  // Nur den Save-Block zeigen, wenn echte ID vorliegt — sonst Anlegen-Block.
+  const co = (ctx.fdCompany && ctx.fdCompany.id) ? ctx.fdCompany : null;
   const fdCompanyBlock = co ? `
     <div class="bg-white border-2 border-indigo-200 rounded-2xl p-4">
       <div class="flex items-center gap-2 mb-3">
@@ -4963,13 +4964,19 @@ Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text extrahieren ode
   }
 }
 
-// Schreibt einen Vorschlagswert in den passenden Slot (Contact oder Company)
+// Schreibt einen Vorschlagswert in den passenden Slot (Contact oder Company).
+// Returns false wenn das Ziel nicht existiert (z.B. Company-Vorschlag ohne verknüpfte Firma).
 function _tcmApplySuggestion(field, value) {
   const ctx = _tcmCtx;
-  if (!ctx) return;
+  if (!ctx) return false;
   if (field.startsWith('company_')) {
+    // KRITISCH: Nur in fdCompany schreiben wenn echte ID da ist — sonst täuscht der Render
+    // einen Save-Block vor (Bug bis v4.27).
+    if (!ctx.fdCompany?.id) {
+      toast('Firma muss erst in Freshdesk angelegt werden (Button unten), dann kannst du Firma-Vorschläge übernehmen', 'warn', 6000);
+      return false;
+    }
     const f = field.replace(/^company_/, '');
-    ctx.fdCompany = ctx.fdCompany || {};
     if (f === 'domains') {
       ctx.fdCompany.domains = String(value || '').split(',').map(s => s.trim()).filter(Boolean);
     } else {
@@ -4979,6 +4986,7 @@ function _tcmApplySuggestion(field, value) {
     ctx.fd = ctx.fd || {};
     ctx.fd[field] = value;
   }
+  return true;
 }
 
 function _tcmAccept(field) {
@@ -4986,7 +4994,7 @@ function _tcmAccept(field) {
   const s = ctx?.suggestions?.[field];
   if (!s) return;
   _tcmSyncInputs();
-  _tcmApplySuggestion(field, s.value);
+  if (!_tcmApplySuggestion(field, s.value)) return;   // ohne Erfolg nicht als accepted markieren
   s.accepted = true;
   _tcmRender();
   const map = {
@@ -5008,16 +5016,20 @@ function _tcmAcceptAll() {
   if (!ctx?.suggestions) return;
   _tcmSyncInputs();
   let count = 0;
+  let skipped = 0;
   Object.keys(ctx.suggestions).forEach(f => {
     const s = ctx.suggestions[f];
     if (s && !s.accepted) {
-      _tcmApplySuggestion(f, s.value);
-      s.accepted = true;
-      count++;
+      if (_tcmApplySuggestion(f, s.value)) {
+        s.accepted = true;
+        count++;
+      } else {
+        skipped++;
+      }
     }
   });
   _tcmRender();
-  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen — jetzt „Speichern" je Block', 'success', 4000);
+  if (count) toast(count + ' Vorschlag' + (count===1?'':'e') + ' übernommen' + (skipped ? ` (${skipped} übersprungen — Firma fehlt)` : '') + ' — jetzt „Speichern"', 'success', 4500);
 }
 
 async function _tcmSaveFd(btnEl) {
