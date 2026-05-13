@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.49';
+const APP_VERSION = 'v4.50';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1849,7 +1849,8 @@ async function _tcmSaveErp(customerId, btnEl) {
       }
     }
 
-    // Auto-Sync der 4 ERP-Custom-Fields zurück zu FS-Sales-Account
+    // Auto-Sync der 4 ERP-Custom-Fields zurück zu FS-Sales-Account.
+    // FS-API akzeptiert Custom-Fields in verschiedenen Body-Formaten je nach Setup → probieren + verifizieren.
     let syncStatus = 'skipped';
     if (ctx.fs?.id && APP_KEYS.proxyV2) {
       const cfPayload = {};
@@ -1858,22 +1859,45 @@ async function _tcmSaveErp(customerId, btnEl) {
       if (patch.payment_terms)  cfPayload.payment_terms = patch.payment_terms;
       if (patch.delivery_terms) cfPayload.delivery_terms = patch.delivery_terms;
       // Mandant-Name als zusätzlicher Wert
-      const mandantId = (ctx.erpCustomers.find(c => c.id === customerId)?.fields?.company_id || [])[0];
-      const mandant = ctx.mandants.find(m => m.id === mandantId);
-      if (mandant?.fields?.name) cfPayload.erp_mandant = mandant.fields.name;
+      const mandantIdSync = (ctx.erpCustomers.find(c => c.id === customerId)?.fields?.company_id || [])[0];
+      const mandantSync = ctx.mandants.find(m => m.id === mandantIdSync);
+      if (mandantSync?.fields?.name) cfPayload.erp_mandant = mandantSync.fields.name;
       if (Object.keys(cfPayload).length) {
-        console.log('[tcmSaveErp] FS-Sync custom_field:', cfPayload);
-        try {
-          await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, {
-            method: 'PUT',
-            body: { sales_account: { custom_field: cfPayload } }
-          });
+        // Mit cf_-Prefix-Varianten
+        const cfWithPrefix = {};
+        Object.entries(cfPayload).forEach(([k, v]) => { cfWithPrefix['cf_' + k] = v; });
+        const tryBodies = [
+          { sales_account: { custom_field: cfPayload } },
+          { sales_account: { custom_fields: cfPayload } },
+          { sales_account: { custom_field: cfWithPrefix } },
+          { sales_account: cfPayload },                 // direkt als Top-Level
+          { sales_account: cfWithPrefix }
+        ];
+        const verifySync = async () => {
           _fsAccountCache.delete(ctx.fs.id);
-          syncStatus = 'ok';
-        } catch (syncErr) {
-          console.warn('[tcmSaveErp] FS-Sync fehlgeschlagen:', syncErr.message);
-          syncStatus = 'failed';
+          const r = await _fsLoadAccount(ctx.fs.id, true);
+          const cf = r?.custom_field || r?.custom_fields || {};
+          // Mindestens 1 Wert aus payload muss in der frischen Response auftauchen
+          return Object.keys(cfPayload).some(k => {
+            const val = cf[k] ?? cf['cf_' + k];
+            return String(val || '').trim() === String(cfPayload[k]).trim();
+          });
+        };
+        for (const body of tryBodies) {
+          try {
+            console.log('[tcmSaveErp] FS-Sync versuche Body:', body);
+            await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, { method: 'PUT', body });
+            if (await verifySync()) {
+              console.log('[tcmSaveErp] ✓ FS-Sync erfolgreich mit Body:', body);
+              syncStatus = 'ok';
+              break;
+            }
+            console.warn('[tcmSaveErp] PUT akzeptiert aber Werte nicht uebernommen — naechster Body');
+          } catch (syncErr) {
+            console.warn('[tcmSaveErp] PUT fehlgeschlagen:', syncErr.message);
+          }
         }
+        if (syncStatus !== 'ok') syncStatus = 'failed';
       }
     }
 
@@ -5749,7 +5773,12 @@ function _tcmRender() {
           <button id="tcmFsSaveBtn" type="button" onclick="_tcmSaveFs(this)" ${ctx.savingFs ? 'disabled' : ''} class="w-full mt-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
             <i data-lucide="${ctx.savingFs ? 'loader-2' : 'save'}" class="w-4 h-4 ${ctx.savingFs ? 'animate-spin' : ''}"></i> ${ctx.savingFs ? 'Speichere…' : 'In Freshsales speichern'}
           </button>
-          ${fsUrl ? `<a href="${escapeHtml(fsUrl)}" target="_blank" rel="noopener" class="text-[11px] text-purple-700 underline mt-2 inline-flex items-center gap-1"><i data-lucide="external-link" class="w-3 h-3"></i> Direkt in Freshsales öffnen</a>` : ''}
+          <div class="flex gap-2 mt-2 flex-wrap items-center">
+            <button type="button" onclick="_tcmReloadFs(this)" class="text-xs px-2.5 py-1.5 border border-purple-300 hover:bg-purple-50 text-purple-700 rounded-lg inline-flex items-center gap-1.5">
+              <i data-lucide="refresh-cw" class="w-3 h-3"></i> Aus Freshsales neu laden
+            </button>
+            ${fsUrl ? `<a href="${escapeHtml(fsUrl)}" target="_blank" rel="noopener" class="text-[11px] text-purple-700 underline inline-flex items-center gap-1"><i data-lucide="external-link" class="w-3 h-3"></i> Direkt in Freshsales öffnen</a>` : ''}
+          </div>
         </div>
       ` : `
         ${fsContact ? `
