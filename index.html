@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.63';
+const APP_VERSION = 'v4.64';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -7907,10 +7907,15 @@ function _renderAiEditableFieldsBlock() {
         const availableToAdd = attCache.filter(a => !selectedIds.includes(a.id));
         return `
         <div class="mb-3">
-          <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold flex items-center gap-1.5 mb-1.5">
-            <i data-lucide="paperclip" class="w-3 h-3"></i> Anhänge (${selectedItems.length})
-            <span class="text-ink-400 font-normal normal-case">— PDFs die mit dem Angebot versendet werden</span>
-          </p>
+          <div class="flex items-center justify-between mb-1.5 flex-wrap gap-2">
+            <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold flex items-center gap-1.5">
+              <i data-lucide="paperclip" class="w-3 h-3"></i> Anhänge (${selectedItems.length})
+              <span class="text-ink-400 font-normal normal-case">— PDFs die mit dem Angebot versendet werden</span>
+            </p>
+            <button type="button" onclick="_fdOpenAttachmentMgmt()" class="text-xs px-2 py-1 border border-blue-200 bg-white text-blue-700 hover:bg-blue-50 rounded inline-flex items-center gap-1">
+              <i data-lucide="upload" class="w-3 h-3"></i> Anhänge verwalten / hochladen
+            </button>
+          </div>
           ${selectedItems.length ? `
             <div class="space-y-1 mb-2">
               ${selectedItems.map((a, idx) => {
@@ -8071,6 +8076,32 @@ function _fdAddAttachment(attId) {
     _fdTicketState.editFields.attachment_ids.push(attId);
   }
   _renderFreshdeskTicket();
+}
+// Öffnet die zentrale Anhänge-Verwaltung als Stack-Modal + lädt nach Schließen den Cache neu
+async function _fdOpenAttachmentMgmt() {
+  await openAttachmentManagement(true);
+  // Watch the modal backdrop — wenn versteckt → Cache refresh + Re-Render
+  const backdrop = document.getElementById('modalBackdrop2');
+  if (!backdrop) return;
+  const observer = new MutationObserver(async () => {
+    if (backdrop.classList.contains('hidden') || backdrop.style.display === 'none') {
+      observer.disconnect();
+      await _fdRefreshAttachmentCache();
+    }
+  });
+  observer.observe(backdrop, { attributes: true, attributeFilter: ['class', 'style'] });
+}
+async function _fdRefreshAttachmentCache() {
+  const cur = getCurrentCompany();
+  if (!cur) return;
+  try {
+    const all = await readData('Attachment');
+    _fdTicketState.cache = _fdTicketState.cache || {};
+    _fdTicketState.cache.attachments = all
+      .filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') === 'aktiv')
+      .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+    _renderFreshdeskTicket();
+  } catch (e) { console.warn('[fdRefreshAttCache] failed:', e.message); }
 }
 function _onFdCustomerChange(value) {
   _fdTicketState.editFields.customer_id = value || '';
