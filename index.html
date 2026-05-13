@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.45';
+const APP_VERSION = 'v4.46';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1707,27 +1707,46 @@ async function _fsFindAccountByEmail(email) {
 // Returns true wenn erfolgreich, false sonst.
 async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
   if (!contactId || !accountId) return false;
-  const sa = currentContact?.sales_accounts;
-  const hasLink = Array.isArray(sa) && sa.some(a => (typeof a === 'object' ? a.id : a) === accountId);
-  if (hasLink) {
+  // Verifiziert: ist contactId mit accountId tatsächlich verknüpft? (FS gibt manchmal 200 OK ohne tatsächlich zu verknüpfen)
+  const verifyLink = async () => {
+    _fsContactCache.delete(contactId);
+    const c = await _fsLoadContact(contactId, true);
+    const sa = c?.sales_accounts;
+    return Array.isArray(sa) && sa.some(a => (typeof a === 'object' ? a.id : a) === accountId);
+  };
+  if (await verifyLink()) {
     console.log('[fsLink] bereits verknüpft', contactId, '↔', accountId);
     return true;
   }
   console.log('[fsLink] verknüpfe Contact', contactId, '↔ Sales Account', accountId);
-  // Strategie A: PUT auf Sales-Account (umgeht Contact-Pflichtfeld-Validation)
+
+  // Strategie A: PUT auf Sales-Account
   const tryAccountBodies = [
     { sales_account: { contacts: [{ id: contactId, is_primary: true }] } },
-    { sales_account: { contact_ids: [contactId] } }
+    { sales_account: { contact_ids: [contactId] } },
+    { sales_account: { primary_contact_id: contactId } }
   ];
   for (const body of tryAccountBodies) {
     try {
       console.log('[fsLink] PUT /sales_accounts versuche:', body);
       await proxyFetch('freshsales/api/sales_accounts/' + accountId, { method: 'PUT', body });
       _fsAccountCache.delete(accountId);
-      return true;
+      if (await verifyLink()) { console.log('[fsLink] ✓ verknüpft via PUT sales_accounts mit', body); return true; }
+      console.warn('[fsLink] PUT akzeptiert (200) aber nicht wirksam — nächste Variante');
     } catch (e) { console.warn('[fsLink] Sales-Account-PUT fehlgeschlagen:', e.message); }
   }
-  // Strategie B: PUT auf Contact mit Auto-Fill für einzigartige Custom-Fields
+
+  // Strategie B: Association-Endpoint auf Sales-Account-Seite
+  try {
+    console.log('[fsLink] POST /sales_accounts/{id}/contacts');
+    await proxyFetch('freshsales/api/sales_accounts/' + accountId + '/contacts', {
+      method: 'POST',
+      body: { contact_id: contactId }
+    });
+    if (await verifyLink()) { console.log('[fsLink] ✓ verknüpft via POST sales_accounts/contacts'); return true; }
+  } catch (e) { console.warn('[fsLink] POST /sales_accounts/contacts fehlgeschlagen:', e.message); }
+
+  // Strategie C: PUT auf Contact mit Auto-Fill für einzigartige Custom-Fields
   const existingCf = currentContact?.custom_field || {};
   const cfAutoFill = { ...existingCf };
   if (!existingCf.cf_kontaktid && !existingCf.cf_kontakt_id) {
@@ -1744,19 +1763,22 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
       console.log('[fsLink] PUT /contacts versuche:', body);
       await proxyFetch('freshsales/api/contacts/' + contactId, { method: 'PUT', body });
       _fsContactCache.delete(contactId);
-      return true;
+      if (await verifyLink()) { console.log('[fsLink] ✓ verknüpft via PUT contacts mit', body); return true; }
+      console.warn('[fsLink] PUT contacts akzeptiert aber nicht wirksam — nächste Variante');
     } catch (e) { console.warn('[fsLink] Contact-PUT fehlgeschlagen:', e.message); }
   }
-  // Strategie C: dedizierte Association-API
+
+  // Strategie D: dedizierte Association-API auf Contact-Seite
   try {
-    console.log('[fsLink] POST Association-API');
+    console.log('[fsLink] POST /contacts/{id}/sales_accounts');
     await proxyFetch('freshsales/api/contacts/' + contactId + '/sales_accounts', {
       method: 'POST',
       body: { sales_account_id: accountId }
     });
-    _fsContactCache.delete(contactId);
-    return true;
+    if (await verifyLink()) { console.log('[fsLink] ✓ verknüpft via POST contacts/sales_accounts'); return true; }
   } catch (e) { console.warn('[fsLink] Association-API fehlgeschlagen:', e.message); }
+
+  console.error('[fsLink] ✗ Keine Strategie hat geklappt. Manuelle Verknüpfung in FS nötig.');
   return false;
 }
 
