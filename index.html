@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.74';
+const APP_VERSION = 'v4.75';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -2692,6 +2692,11 @@ async function _memSend(ticketId, toEmail, fsContactId, btnEl) {
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Sende…'; if (window.lucide) lucide.createIcons(); }
   try {
+    // 0) email_config_id (Pflichtfeld für outbound_email) auflösen
+    const emailConfigId = await _getDefaultEmailConfigId();
+    if (!emailConfigId) {
+      throw new Error('Keine email_config_id verfügbar — Admin → Einstellungen → Step 8: Freshdesk Email-Inbox-ID setzen.');
+    }
     // 1) Outbound Email via Freshdesk — legt automatisch ein Ticket an
     const res = await proxyFetch('freshdesk/api/v2/tickets/outbound_email', {
       method: 'POST',
@@ -2699,6 +2704,7 @@ async function _memSend(ticketId, toEmail, fsContactId, btnEl) {
         subject: subj,
         description: body,
         email: toEmail,
+        email_config_id: Number(emailConfigId),
         status: 2,
         priority: 1,
         responder_id: APP_KEYS.user?._id ? null : undefined,
@@ -13259,6 +13265,32 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
+      <!-- ============ STEP 8 — Freshdesk Email-Inbox-ID (für Outbound-Email) ============ -->
+      ${(() => {
+        const cfgId = localStorage.getItem('fd_email_config_id') || '';
+        return `
+        <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+          ${stepHeader(8, 'Freshdesk Email-Inbox-ID (für Email-Versand)', cfgId ? statusBadge(true, 'gesetzt: ' + cfgId) : statusBadge(false, 'auto'))}
+          <div class="pl-11">
+            <p class="text-sm text-ink-700 mb-2">Freshdesk verlangt beim Versand einer Outbound-Email (z.B. Angebot per Mail) eine <code>email_config_id</code> — das ist die Inbox aus der versendet wird. Standardmäßig versucht die App, automatisch die Primary-Inbox aus <code>/api/v2/email_configs</code> zu holen. Wenn das fehlschlägt oder du eine bestimmte Inbox erzwingen willst, kannst du die ID hier manuell setzen.</p>
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 mb-3 text-[11px] text-blue-900">
+              <strong>So findest du die ID:</strong> Freshdesk → Admin → Email Settings → Klick auf die gewünschte Inbox → die ID steht in der URL hinter <code>/admin/email_settings/edit/</code>.
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <input type="text" id="settingsFdEmailConfigId" value="${escapeHtml(cfgId)}" placeholder="leer = automatisch erkennen" class="flex-1 min-w-[200px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
+              <button type="button" onclick="saveFdEmailConfigId(this)" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
+                <i data-lucide="save" class="w-4 h-4"></i> Speichern
+              </button>
+              <button type="button" onclick="listFdEmailConfigs(this)" class="text-xs px-3 py-2 border border-ink-200 hover:bg-ink-50 rounded-lg inline-flex items-center gap-1.5">
+                <i data-lucide="list" class="w-3.5 h-3.5"></i> Inboxes von FD laden
+              </button>
+            </div>
+            <div id="fdEmailConfigsResult" class="mt-2"></div>
+          </div>
+        </div>
+        `;
+      })()}
+
       <!-- ============ STEP 9 — Freshsales-CRM (optional) ============ -->
       ${(() => {
         const fsDomain = APP_KEYS.freshsalesSubdomain || '';
@@ -13618,6 +13650,61 @@ async function saveFreshdeskDomain() {
     renderAdminSettings();
   } catch (e) {
     toast(e.message, 'error', 7000);
+  }
+}
+
+// FD Email-Inbox-ID (für Outbound-Email) speichern — nur localStorage, kein Master-Base-Key
+function saveFdEmailConfigId(btnEl) {
+  const inp = document.getElementById('settingsFdEmailConfigId');
+  if (!inp) return;
+  const val = (inp.value || '').trim();
+  if (val && !/^\d+$/.test(val)) {
+    toast('Bitte nur die numerische ID eingeben', 'warn');
+    inp.focus();
+    return;
+  }
+  if (val) {
+    localStorage.setItem('fd_email_config_id', val);
+    window._cachedEmailConfigId = val;
+    toast('Email-Inbox-ID gespeichert: ' + val, 'success');
+  } else {
+    localStorage.removeItem('fd_email_config_id');
+    delete window._cachedEmailConfigId;
+    toast('Override entfernt — App nutzt jetzt wieder Auto-Detection', 'success');
+  }
+  renderAdminSettings();
+}
+
+// Verfügbare FD-Email-Configs (Inboxes) auflisten — User kann passende ID per Klick übernehmen
+async function listFdEmailConfigs(btnEl) {
+  const resBox = document.getElementById('fdEmailConfigsResult');
+  if (!resBox) return;
+  resBox.innerHTML = '<p class="text-xs text-ink-500 italic flex items-center gap-1.5"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade Inboxes von Freshdesk…</p>';
+  if (window.lucide) lucide.createIcons();
+  try {
+    const list = await proxyFetch('freshdesk/api/v2/email_configs', { method: 'GET' });
+    if (!Array.isArray(list) || !list.length) {
+      resBox.innerHTML = '<p class="text-xs text-amber-700">Freshdesk hat keine Email-Configs zurückgegeben. Sind in Freshdesk → Admin → Email Settings überhaupt Inboxes konfiguriert?</p>';
+      return;
+    }
+    resBox.innerHTML = `
+      <div class="bg-ink-50 border border-ink-200 rounded-lg p-2.5 space-y-1.5">
+        <p class="text-[11px] font-semibold text-ink-700 uppercase tracking-wider mb-1">Verfügbare Inboxes</p>
+        ${list.map(c => `
+          <div class="flex items-center justify-between gap-2 bg-white border border-ink-200 rounded px-2.5 py-1.5">
+            <div class="flex-1 min-w-0">
+              <div class="text-xs font-medium text-ink-900 truncate">${escapeHtml(c.name || c.reply_email || ('Config ' + c.id))}</div>
+              <div class="text-[10px] text-ink-500 truncate">${escapeHtml(c.reply_email || '')} ${c.primary_role ? '· <span class="text-emerald-700 font-semibold">Primary</span>' : ''} ${c.default_reply_email ? '· <span class="text-blue-700 font-semibold">Default</span>' : ''}</div>
+            </div>
+            <button type="button" onclick="(function(){document.getElementById('settingsFdEmailConfigId').value='${c.id}';saveFdEmailConfigId();})()" class="text-[11px] bg-brand-500 hover:bg-brand-600 text-white px-2 py-1 rounded font-medium shrink-0">
+              ID ${c.id} übernehmen
+            </button>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } catch (e) {
+    resBox.innerHTML = '<p class="text-xs text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
   }
 }
 
@@ -20783,6 +20870,35 @@ async function _emailQuoteInitEditor(initialHtml) {
   window._eqQuill = q;
 }
 
+// Liefert die email_config_id (Default-Inbox aus Freshdesk) — Pflichtfeld für outbound_email.
+// Gecached pro Session damit nicht bei jedem Versand neu abgefragt wird.
+async function _getDefaultEmailConfigId() {
+  if (window._cachedEmailConfigId) return window._cachedEmailConfigId;
+  // 1) Manuelle Override aus Admin-Settings (localStorage)
+  const override = localStorage.getItem('fd_email_config_id');
+  if (override && /^\d+$/.test(override)) {
+    window._cachedEmailConfigId = override;
+    return override;
+  }
+  // 2) Von Freshdesk abfragen
+  try {
+    const list = await proxyFetch('freshdesk/api/v2/email_configs', { method: 'GET' });
+    if (Array.isArray(list) && list.length) {
+      // Priorität: primary → default_reply_email → erstes Item
+      const primary = list.find(c => c.primary_role || c.default_reply_email) || list[0];
+      const id = primary?.id ? String(primary.id) : null;
+      if (id) {
+        window._cachedEmailConfigId = id;
+        console.log('[emailConfig] verwende', primary.name || primary.reply_email, '(ID:', id + ')');
+        return id;
+      }
+    }
+  } catch (e) {
+    console.warn('[emailConfig] /email_configs konnte nicht geladen werden:', e.message);
+  }
+  return null;
+}
+
 // Eigentlicher Send: PDF generieren + Bundle-Anhänge laden + multipart POST via FD outbound_email
 async function _emailQuoteDoSend(quoteId, customerName, quoteNo, btnEl) {
   const to      = (document.getElementById('eqRecipient')?.value || '').trim();
@@ -20830,11 +20946,18 @@ async function _emailQuoteDoSend(quoteId, customerName, quoteNo, btnEl) {
       } catch (_) {}
     }
 
-    // 3. FormData für FD outbound_email
+    // 3. email_config_id (FD-Pflichtfeld für outbound_email) auflösen
+    const emailConfigId = await _getDefaultEmailConfigId();
+    if (!emailConfigId) {
+      throw new Error('Keine email_config_id verfügbar — in Freshdesk → Admin → Email Settings einen Inbox-Channel konfigurieren oder unter ERP Admin → Einstellungen die ID manuell setzen.');
+    }
+
+    // 4. FormData für FD outbound_email
     const fd = new FormData();
     fd.append('subject', subj);
     fd.append('description', body);
     fd.append('email', to);
+    fd.append('email_config_id', emailConfigId);
     fd.append('status', '5');         // Closed: erzeugtes Ticket sofort geschlossen
     fd.append('priority', '1');
     fd.append('tags[]', 'angebot');
