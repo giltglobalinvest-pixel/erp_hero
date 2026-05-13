@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.48';
+const APP_VERSION = 'v4.49';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1780,6 +1780,121 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
 
   console.error('[fsLink] ✗ Keine Strategie hat geklappt. Manuelle Verknüpfung in FS nötig.');
   return false;
+}
+
+// Speichert die geänderten Felder eines ERP-Customers + zugehörigen Contacts (Airtable PATCH)
+// und synct die 4 ERP-spezifischen Custom-Fields (customer_no, vat_id, payment_terms, delivery_terms)
+// zurück zum FS-Sales-Account.
+async function _tcmSaveErp(customerId, btnEl) {
+  console.log('[tcmSaveErp] entered', customerId);
+  const ctx = _tcmCtx;
+  if (!ctx) return toast('Modal-Kontext verloren', 'error');
+  ctx.savingErp = ctx.savingErp || {};
+  ctx.savingErp[customerId] = true;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
+  toast('Speichere ERP-Customer…', 'info', 2500);
+
+  // Inputs einsammeln
+  const g = (id) => (document.getElementById(id)?.value || '').trim();
+  const customerFields = {
+    name1:          g('tcmErpName1_' + customerId),
+    phone:          g('tcmErpPhone_' + customerId),
+    website:        g('tcmErpWebsite_' + customerId),
+    email:          g('tcmErpEmail_' + customerId),
+    street:         g('tcmErpStreet_' + customerId),
+    zip:            g('tcmErpZip_' + customerId),
+    city:           g('tcmErpCity_' + customerId),
+    country:        g('tcmErpCountry_' + customerId),
+    customer_no:    g('tcmErpCustomerNo_' + customerId),
+    vat_id:         g('tcmErpVatId_' + customerId),
+    payment_terms:  g('tcmErpPaymentTerms_' + customerId),
+    delivery_terms: g('tcmErpDeliveryTerms_' + customerId)
+  };
+  // Leere Werte: NICHT löschen — nur Werte schicken die nicht leer sind
+  const patch = {};
+  Object.entries(customerFields).forEach(([k, v]) => { if (v) patch[k] = v; });
+  if (!patch.name1) {
+    ctx.savingErp[customerId] = false;
+    toast('Firmenname darf nicht leer sein', 'warn');
+    _tcmRender();
+    return;
+  }
+  console.log('[tcmSaveErp] PATCH Customer', customerId, patch);
+
+  try {
+    await updateData('Customer', customerId, patch);
+
+    // ERP-Contact: wenn vorhanden, auch updaten — sonst anlegen
+    const contactIdInput = document.getElementById('tcmErpcId_' + customerId);
+    const cFields = {
+      first_name: g('tcmErpcFirst_' + customerId),
+      last_name:  g('tcmErpcLast_' + customerId),
+      email:      g('tcmErpcEmail_' + customerId),
+      role:       g('tcmErpcRole_' + customerId),
+      phone:      g('tcmErpcPhone_' + customerId),
+      mobile:     g('tcmErpcMobile_' + customerId)
+    };
+    const cPatch = {};
+    Object.entries(cFields).forEach(([k, v]) => { if (v) cPatch[k] = v; });
+    if (Object.keys(cPatch).length || contactIdInput?.value) {
+      if (contactIdInput?.value) {
+        console.log('[tcmSaveErp] PATCH Contact', contactIdInput.value, cPatch);
+        await updateData('Contact', contactIdInput.value, cPatch);
+      } else if (cPatch.last_name || cPatch.first_name) {
+        // Contact neu anlegen (war noch keiner verknüpft)
+        cPatch.customer_id = [customerId];
+        if (!cPatch.last_name) cPatch.last_name = cPatch.first_name || 'Unbekannt';
+        console.log('[tcmSaveErp] CREATE Contact', cPatch);
+        await writeData('Contact', cPatch);
+      }
+    }
+
+    // Auto-Sync der 4 ERP-Custom-Fields zurück zu FS-Sales-Account
+    let syncStatus = 'skipped';
+    if (ctx.fs?.id && APP_KEYS.proxyV2) {
+      const cfPayload = {};
+      if (patch.customer_no)    cfPayload.erp_customer_no = patch.customer_no;
+      if (patch.vat_id)         cfPayload.vat_id = patch.vat_id;
+      if (patch.payment_terms)  cfPayload.payment_terms = patch.payment_terms;
+      if (patch.delivery_terms) cfPayload.delivery_terms = patch.delivery_terms;
+      // Mandant-Name als zusätzlicher Wert
+      const mandantId = (ctx.erpCustomers.find(c => c.id === customerId)?.fields?.company_id || [])[0];
+      const mandant = ctx.mandants.find(m => m.id === mandantId);
+      if (mandant?.fields?.name) cfPayload.erp_mandant = mandant.fields.name;
+      if (Object.keys(cfPayload).length) {
+        console.log('[tcmSaveErp] FS-Sync custom_field:', cfPayload);
+        try {
+          await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, {
+            method: 'PUT',
+            body: { sales_account: { custom_field: cfPayload } }
+          });
+          _fsAccountCache.delete(ctx.fs.id);
+          syncStatus = 'ok';
+        } catch (syncErr) {
+          console.warn('[tcmSaveErp] FS-Sync fehlgeschlagen:', syncErr.message);
+          syncStatus = 'failed';
+        }
+      }
+    }
+
+    // State neu laden
+    ctx.erpCustomers = await _findErpCustomersByFsAccountId(ctx.fs?.id).catch(()=>ctx.erpCustomers);
+    ctx._erpContactsAll = await readData('Contact').catch(()=>ctx._erpContactsAll);
+    if (ctx.fs?.id) {
+      const refreshedFs = await _fsLoadAccount(ctx.fs.id, true);
+      if (refreshedFs) ctx.fs = refreshedFs;
+    }
+    ctx.savingErp[customerId] = false;
+    ctx.dirty = true;
+    const syncMsg = syncStatus === 'ok' ? ' + zu FS gesynct ✓' : syncStatus === 'failed' ? ' (FS-Sync fehlgeschlagen, bitte manuell)' : '';
+    toast('ERP-Customer gespeichert' + syncMsg, 'success', 4500);
+    _tcmRender();
+  } catch (e) {
+    console.error('[tcmSaveErp] FAILED', e);
+    ctx.savingErp[customerId] = false;
+    toast('Speichern fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+    _tcmRender();
+  }
 }
 
 // Legt ERP-Customer + Contact für einen Mandanten an, mit FS-Werten als Prefill.
@@ -5128,6 +5243,8 @@ async function openTicketContactModal(ticketId) {
         // ERP-Customer-Records die auf diese FS-ID verlinken
         if (_tcmCtx.fs?.id) {
           _tcmCtx.erpCustomers = await _findErpCustomersByFsAccountId(_tcmCtx.fs.id);
+          // ERP-Contacts für alle verknüpften Customer laden
+          try { _tcmCtx._erpContactsAll = await readData('Contact'); } catch (_) {}
         }
         _tcmRender();
       }).catch(e => console.warn('[tcm] FS-Load fehlgeschlagen:', e.message));
@@ -5270,28 +5387,159 @@ function _tcmRender() {
       <p class="text-[10px] text-ink-500 mt-2 italic truncate">Quelle: Ticket #${ctx.ticket?.id || '?'}${subject ? ' — „' + escapeHtml(subject.slice(0, 80)) + (subject.length > 80 ? '…' : '') + '"' : ''}</p>
     </div>`;
 
-  // ERP-Block
-  const erpBlock = `
-    <div class="bg-white border-2 ${erpCustomer ? 'border-emerald-200' : 'border-amber-200'} rounded-2xl p-4">
-      <div class="flex items-center gap-2 mb-2">
-        <i data-lucide="${erpCustomer ? 'building-2' : 'user-plus'}" class="w-4 h-4 ${erpCustomer ? 'text-emerald-700' : 'text-amber-700'}"></i>
-        <h3 class="font-semibold text-ink-900 text-sm">ERP-Status</h3>
-        <span class="ml-auto text-[10px] ${erpCustomer ? 'text-emerald-700 bg-emerald-100' : 'text-amber-700 bg-amber-100'} px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">
-          ${erpCustomer ? (customerNo ? escapeHtml(customerNo) : '✓ im ERP') : '⚠ nicht im ERP'}
-        </span>
+  // ERP-Block: Pro verknüpften Customer einen voll-editierbaren Editor (mit Contact, falls vorhanden)
+  const erpCustsForEditor = ctx.erpCustomers || [];
+  const erpAllContacts = ctx._erpContactsAll || [];   // wird beim Modal-Open geladen
+  const buildErpEditor = (cust) => {
+    const f = cust.fields || {};
+    const cid = cust.id;
+    const mandantId = (f.company_id || [])[0];
+    const mandant = ctx.mandants.find(m => m.id === mandantId);
+    const mandantName = mandant?.fields?.name || '–';
+    // Zugehörigen Contact suchen (über customer_id-Verknüpfung)
+    const cont = erpAllContacts.find(co => (co.fields?.customer_id || []).includes(cid));
+    const cf = cont?.fields || null;
+    return `
+    <div class="bg-white border-2 border-emerald-300 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3 flex-wrap">
+        <i data-lucide="building-2" class="w-4 h-4 text-emerald-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">ERP-Customer · ${escapeHtml(mandantName)}</h3>
+        <span class="ml-auto text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-bold uppercase tracking-wider font-mono">${escapeHtml(f.customer_no || 'K-?')}</span>
       </div>
-      ${erpCustomer ? `
-        <p class="text-sm text-ink-800 mb-1.5">${escapeHtml(erpName1 || '–')}</p>
-        ${erpContact ? `<p class="text-xs text-ink-600 mb-2">Kontakt: ${escapeHtml(((erpContact.fields.first_name || '') + ' ' + (erpContact.fields.last_name || '')).trim() || '–')}${erpContact.fields.role ? ' (' + escapeHtml(erpContact.fields.role) + ')' : ''}</p>` : '<p class="text-xs text-amber-700 mb-2">⚠ Kein Contact-Eintrag — nur Customer</p>'}
-        <button type="button" onclick="closeTopModal();_tcmCtx=null;setTimeout(()=>openCustomerModal('${erpCustomer.id}'),100)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg">
-          <i data-lucide="external-link" class="w-4 h-4"></i> Im ERP öffnen
+      <div class="space-y-2 text-xs">
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Firma</label>
+          <input id="tcmErpName1_${cid}" type="text" value="${escapeHtml(f.name1 || '')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+          ${sBan('company_name', f.name1)}
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Telefon</label>
+            <input id="tcmErpPhone_${cid}" type="tel" value="${escapeHtml(f.phone || '')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm font-mono">
+            ${sBan('company_phone', f.phone)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Website</label>
+            <input id="tcmErpWebsite_${cid}" type="url" value="${escapeHtml(f.website || '')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+            ${sBan('company_website', f.website)}
+          </div>
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Email (Firma)</label>
+          <input id="tcmErpEmail_${cid}" type="email" value="${escapeHtml(f.email || '')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Straße + Hausnr.</label>
+          <input id="tcmErpStreet_${cid}" type="text" value="${escapeHtml(f.street || '')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+          ${sBan('company_street', f.street)}
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-emerald-800 block">PLZ</label>
+            <input id="tcmErpZip_${cid}" type="text" value="${escapeHtml(f.zip || '')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm font-mono">
+            ${sBan('company_zipcode', f.zip)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Stadt</label>
+            <input id="tcmErpCity_${cid}" type="text" value="${escapeHtml(f.city || '')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+            ${sBan('company_city', f.city)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Land</label>
+            <input id="tcmErpCountry_${cid}" type="text" value="${escapeHtml(f.country || 'Deutschland')}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+            ${sBan('company_country', f.country)}
+          </div>
+        </div>
+
+        <!-- ERP-Stammdaten: synct beim Save zurück zu Freshsales-Custom-Fields -->
+        <div class="border-t border-emerald-100 pt-2 mt-2">
+          <p class="text-[10px] uppercase font-semibold text-emerald-800 mb-1.5 flex items-center gap-1.5">
+            <i data-lucide="arrow-right-left" class="w-3 h-3"></i> Buchungs-Stammdaten
+            <span class="text-ink-500 font-normal normal-case">— synct beim Save zu FS</span>
+          </p>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Kundennummer</label>
+              <input id="tcmErpCustomerNo_${cid}" type="text" value="${escapeHtml(f.customer_no || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">USt-IdNr</label>
+              <input id="tcmErpVatId_${cid}" type="text" value="${escapeHtml(f.vat_id || '')}" placeholder="DE…" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono">
+              ${sBan('company_vat_id', f.vat_id)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Zahlungsziel</label>
+              <input id="tcmErpPaymentTerms_${cid}" type="text" value="${escapeHtml(f.payment_terms || '')}" placeholder="14 Tage netto" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Lieferbedingungen</label>
+              <input id="tcmErpDeliveryTerms_${cid}" type="text" value="${escapeHtml(f.delivery_terms || '')}" placeholder="EXW Fellbach" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs">
+            </div>
+          </div>
+        </div>
+
+        ${cont ? `
+        <!-- ERP-Kontakt (Person) -->
+        <div class="border-t border-emerald-100 pt-2 mt-2">
+          <p class="text-[10px] uppercase font-semibold text-emerald-800 mb-1.5 flex items-center gap-1.5">
+            <i data-lucide="user" class="w-3 h-3"></i> ERP-Kontakt
+          </p>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Vorname</label>
+              <input id="tcmErpcFirst_${cid}" type="text" value="${escapeHtml(cf.first_name || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Nachname</label>
+              <input id="tcmErpcLast_${cid}" type="text" value="${escapeHtml(cf.last_name || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Email</label>
+              <input id="tcmErpcEmail_${cid}" type="email" value="${escapeHtml(cf.email || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Position</label>
+              <input id="tcmErpcRole_${cid}" type="text" value="${escapeHtml(cf.role || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Festnetz</label>
+              <input id="tcmErpcPhone_${cid}" type="tel" value="${escapeHtml(cf.phone || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-medium text-emerald-700 block">Mobil</label>
+              <input id="tcmErpcMobile_${cid}" type="tel" value="${escapeHtml(cf.mobile || '')}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono">
+            </div>
+          </div>
+          <input type="hidden" id="tcmErpcId_${cid}" value="${cont.id}">
+        </div>
+        ` : `
+        <div class="border-t border-emerald-100 pt-2 mt-2 bg-amber-50 -mx-1 px-2 py-2 rounded">
+          <p class="text-[11px] text-amber-800">⚠ Kein ERP-Kontakt zu diesem Customer — wird beim Speichern automatisch aus den FS-Contact-Daten angelegt.</p>
+        </div>
+        `}
+
+        <button type="button" onclick="_tcmSaveErp('${cid}', this)" ${ctx.savingErp?.[cid] ? 'disabled' : ''} class="w-full mt-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white px-3 py-2 rounded-lg text-sm font-semibold inline-flex items-center justify-center gap-1.5">
+          <i data-lucide="${ctx.savingErp?.[cid] ? 'loader-2' : 'save'}" class="w-4 h-4 ${ctx.savingErp?.[cid] ? 'animate-spin' : ''}"></i> ${ctx.savingErp?.[cid] ? 'Speichere…' : 'Im ERP speichern + zu FS synchen'}
         </button>
-      ` : `
-        <p class="text-xs text-ink-600 mb-2">Anlegen erstellt Customer + Contact + synct zu Freshdesk + Freshsales.</p>
-        <button type="button" onclick="closeTopModal();_tcmCtx=null;setTimeout(()=>_qvCreateContactInErp(${ctx.ticketId}, null),200)" class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold rounded-lg">
-          <i data-lucide="user-plus" class="w-4 h-4"></i> Im ERP anlegen + CRM-Sync
+        <button type="button" onclick="closeTopModal();_tcmCtx=null;setTimeout(()=>openCustomerModal('${cid}'),100)" class="w-full mt-1.5 text-xs text-emerald-700 hover:text-emerald-900 inline-flex items-center justify-center gap-1">
+          <i data-lucide="external-link" class="w-3 h-3"></i> Im großen ERP-Customer-Modal öffnen
         </button>
-      `}
+      </div>
+    </div>`;
+  };
+
+  // Wenn keine ERP-Customers verknüpft sind, zeige den klassischen "Anlegen"-Block
+  // (wird im Normalfall durch den Mandanten-Block + Klick auf "+ Anlegen" abgedeckt)
+  const erpBlock = erpCustsForEditor.length > 0
+    ? erpCustsForEditor.map(buildErpEditor).join('')
+    : `
+    <div class="bg-white border-2 border-amber-200 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-2">
+        <i data-lucide="user-plus" class="w-4 h-4 text-amber-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">ERP-Status</h3>
+        <span class="ml-auto text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">noch nicht angelegt</span>
+      </div>
+      <p class="text-xs text-ink-600 mb-2">Bitte oben im Mandanten-Block auf „+ Anlegen" klicken, um einen ERP-Customer pro Mandant anzulegen.</p>
     </div>`;
 
   // Freshdesk-Kontakt-Editor
