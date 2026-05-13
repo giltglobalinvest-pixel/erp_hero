@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.61';
+const APP_VERSION = 'v4.62';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3829,17 +3829,20 @@ async function _loadFdCachesIfNeeded() {
   if (_fdTicketState.cache?.customers?.length) return;
   const cur = getCurrentCompany();
   try {
-    const [allCustomers, allContacts, allArticles] = await Promise.all([
+    const [allCustomers, allContacts, allArticles, allBundles] = await Promise.all([
       readData('Customer').catch(() => []),
       readData('Contact').catch(() => []),
-      readData('Article').catch(() => [])
+      readData('Article').catch(() => []),
+      readData('QuoteBundle').catch(() => [])
     ]);
     _fdTicketState.cache = {
       customers: allCustomers.filter(c => (c.fields.company_id || []).includes(cur?.id) && c.fields.status !== 'archiviert')
         .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de')),
       contacts: allContacts,
       articles: allArticles.filter(a => (a.fields.company_id || []).includes(cur?.id) && a.fields.status !== 'archiviert')
-        .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'))
+        .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de')),
+      bundles: allBundles.filter(b => b.fields.company_id === cur?.id && (b.fields.status || 'aktiv') !== 'archiviert')
+        .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'))
     };
   } catch (_) {}
 }
@@ -7833,6 +7836,24 @@ function _renderAiEditableFieldsBlock() {
         </div>
       </div>
 
+      <!-- Vorlagenpaket (QuoteBundle) — Text-Bundle für Titel/Einleitung/Schlusstext -->
+      ${(() => {
+        const bundles = (_fdTicketState.cache?.bundles || []).filter(b => (b.fields.doc_type || 'Angebot') === 'Angebot');
+        if (!bundles.length) return '';
+        const sel = ef.bundle_id_override || '';
+        return `
+        <div class="mb-3">
+          <label class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold flex items-center gap-1.5 mb-1">
+            <i data-lucide="package-2" class="w-3 h-3"></i> Vorlagen-Paket (Text-Bundle)
+          </label>
+          <select onchange="_setFdBundleOverride(this.value)" class="w-full px-2 py-1.5 border border-ink-200 rounded text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30">
+            <option value="">— automatisch wählen (Standard) —</option>
+            ${bundles.map(b => `<option value="${b.id}" ${b.id === sel ? 'selected' : ''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
+          </select>
+          <p class="text-[10px] text-ink-500 italic mt-0.5">Auswahl überschreibt die automatische Bundle-Wahl. „Automatisch" wählt das passende Bundle anhand der Artikel.</p>
+        </div>`;
+      })()}
+
       <!-- Artikel -->
       <div class="mb-3">
         <div class="flex items-center justify-between mb-1.5 flex-wrap gap-2">
@@ -7849,13 +7870,17 @@ function _renderAiEditableFieldsBlock() {
             ${items.map((it, idx) => `
               <div class="bg-white rounded-lg px-2 py-1.5 border border-emerald-100">
                 <div class="flex items-start gap-2">
+                  <div class="flex flex-col items-center justify-center shrink-0 -my-0.5">
+                    <button type="button" onclick="_moveFdItem(${idx}, -1)" ${idx === 0 ? 'disabled' : ''} class="text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded p-0.5 disabled:opacity-30 disabled:hover:bg-transparent" title="Nach oben"><i data-lucide="chevron-up" class="w-3 h-3"></i></button>
+                    <button type="button" onclick="_moveFdItem(${idx}, 1)" ${idx === items.length - 1 ? 'disabled' : ''} class="text-ink-400 hover:text-ink-900 hover:bg-ink-100 rounded p-0.5 disabled:opacity-30 disabled:hover:bg-transparent" title="Nach unten"><i data-lucide="chevron-down" class="w-3 h-3"></i></button>
+                  </div>
                   <div class="flex-1 min-w-0">
                     <p class="text-[11px] font-mono text-ink-500">${escapeHtml(it.sku || '–')}</p>
                     <p class="text-sm font-medium text-ink-900 break-words leading-snug">${escapeHtml(it.name || '')}</p>
                   </div>
                   <div class="flex items-center gap-1 shrink-0">
                     <input type="number" min="1" value="${it.qty}" onchange="_setFdItemEditQty(${idx}, this.value)" class="w-14 px-2 py-0.5 border border-ink-200 rounded text-xs text-center">
-                    <button type="button" onclick="_removeFdItem(${idx})" class="text-ink-400 hover:text-red-600 p-1"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
+                    <button type="button" onclick="_removeFdItem(${idx})" class="text-ink-400 hover:text-red-600 p-1" title="Entfernen"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
                   </div>
                 </div>
               </div>
@@ -7949,6 +7974,18 @@ function _removeFdItem(idx) {
   if (!Array.isArray(_fdTicketState.editFields?.items)) return;
   _fdTicketState.editFields.items.splice(idx, 1);
   _renderFreshdeskTicket();
+}
+function _moveFdItem(idx, dir) {
+  const items = _fdTicketState.editFields?.items;
+  if (!Array.isArray(items)) return;
+  const newIdx = idx + dir;
+  if (newIdx < 0 || newIdx >= items.length) return;
+  [items[idx], items[newIdx]] = [items[newIdx], items[idx]];
+  _renderFreshdeskTicket();
+}
+function _setFdBundleOverride(bundleId) {
+  _fdTicketState.editFields = _fdTicketState.editFields || {};
+  _fdTicketState.editFields.bundle_id_override = bundleId || '';
 }
 function _onFdCustomerChange(value) {
   _fdTicketState.editFields.customer_id = value || '';
@@ -8115,16 +8152,19 @@ async function aiCreateQuoteFromEdits() {
     if ((ef.customer_reference || '').trim()) cfClean.kundenreferenz  = ef.customer_reference.trim();
     if ((ef.lieferzeit         || '').trim()) cfClean.lieferzeit      = ef.lieferzeit.trim();
     if (Object.keys(cfClean).length > 0) fields.custom_values = JSON.stringify(cfClean);
-    // Bundle aus Items ableiten
-    const itemsForBundle = ef.items.map(i => ({ article_id: i.article_id, qty: i.qty }));
-    const bundlePick = await pickBundleForItems(itemsForBundle, 'Angebot');
-    let chosenBundleId = bundlePick.bundleId;
-    if (bundlePick.conflict) {
-      chosenBundleId = await showBundleConflictPicker(bundlePick.candidates, 'Angebot');
-      if (chosenBundleId === null) {
-        _fdTicketState.customerActionLoading = false;
-        _renderFreshdeskTicket();
-        return;
+    // Bundle: User-Override hat Vorrang, sonst auto-detect aus Items
+    let chosenBundleId = (ef.bundle_id_override || '').trim();
+    if (!chosenBundleId) {
+      const itemsForBundle = ef.items.map(i => ({ article_id: i.article_id, qty: i.qty }));
+      const bundlePick = await pickBundleForItems(itemsForBundle, 'Angebot');
+      chosenBundleId = bundlePick.bundleId;
+      if (bundlePick.conflict) {
+        chosenBundleId = await showBundleConflictPicker(bundlePick.candidates, 'Angebot');
+        if (chosenBundleId === null) {
+          _fdTicketState.customerActionLoading = false;
+          _renderFreshdeskTicket();
+          return;
+        }
       }
     }
     if (chosenBundleId) fields.bundle_id = chosenBundleId;
