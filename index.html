@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.47';
+const APP_VERSION = 'v4.48';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1780,6 +1780,78 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
 
   console.error('[fsLink] ✗ Keine Strategie hat geklappt. Manuelle Verknüpfung in FS nötig.');
   return false;
+}
+
+// Legt ERP-Customer + Contact für einen Mandanten an, mit FS-Werten als Prefill.
+async function _tcmCreateErpForMandant(mandantId, itemEl) {
+  const ctx = _tcmCtx;
+  if (!ctx?.fs?.id) return toast('Kein FS-Account verknüpft — Anlegen nicht möglich', 'warn');
+  if (!mandantId) return;
+  const mandant = ctx.mandants.find(m => m.id === mandantId);
+  if (!mandant) return toast('Mandant nicht gefunden', 'error');
+  const existing = ctx.erpCustomers.find(c => (c.fields.company_id || [])[0] === mandantId);
+  if (existing) return toast('Bereits in „' + (mandant.fields.name || '?') + '" angelegt: ' + (existing.fields.customer_no || ''), 'info', 3500);
+
+  // Loading-Anzeige im Listen-Item
+  if (itemEl) {
+    itemEl.style.pointerEvents = 'none';
+    itemEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin text-indigo-600"></i><span class="flex-1 text-ink-600">Lege ERP-Customer in „' + escapeHtml(mandant.fields.name || '?') + '" an…</span>';
+    if (window.lucide) lucide.createIcons();
+  }
+
+  try {
+    const customerNo = await nextCustomerNo(mandantId).catch(()=>'');
+    const cf = ctx.fs.custom_field || ctx.fs.custom_fields || {};
+    const customerFields = {
+      name1:           ctx.fs.name || '',
+      street:          ctx.fs.address || '',
+      zip:             ctx.fs.zipcode || '',
+      city:            ctx.fs.city || '',
+      country:         ctx.fs.country || 'Deutschland',
+      email:           ctx.fd?.email || ctx.fsContact?.email || '',
+      phone:           ctx.fs.phone || '',
+      website:         ctx.fs.website || '',
+      company_id:      [mandantId],
+      freshsales_account_id: String(ctx.fs.id),
+      customer_no:     customerNo,
+      vat_id:          (cf.vat_id || cf.cf_vat_id || ''),
+      payment_terms:   (cf.payment_terms || cf.cf_payment_terms || '14 Tage netto'),
+      delivery_terms:  (cf.delivery_terms || cf.cf_delivery_terms || 'EXW Fellbach'),
+      status:          'active'
+    };
+    console.log('[tcmCreateErp] writeData Customer:', customerFields);
+    const newCustomer = await writeData('Customer', customerFields);
+    console.log('[tcmCreateErp] Customer angelegt:', newCustomer?.id);
+
+    // Contact ggf. anlegen
+    if (ctx.fsContact?.id && newCustomer?.id) {
+      const contactFields = {
+        first_name: ctx.fsContact.first_name || '',
+        last_name:  ctx.fsContact.last_name  || ctx.fsContact.display_name || 'Unbekannt',
+        email:      ctx.fsContact.email      || '',
+        phone:      ctx.fsContact.work_number   || '',
+        mobile:     ctx.fsContact.mobile_number || '',
+        role:       ctx.fsContact.job_title  || '',
+        customer_id: [newCustomer.id]
+      };
+      console.log('[tcmCreateErp] writeData Contact:', contactFields);
+      try {
+        await writeData('Contact', contactFields);
+      } catch (contactErr) {
+        console.warn('[tcmCreateErp] Contact-Anlage fehlgeschlagen, Customer aber angelegt:', contactErr.message);
+        toast('Customer angelegt, Contact konnte nicht angelegt werden: ' + contactErr.message, 'warn', 7000);
+      }
+    }
+
+    ctx.erpCustomers = await _findErpCustomersByFsAccountId(ctx.fs.id);
+    ctx.dirty = true;
+    toast('ERP-Customer ' + customerNo + ' in „' + (mandant.fields.name || '?') + '" angelegt ✓', 'success', 4500);
+    _tcmRender();
+  } catch (e) {
+    console.error('[tcmCreateErp] failed', e);
+    toast('Anlegen fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+    _tcmRender();
+  }
 }
 
 // Pusht FD-Contact + FD-Company nach Freshsales (initialer Migrations-Schritt).
@@ -5517,15 +5589,26 @@ function _tcmRender() {
           const existingCust = erpCusts.find(c => (c.fields.company_id || [])[0] === m.id);
           const isLinked = !!existingCust;
           const cn = existingCust?.fields?.customer_no || '';
+          if (isLinked) {
+            return `
+              <li class="flex items-center gap-2 text-xs p-2 rounded bg-emerald-50">
+                <i data-lucide="check-circle-2" class="w-4 h-4 text-emerald-600 shrink-0"></i>
+                <span class="flex-1">${escapeHtml(m.fields.name || '–')}</span>
+                <span class="font-mono text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">${escapeHtml(cn || 'verknüpft')}</span>
+                <button type="button" onclick="closeTopModal();_tcmCtx=null;setTimeout(()=>openCustomerModal('${existingCust.id}'),100)" class="text-emerald-700 hover:text-emerald-900 hover:bg-emerald-100 rounded p-0.5" title="Im ERP öffnen">
+                  <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                </button>
+              </li>`;
+          }
           return `
-            <li class="flex items-center gap-2 text-xs p-2 rounded ${isLinked ? 'bg-emerald-50' : 'bg-ink-50'}">
-              <input type="checkbox" id="tcmM_${m.id}" ${isLinked ? 'checked disabled' : ''} class="w-4 h-4">
-              <label for="tcmM_${m.id}" class="flex-1 cursor-pointer">${escapeHtml(m.fields.name || '–')}</label>
-              ${isLinked ? `<span class="font-mono text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">${escapeHtml(cn || 'verknüpft')}</span>` : '<span class="text-[10px] text-ink-500 italic">nicht verknüpft</span>'}
+            <li class="flex items-center gap-2 text-xs p-2 rounded bg-ink-50 hover:bg-indigo-100 cursor-pointer transition border border-transparent hover:border-indigo-300" onclick="_tcmCreateErpForMandant('${m.id}', this)">
+              <i data-lucide="plus-circle" class="w-4 h-4 text-indigo-500 shrink-0"></i>
+              <span class="flex-1">${escapeHtml(m.fields.name || '–')}</span>
+              <span class="text-[10px] text-indigo-700 font-semibold uppercase tracking-wider">+ Anlegen</span>
             </li>`;
         }).join('')}
       </ul>
-      <p class="text-[10px] text-ink-500 italic mt-3">Anlegen-Funktion pro Mandant (ERP-Customer-Record + Verknüpfung mit FS-Account) folgt im nächsten Schritt.</p>
+      <p class="text-[10px] text-ink-500 italic mt-3">Klick auf „+ Anlegen" erstellt einen ERP-Customer mit den Freshsales-Werten als Prefill und verknüpft ihn über die FS-Account-ID. Zusätzlich wird der Contact angelegt wenn ein FS-Contact vorhanden ist.</p>
     </div>` : '';
 
   // Reihenfolge: Freshsales (Master, Vertrieb) → Freshdesk (Support-Spiegel) → ERP (Buchungs-Master pro Mandant)
@@ -5698,7 +5781,8 @@ function _tcmApplySuggestion(field, value) {
       return false;
     }
   } else {
-    // Personen-Felder: FS-Contact hat Vorrang
+    // Personen-Felder: in FS-Contact (Master) UND FD-Contact (Spiegel) gleichzeitig schreiben.
+    // Damit landen Werte in beiden Editor-Inputs und Save je Seite speichert konsistent.
     if (ctx.fsContact?.id) {
       const fsCMap = {
         name: () => {
@@ -5712,9 +5796,9 @@ function _tcmApplySuggestion(field, value) {
         job_title: () => { ctx.fsContact.job_title = value; },
         address:   () => { /* FS-Contact hat eigene Address-Felder, vorerst skip */ }
       };
-      if (fsCMap[field]) { fsCMap[field](); return true; }
+      if (fsCMap[field]) fsCMap[field]();
     }
-    // Fallback: FD-Contact
+    // Zusätzlich FD-Contact-State aktualisieren (damit FD-Inputs auch befüllt werden)
     ctx.fd = ctx.fd || {};
     ctx.fd[field] = value;
   }
