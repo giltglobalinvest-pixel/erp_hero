@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.70';
+const APP_VERSION = 'v4.71';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -8833,13 +8833,20 @@ async function proxyFetch(path, opts = {}) {
   if (APP_KEYS.proxyV2 && isFreshdeskPath && !headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
     headers['X-Company-Id'] = APP_KEYS.currentCompanyId;
   }
-  if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  const isFormData = opts.body instanceof FormData;
+  if (opts.body && !headers['Content-Type'] && !isFormData) headers['Content-Type'] = 'application/json';
+  // Bei FormData darf KEIN Content-Type gesetzt sein — Browser setzt boundary automatisch
+  if (isFormData) delete headers['Content-Type'];
   let res;
   try {
     res = await fetch(url, {
       method: opts.method || 'GET',
       headers,
-      body: opts.body ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : undefined
+      body: opts.body ? (
+        isFormData ? opts.body :
+        typeof opts.body === 'string' ? opts.body :
+        JSON.stringify(opts.body)
+      ) : undefined
     });
   } catch (netErr) {
     // Typischer CORS-/Netzwerkfehler ("Load failed" auf Safari/iOS, "Failed to fetch" auf Chrome).
@@ -20607,56 +20614,200 @@ async function buildQuotePdfBlob() {
 }
 
 async function emailQuote() {
+  if (!APP_KEYS.proxyV2) {
+    toast('Email-Versand benötigt Val.town-Proxy v2', 'error', 7000);
+    return;
+  }
   const ctx = await buildQuoteVariableContext();
   const customer = ctx.customer || {};
   const contact  = ctx.contact  || {};
   const quote    = ctx.quote    || {};
   const recipient = contact.email || customer.email || '';
-  const quoteNo = quote.quote_no || '';
+  if (!recipient) {
+    toast('Keine Empfänger-Email — bitte Customer/Contact-Email setzen', 'warn', 6000);
+    return;
+  }
+  const quoteNo = quote.quote_no || 'Entwurf';
   const datum   = formatDeDate(quote.date) || '';
-  const sal = (() => { const g = contact?.gender; return g === 'männlich' ? 'Sehr geehrter Herr ' : g === 'weiblich' ? 'Sehr geehrte Frau ' : 'Sehr geehrte Damen und Herren'; })();
-  const greeting = (sal.trim() === 'Sehr geehrte Damen und Herren') ? sal : sal + (contact.last_name || '');
-  const company = (window._quoteCompanyCache || {}).name || 'FLP';
-  const subject = `Angebot ${quoteNo} vom ${datum}`;
-  const body = `${greeting},\n\nanbei senden wir Ihnen unser Angebot ${quoteNo} vom ${datum} als PDF.\n\nFür Rückfragen stehen wir jederzeit zur Verfügung.\n\nMit freundlichen Grüßen\n${company}`;
+  const customerName = customer.name1 || '';
 
-  toast('PDF wird erstellt …', 'info', 1500);
-
-  let blob = null;
-  try { blob = await buildQuotePdfBlob(); } catch(e) { console.error(e); }
-
-  // Web Share API (mobile + manche Desktop-Browser): PDF als Anhang teilen.
-  // Öffnet die System-Share-Sheet inkl. Mail-App mit Datei dran.
-  if (blob && navigator.canShare && navigator.share) {
-    const fileName = _safeFilename('Angebot_' + (quoteNo || 'Entwurf') + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
-    const file = new File([blob], fileName, { type: 'application/pdf' });
-    try {
-      if (navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: subject,
-          text: body,
-        });
-        return; // erfolgreich geteilt
-      }
-    } catch (err) {
-      if (err && err.name === 'AbortError') return; // User hat Share abgebrochen
-      // sonst Fallback unten
+  // 1. Email-Template aus Airtable laden (doc_type='E-Mail', erstes aktives oder is_default)
+  let templSubject = '';
+  let templBody = '';
+  try {
+    const tpls = await readData('Textemplate').catch(() => []);
+    const cur = getCurrentCompany();
+    const emailTpls = tpls.filter(t =>
+      (t.fields.company_id || []).includes(cur?.id) &&
+      t.fields.doc_type === 'E-Mail' &&
+      (t.fields.status || 'aktiv') === 'aktiv'
+    );
+    // Bevorzugt: Default oder eines mit "Angebot" im Namen
+    const tpl = emailTpls.find(t => t.fields.is_default && /angebot/i.test(t.fields.name || ''))
+             || emailTpls.find(t => /angebot/i.test(t.fields.name || ''))
+             || emailTpls.find(t => t.fields.is_default)
+             || emailTpls[0]
+             || null;
+    if (tpl) {
+      templSubject = substituteVariables(tpl.fields.subject || '', 'E-Mail', ctx);
+      templBody    = substituteVariables(tpl.fields.content || '', 'E-Mail', ctx);
     }
+  } catch (_) {}
+  // Fallback wenn kein Template
+  if (!templSubject) templSubject = `Angebot ${quoteNo} vom ${datum}`;
+  if (!templBody) {
+    const sal = (() => { const g = contact?.gender; return g === 'männlich' ? 'Sehr geehrter Herr ' : g === 'weiblich' ? 'Sehr geehrte Frau ' : 'Sehr geehrte Damen und Herren'; })();
+    const greeting = sal.trim() === 'Sehr geehrte Damen und Herren' ? sal : sal + (contact.last_name || '');
+    const companyName = (window._quoteCompanyCache || {}).name || 'FLP Lift Parts GmbH';
+    templBody = `<p>${greeting},</p><p>anbei senden wir Ihnen unser Angebot ${quoteNo} vom ${datum} als PDF.</p><p>Für Rückfragen stehen wir jederzeit zur Verfügung.</p><p>Mit freundlichen Grüßen<br>${companyName}</p>`;
   }
 
-  // Fallback: PDF herunterladen + mailto öffnen mit Hinweis
-  if (blob) {
-    const fileName = _safeFilename('Angebot_' + (quoteNo || 'Entwurf') + (customer.name1 ? '_' + customer.name1 : '')) + '.pdf';
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = fileName;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  // 2. Pre-Send-Modal: Empfänger, Betreff, Body editierbar + Anhänge-Vorschau
+  const attIds = collectSelectedAttachments();
+  // Anhänge-Vorschau (Bundle-Attachments aus Airtable)
+  let bundleAtts = [];
+  try {
+    if (attIds.length) {
+      const all = await readData('Attachment').catch(() => []);
+      bundleAtts = all.filter(a => attIds.includes(a.id));
+    }
+  } catch (_) {}
+
+  const attListHtml = `
+    <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mt-3 mb-1">Anhänge (${bundleAtts.length + 1})</p>
+    <div class="space-y-1 text-xs">
+      <div class="flex items-center gap-2 px-2 py-1.5 bg-blue-50 border border-blue-200 rounded">
+        <i data-lucide="file-text" class="w-4 h-4 text-blue-600"></i>
+        <span class="flex-1 font-medium">Angebot_${escapeHtml(quoteNo)}.pdf</span>
+        <span class="text-[10px] text-ink-500">wird automatisch erzeugt</span>
+      </div>
+      ${bundleAtts.map(a => {
+        const files = a.fields?.file || [];
+        const fileCount = files.length;
+        const totalSize = files.reduce((s, f) => s + (f.size || 0), 0);
+        return `<div class="flex items-center gap-2 px-2 py-1.5 bg-white border border-ink-200 rounded">
+          <i data-lucide="paperclip" class="w-4 h-4 text-ink-600"></i>
+          <span class="flex-1">${escapeHtml(a.fields?.name || '–')}</span>
+          <span class="text-[10px] text-ink-500">${fileCount} Datei${fileCount===1?'':'en'}${totalSize ? ' · ' + (totalSize/1024).toFixed(0) + ' KB' : ''}</span>
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+
+  openModal2(`
+    <div class="p-5 max-w-2xl">
+      <h3 class="text-base font-bold text-ink-900 mb-3 flex items-center gap-2">
+        <i data-lucide="send" class="w-5 h-5 text-brand-600"></i>
+        Angebot ${escapeHtml(quoteNo)} per E-Mail versenden
+        <span class="text-xs font-normal text-ink-500">· via Freshdesk</span>
+      </h3>
+      <div class="space-y-2.5 text-sm">
+        <div>
+          <label class="text-[11px] uppercase font-semibold text-ink-700 block">Empfänger</label>
+          <input id="eqRecipient" type="email" value="${escapeHtml(recipient)}" class="w-full mt-1 px-2 py-1.5 border border-ink-200 rounded text-sm">
+          <p class="text-[10px] text-ink-500 mt-0.5">aus Kontakt ${customer.name1 ? '· ' + escapeHtml(customer.name1) : ''}</p>
+        </div>
+        <div>
+          <label class="text-[11px] uppercase font-semibold text-ink-700 block">Betreff</label>
+          <input id="eqSubject" type="text" value="${escapeHtml(templSubject)}" class="w-full mt-1 px-2 py-1.5 border border-ink-200 rounded text-sm">
+        </div>
+        <div>
+          <label class="text-[11px] uppercase font-semibold text-ink-700 block">Nachricht (HTML)</label>
+          <textarea id="eqBody" rows="9" class="w-full mt-1 px-2 py-1.5 border border-ink-200 rounded text-xs font-mono resize-y">${escapeHtml(templBody)}</textarea>
+        </div>
+        ${attListHtml}
+      </div>
+      <div class="flex gap-2 mt-4 flex-wrap justify-end">
+        <button type="button" onclick="closeTopModal()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Abbrechen</button>
+        <button id="eqSendBtn" type="button" onclick="_emailQuoteDoSend('${quote.id || ''}', '${escapeHtml(customerName)}', '${escapeHtml(quoteNo)}', this)" class="px-4 py-2 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
+          <i data-lucide="send" class="w-4 h-4"></i> PDF erzeugen + senden
+        </button>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-2xl' });
+  if (window.lucide) lucide.createIcons();
+}
+
+// Eigentlicher Send: PDF generieren + Bundle-Anhänge laden + multipart POST via FD outbound_email
+async function _emailQuoteDoSend(quoteId, customerName, quoteNo, btnEl) {
+  const to      = (document.getElementById('eqRecipient')?.value || '').trim();
+  const subj    = (document.getElementById('eqSubject')?.value || '').trim();
+  const body    = (document.getElementById('eqBody')?.value || '').trim();
+  if (!to)   return toast('Empfänger fehlt', 'warn');
+  if (!subj) return toast('Betreff fehlt', 'warn');
+  if (!body) return toast('Nachricht fehlt', 'warn');
+
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Erzeuge PDF + sende…'; if (window.lucide) lucide.createIcons(); }
+
+  try {
+    // 1. PDF-Blob erzeugen
+    toast('PDF wird erstellt …', 'info', 2000);
+    const pdfBlob = await buildQuotePdfBlob();
+    if (!pdfBlob) throw new Error('PDF konnte nicht erzeugt werden');
+    const pdfName = _safeFilename('Angebot_' + (quoteNo || 'Entwurf') + (customerName ? '_' + customerName : '')) + '.pdf';
+
+    // 2. Bundle-Attachment-Dateien aus Airtable laden
+    const attIds = collectSelectedAttachments();
+    const bundleFiles = [];
+    if (attIds.length) {
+      try {
+        const all = await readData('Attachment').catch(() => []);
+        for (const att of all.filter(a => attIds.includes(a.id))) {
+          const files = att.fields?.file || [];
+          for (const f of files) {
+            if (!f.url) continue;
+            try {
+              const res = await fetch(f.url);
+              if (!res.ok) continue;
+              const blob = await res.blob();
+              bundleFiles.push({ name: f.filename || (att.fields.name + '.pdf'), blob });
+            } catch (e) { console.warn('[emailQuote] Bundle-Datei-Download fehlgeschlagen:', e.message); }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 3. FormData für FD outbound_email
+    const fd = new FormData();
+    fd.append('subject', subj);
+    fd.append('description', body);
+    fd.append('email', to);
+    fd.append('status', '5');         // Closed: erzeugtes Ticket sofort geschlossen
+    fd.append('priority', '1');
+    fd.append('tags[]', 'angebot');
+    fd.append('tags[]', 'erp-hero');
+    fd.append('attachments[]', pdfBlob, pdfName);
+    for (const bf of bundleFiles) {
+      fd.append('attachments[]', bf.blob, bf.name);
+    }
+
+    toast('Sende E-Mail über Freshdesk …', 'info', 2500);
+    const res = await proxyFetch('freshdesk/api/v2/tickets/outbound_email', { method: 'POST', body: fd });
+    const newTicketId = res?.id || res?.ticket?.id || '?';
+    console.log('[emailQuote] outbound_email OK, ticket:', newTicketId);
+
+    // 4. Quote-Status + Notiz updaten
+    if (quoteId) {
+      try {
+        await updateData('Quote', quoteId, {
+          status: 'Versendet',
+          sent_at: new Date().toISOString().slice(0, 10),
+          freshdesk_email_ticket_id: String(newTicketId)
+        });
+      } catch (e) { console.warn('[emailQuote] Quote-Update fehlgeschlagen:', e.message); }
+    }
+
+    toast('✓ Angebot per E-Mail versendet (FD-Ticket FT-' + newTicketId + ')', 'success', 6000);
+    closeTopModal();
+    // Optional: Quote-Modal neu rendern damit Status angezeigt wird
+    if (typeof openQuoteModal === 'function' && quoteId) {
+      setTimeout(() => { try { closeModal(); openQuoteModal(quoteId); } catch (_) {} }, 200);
+    }
+  } catch (e) {
+    console.error('[emailQuote] Versand fehlgeschlagen:', e);
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="send" class="w-4 h-4"></i> PDF erzeugen + senden'; if (window.lucide) lucide.createIcons(); }
+    toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 9000);
   }
-  const bodyWithNote = body + '\n\nP.S. Bitte das soeben heruntergeladene PDF dieser E-Mail anhängen.';
-  const url = 'mailto:' + encodeURIComponent(recipient) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(bodyWithNote);
-  window.location.href = url;
 }
 
 async function toggleTermDefault(id, makeDefault) {
