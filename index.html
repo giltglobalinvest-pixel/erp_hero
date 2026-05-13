@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.54';
+const APP_VERSION = 'v4.55';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1783,7 +1783,8 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
 }
 
 // ============================================================
-// MASTER-SAVE — verteilt ctx.master in FS + FD + ERP (alle parallel sequentiell)
+// MASTER-SAVE — Strategie: ERP = Master, dann existierende Sync-Funktionen
+// für FS+FD (die schon Anlegen/Update + Duplikat-Recovery + ID-Tracking machen).
 // ============================================================
 async function _tcmSaveAll(btnEl) {
   console.log('[saveAll] start');
@@ -1796,100 +1797,10 @@ async function _tcmSaveAll(btnEl) {
 
   const co = ctx.master.company;
   const cn = ctx.master.contact;
-  const results = { fs: 'skip', fsc: 'skip', fd: 'skip', fdco: 'skip', erp: [] };
+  const summary = [];
 
-  // -------- 1. Freshsales Sales Account (falls verknüpft) --------
-  if (ctx.fs?.id && APP_KEYS.proxyV2) {
-    const fields = {};
-    if (co.name)    fields.name    = co.name;
-    if (co.phone)   fields.phone   = co.phone;
-    if (co.website) fields.website = co.website;
-    if (co.street)  fields.address = co.street;
-    if (co.city)    fields.city    = co.city;
-    if (co.zipcode) fields.zipcode = co.zipcode;
-    if (co.country) fields.country = co.country;
-    try {
-      console.log('[saveAll] PUT FS-Account', fields);
-      await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, { method: 'PUT', body: { sales_account: fields } });
-      _fsAccountCache.delete(ctx.fs.id);
-      results.fs = 'ok';
-    } catch (e) {
-      console.warn('[saveAll] FS-Account failed:', e.message);
-      results.fs = 'fail';
-    }
-  }
-
-  // -------- 2. Freshsales Contact (falls verknüpft) --------
-  if (ctx.fsContact?.id && APP_KEYS.proxyV2) {
-    const cFields = {};
-    if (cn.first_name) cFields.first_name = cn.first_name;
-    if (cn.last_name)  cFields.last_name  = cn.last_name;
-    if (cn.email)      cFields.email      = cn.email;
-    if (cn.work_phone) cFields.work_number = cn.work_phone;
-    if (cn.mobile)     cFields.mobile_number = cn.mobile;
-    if (cn.job_title)  cFields.job_title  = cn.job_title;
-    // cf_kontaktid Auto-Fill (siehe v4.44)
-    const existCf = ctx.fsContact.custom_field || {};
-    const autoCf = { ...existCf };
-    if (!existCf.cf_kontaktid && !existCf.cf_kontakt_id) autoCf.cf_kontaktid = String(ctx.fsContact.id);
-    cFields.custom_field = autoCf;
-    try {
-      console.log('[saveAll] PUT FS-Contact', cFields);
-      await proxyFetch('freshsales/api/contacts/' + ctx.fsContact.id, { method: 'PUT', body: { contact: cFields } });
-      _fsContactCache.delete(ctx.fsContact.id);
-      results.fsc = 'ok';
-    } catch (e) {
-      console.warn('[saveAll] FS-Contact failed:', e.message);
-      results.fsc = 'fail';
-    }
-  }
-
-  // -------- 3. Freshdesk Company (falls verknüpft) --------
-  if (ctx.fdCompany?.id && APP_KEYS.proxyV2) {
-    const fdcFields = {};
-    if (co.name) fdcFields.name = co.name;
-    // FD-Company: Adresse + Tel in note-Freitext (FD hat keine strukturierten Adress-Felder)
-    const noteLines = [];
-    if (co.street || co.zipcode || co.city) noteLines.push('Adresse: ' + [co.street, [co.zipcode, co.city].filter(Boolean).join(' '), co.country].filter(Boolean).join(', '));
-    if (co.phone)   noteLines.push('Tel: ' + co.phone);
-    if (co.website) noteLines.push('Web: ' + co.website);
-    if (co.email)   noteLines.push('E-Mail: ' + co.email);
-    if (noteLines.length) fdcFields.note = noteLines.join('\n');
-    try {
-      console.log('[saveAll] PUT FD-Company', fdcFields);
-      await proxyFetch('freshdesk/api/v2/companies/' + ctx.fdCompany.id, { method: 'PUT', body: fdcFields });
-      _fdCompanyCache.delete(ctx.fdCompany.id);
-      results.fdco = 'ok';
-    } catch (e) {
-      // 204-Bug Workaround
-      if (/null body status|204/i.test(String(e?.message))) results.fdco = 'ok';
-      else { console.warn('[saveAll] FD-Company failed:', e.message); results.fdco = 'fail'; }
-    }
-  }
-
-  // -------- 4. Freshdesk Contact (falls verknüpft) --------
-  if (ctx.fd?.id && APP_KEYS.proxyV2) {
-    const fdcFields = {};
-    const fullName = ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim();
-    if (fullName)     fdcFields.name = fullName;
-    if (cn.email)     fdcFields.email = cn.email;
-    if (cn.work_phone)fdcFields.phone = cn.work_phone;
-    if (cn.mobile)    fdcFields.mobile = cn.mobile;
-    if (cn.job_title) fdcFields.job_title = cn.job_title;
-    try {
-      console.log('[saveAll] PUT FD-Contact', fdcFields);
-      await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: fdcFields });
-      _fdContactCache.delete(ctx.fd.id);
-      results.fd = 'ok';
-    } catch (e) {
-      console.warn('[saveAll] FD-Contact failed:', e.message);
-      results.fd = 'fail';
-    }
-  }
-
-  // -------- 5. Pro Mandant: ERP-Customer + ERP-Contact --------
+  // --- 1. ERP-Customers (Master) updaten — für jeden verknüpften Mandanten ---
   for (const m of ctx.master.mandants) {
-    const erpStatus = { mandant: m.mandantName, customer: 'skip', contact: 'skip' };
     const patch = {};
     if (co.name)    patch.name1 = co.name;
     if (co.phone)   patch.phone = co.phone;
@@ -1904,14 +1815,25 @@ async function _tcmSaveAll(btnEl) {
     if (m.payment_terms)  patch.payment_terms = m.payment_terms;
     if (m.delivery_terms) patch.delivery_terms = m.delivery_terms;
     try {
-      console.log('[saveAll] PATCH ERP-Customer', m.customerId, patch);
       await updateData('Customer', m.customerId, patch);
-      erpStatus.customer = 'ok';
+      summary.push('ERP ' + m.mandantName + ' ✓');
+      // --- 2. Auto-Sync ERP → FD-Company + FS-Sales-Account (bewährte Funktionen) ---
+      // Diese kümmern sich um: POST neu, PUT update, 409-Duplikat-Recovery, freshdesk_company_id/freshsales_account_id im ERP tracken
+      const syncResults = await Promise.allSettled([
+        typeof syncCustomerToFreshdesk === 'function' ? syncCustomerToFreshdesk(m.customerId, null, { silent: true }) : Promise.resolve(false),
+        APP_KEYS.freshsalesSubdomain && typeof syncCustomerToFreshsales === 'function'
+          ? syncCustomerToFreshsales(m.customerId, null, { silent: true })
+          : Promise.resolve(false)
+      ]);
+      if (syncResults[0].value === true) summary.push('→ FD-Firma ✓');
+      else if (syncResults[0].status === 'rejected') summary.push('→ FD-Firma ✗');
+      if (syncResults[1].value === true) summary.push('→ FS-Account ✓');
+      else if (syncResults[1].status === 'rejected') summary.push('→ FS-Account ✗');
     } catch (e) {
-      console.warn('[saveAll] ERP-Customer failed:', e.message);
-      erpStatus.customer = 'fail';
+      console.warn('[saveAll] ERP-Customer ' + m.customerId + ' failed:', e.message);
+      summary.push('ERP ' + m.mandantName + ' ✗');
     }
-    // ERP-Contact
+    // --- 3. ERP-Contact updaten ---
     const ec = ctx.master.erpContacts[m.customerId];
     if (ec?.id) {
       const cpatch = {};
@@ -1921,17 +1843,10 @@ async function _tcmSaveAll(btnEl) {
       if (ec.phone)      cpatch.phone      = ec.phone;
       if (ec.mobile)     cpatch.mobile     = ec.mobile;
       if (ec.role)       cpatch.role       = ec.role;
-      try {
-        await updateData('Contact', ec.id, cpatch);
-        erpStatus.contact = 'ok';
-      } catch (e) {
-        console.warn('[saveAll] ERP-Contact failed:', e.message);
-        erpStatus.contact = 'fail';
-      }
+      try { await updateData('Contact', ec.id, cpatch); } catch (e) { console.warn('[saveAll] ERP-Contact failed:', e.message); }
     } else if (cn.last_name || cn.first_name) {
-      // Kein ERP-Contact bisher → aus Stammdaten anlegen
       try {
-        const cFields = {
+        await writeData('Contact', {
           first_name: cn.first_name,
           last_name:  cn.last_name || cn.first_name || 'Unbekannt',
           email:      cn.email,
@@ -1939,73 +1854,58 @@ async function _tcmSaveAll(btnEl) {
           mobile:     cn.mobile,
           role:       cn.job_title,
           customer_id: [m.customerId]
-        };
-        await writeData('Contact', cFields);
-        erpStatus.contact = 'created';
-      } catch (e) {
-        console.warn('[saveAll] ERP-Contact create failed:', e.message);
-        erpStatus.contact = 'fail';
-      }
-    }
-    results.erp.push(erpStatus);
-  }
-
-  // -------- 6. FS-Custom-Fields (vat_id, customer_no, payment_terms, delivery_terms) --------
-  if (ctx.fs?.id && APP_KEYS.proxyV2 && ctx.master.activeMandantTab) {
-    const activeM = ctx.master.mandants.find(m => m.customerId === ctx.master.activeMandantTab);
-    if (activeM) {
-      const cfPayload = {};
-      if (activeM.customer_no)    cfPayload.erp_customer_no = activeM.customer_no;
-      if (activeM.vat_id)         cfPayload.vat_id = activeM.vat_id;
-      if (activeM.payment_terms)  cfPayload.payment_terms = activeM.payment_terms;
-      if (activeM.delivery_terms) cfPayload.delivery_terms = activeM.delivery_terms;
-      if (activeM.mandantName)    cfPayload.erp_mandant = activeM.mandantName;
-      if (Object.keys(cfPayload).length) {
-        const tryBodies = [
-          { sales_account: { custom_field: cfPayload } },
-          { sales_account: { custom_fields: cfPayload } },
-          { sales_account: cfPayload }
-        ];
-        for (const body of tryBodies) {
-          try {
-            await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, { method: 'PUT', body });
-            _fsAccountCache.delete(ctx.fs.id);
-            const refreshed = await _fsLoadAccount(ctx.fs.id, true);
-            const cf = refreshed?.custom_field || refreshed?.custom_fields || {};
-            const matches = Object.keys(cfPayload).some(k => String(cf[k] ?? cf['cf_'+k] ?? '').trim() === String(cfPayload[k]).trim());
-            if (matches) { console.log('[saveAll] ✓ FS-CF Sync via', body); break; }
-          } catch (e) { console.warn('[saveAll] FS-CF body failed:', e.message); }
-        }
-      }
+        });
+      } catch (e) { console.warn('[saveAll] ERP-Contact create failed:', e.message); }
     }
   }
 
-  // -------- Caches + State refresh --------
+  // --- 4. FS-Contact direkt updaten (eigene Logik wegen cf_kontaktid Auto-Fill) ---
+  if (ctx.fsContact?.id && APP_KEYS.proxyV2) {
+    const cFields = {};
+    if (cn.first_name) cFields.first_name = cn.first_name;
+    if (cn.last_name)  cFields.last_name  = cn.last_name;
+    if (cn.email)      cFields.email      = cn.email;
+    if (cn.work_phone) cFields.work_number = cn.work_phone;
+    if (cn.mobile)     cFields.mobile_number = cn.mobile;
+    if (cn.job_title)  cFields.job_title  = cn.job_title;
+    const existCf = ctx.fsContact.custom_field || {};
+    const autoCf = { ...existCf };
+    if (!existCf.cf_kontaktid && !existCf.cf_kontakt_id) autoCf.cf_kontaktid = String(ctx.fsContact.id);
+    cFields.custom_field = autoCf;
+    try {
+      await proxyFetch('freshsales/api/contacts/' + ctx.fsContact.id, { method: 'PUT', body: { contact: cFields } });
+      _fsContactCache.delete(ctx.fsContact.id);
+      summary.push('FS-Contact ✓');
+    } catch (e) { summary.push('FS-Contact ✗'); console.warn('[saveAll] FS-Contact failed:', e.message); }
+  }
+
+  // --- 5. FD-Contact direkt updaten ---
+  if (ctx.fd?.id && APP_KEYS.proxyV2) {
+    const fdcFields = {};
+    const fullName = ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim();
+    if (fullName)     fdcFields.name = fullName;
+    if (cn.email)     fdcFields.email = cn.email;
+    if (cn.work_phone)fdcFields.phone = cn.work_phone;
+    if (cn.mobile)    fdcFields.mobile = cn.mobile;
+    if (cn.job_title) fdcFields.job_title = cn.job_title;
+    try {
+      await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: fdcFields });
+      _fdContactCache.delete(ctx.fd.id);
+      summary.push('FD-Contact ✓');
+    } catch (e) { summary.push('FD-Contact ✗'); console.warn('[saveAll] FD-Contact failed:', e.message); }
+  }
+
+  // --- 6. State refresh ---
+  ctx.erpCustomers = ctx.fs?.id ? await _findErpCustomersByFsAccountId(ctx.fs.id).catch(()=>ctx.erpCustomers) : ctx.erpCustomers;
+  ctx._erpContactsAll = await readData('Contact').catch(()=>ctx._erpContactsAll);
   if (ctx.fs?.id) ctx.fs = await _fsLoadAccount(ctx.fs.id, true) || ctx.fs;
   if (ctx.fsContact?.id) ctx.fsContact = await _fsLoadContact(ctx.fsContact.id, true) || ctx.fsContact;
   if (ctx.fdCompany?.id) ctx.fdCompany = await _loadFdCompany(ctx.fdCompany.id, true) || ctx.fdCompany;
-  if (ctx.fd?.id) { _fdContactCache.delete(ctx.fd.id); ctx.fd = await _loadFdContact(ctx.fd.id) || ctx.fd; }
-  if (ctx.fs?.id) ctx.erpCustomers = await _findErpCustomersByFsAccountId(ctx.fs.id);
-  ctx._erpContactsAll = await readData('Contact').catch(()=>ctx._erpContactsAll);
   _tcmConsolidateMaster(ctx);
   ctx.savingAll = false;
 
-  // -------- Toast-Zusammenfassung --------
-  const summary = [];
-  if (results.fs === 'ok')   summary.push('FS-Account ✓');
-  else if (results.fs === 'fail') summary.push('FS-Account ✗');
-  if (results.fsc === 'ok')  summary.push('FS-Contact ✓');
-  else if (results.fsc === 'fail') summary.push('FS-Contact ✗');
-  if (results.fdco === 'ok') summary.push('FD-Firma ✓');
-  else if (results.fdco === 'fail') summary.push('FD-Firma ✗');
-  if (results.fd === 'ok')   summary.push('FD-Contact ✓');
-  else if (results.fd === 'fail') summary.push('FD-Contact ✗');
-  results.erp.forEach(e => {
-    if (e.customer === 'ok') summary.push('ERP ' + e.mandant + ' ✓');
-    else if (e.customer === 'fail') summary.push('ERP ' + e.mandant + ' ✗');
-  });
   const hasFail = /✗/.test(summary.join(''));
-  toast(summary.join(' · ') || 'Nichts zu speichern', hasFail ? 'warn' : 'success', hasFail ? 8000 : 4500);
+  toast(summary.join(' · ') || 'Nichts zu speichern (kein ERP-Customer + keine FS/FD-Contacts verknüpft)', hasFail ? 'warn' : 'success', hasFail ? 8000 : 4500);
   _tcmRender();
 }
 
@@ -2211,7 +2111,17 @@ async function _tcmCreateErpForMandant(mandantId, itemEl) {
 
     ctx.erpCustomers = await _findErpCustomersByFsAccountId(ctx.fs.id);
     ctx.dirty = true;
-    toast('ERP-Customer ' + customerNo + ' in „' + (mandant.fields.name || '?') + '" angelegt ✓', 'success', 4500);
+    // Auto-Sync ERP → FD-Company + FS-Sales-Account (mit Anlage falls noch nicht da)
+    try {
+      const sync = await Promise.allSettled([
+        typeof syncCustomerToFreshdesk === 'function' ? syncCustomerToFreshdesk(newCustomer.id, null, { silent: true }) : Promise.resolve(false),
+        APP_KEYS.freshsalesSubdomain && typeof syncCustomerToFreshsales === 'function'
+          ? syncCustomerToFreshsales(newCustomer.id, null, { silent: true })
+          : Promise.resolve(false)
+      ]);
+      console.log('[tcmCreateErp] Auto-Sync nach Anlegen:', sync.map(r => r.value));
+    } catch (_) {}
+    toast('ERP-Customer ' + customerNo + ' in „' + (mandant.fields.name || '?') + '" angelegt + CRM-Sync ✓', 'success', 4500);
     _tcmRender();
   } catch (e) {
     console.error('[tcmCreateErp] failed', e);
