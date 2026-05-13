@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.56';
+const APP_VERSION = 'v4.57';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6585,7 +6585,7 @@ function _tcmApplySuggestion(field, value) {
       phone:     () => { cn.work_phone = value; },
       mobile:    () => { cn.mobile = value; },
       job_title: () => { cn.job_title = value; },
-      // Firma-Felder
+      // Firma-Felder (UI-sichtbar)
       company_name:    () => { co.name = value; },
       company_phone:   () => { co.phone = value; },
       company_website: () => { co.website = value; },
@@ -6596,7 +6596,18 @@ function _tcmApplySuggestion(field, value) {
       company_vat_id:  () => { const tab = ctx.master.activeMandantTab; const md = ctx.master.mandants.find(x => x.customerId === tab); if (md) md.vat_id = value; }
     };
     if (m[field]) { _tcmSyncMaster(); m[field](); return true; }
-    // Unbekanntes Feld (industry/description/note/domains) → still ignorieren oder weiter unten an FS schreiben
+    // Firma-Felder die im UI nicht direkt editierbar sind (industry/description/note/domains)
+    // → trotzdem in master.company speichern. Werden beim Save mitgepusht (FS-Account + FD-note + ERP).
+    if (field.startsWith('company_')) {
+      _tcmSyncMaster();
+      const f = field.replace(/^company_/, '');
+      if (f === 'domains') {
+        co.domains = Array.isArray(value) ? value : String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+      } else {
+        co[f] = Array.isArray(value) ? value.join(', ') : value;
+      }
+      return true;
+    }
   }
   // FS-Account-Felder haben Vorrang (FS = Master). company_* schreibt in FS, fallback FD-Company.
   if (field.startsWith('company_')) {
