@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.52';
+const APP_VERSION = 'v4.53';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6421,28 +6421,47 @@ function _tcmRender() {
       <i data-lucide="${ctx.savingAll ? 'loader-2' : 'zap'}" class="w-5 h-5 ${ctx.savingAll ? 'animate-spin' : ''}"></i> ${ctx.savingAll ? 'Verteile in 3 Systeme…' : '⚡ Alles speichern + in 3 Systeme verteilen'}
     </button>
 
-    <!-- ============ SYSTEM-STATUS (read-only) ============ -->
+    <!-- ============ SYSTEM-STATUS (mit Anlegen-Aktionen) ============ -->
     <div class="bg-ink-50 border border-ink-200 rounded-xl p-3 text-xs">
-      <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">System-Status</p>
-      <div class="space-y-1.5">
-        <div class="flex items-center gap-2">
-          <i data-lucide="${ctx.fs?.id ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${ctx.fs?.id ? 'text-emerald-600' : 'text-ink-300'}"></i>
-          <span class="text-ink-700">Freshsales</span>
-          ${ctx.fs?.id ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Account #${ctx.fs.id}</span>` : '<span class="text-[10px] text-amber-700">kein Account</span>'}
-          ${ctx.fsContact?.id ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.fsContact.id}</span>` : '<span class="text-[10px] text-amber-700">kein Contact</span>'}
-        </div>
-        <div class="flex items-center gap-2">
-          <i data-lucide="${ctx.fdCompany?.id ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${ctx.fdCompany?.id ? 'text-emerald-600' : 'text-ink-300'}"></i>
-          <span class="text-ink-700">Freshdesk</span>
-          ${ctx.fdCompany?.id ? `<span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Company #${ctx.fdCompany.id}</span>` : '<span class="text-[10px] text-amber-700">keine Firma</span>'}
-          ${ctx.fd?.id ? `<span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.fd.id}</span>` : ''}
-        </div>
+      <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">System-Status — Verknüpfungen + Anlegen</p>
+      <div class="space-y-2">
+        <!-- Freshsales -->
         <div class="flex items-center gap-2 flex-wrap">
-          <i data-lucide="${master.mandants.length ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${master.mandants.length ? 'text-emerald-600' : 'text-ink-300'}"></i>
-          <span class="text-ink-700">ERP</span>
-          ${master.mandants.length
-            ? master.mandants.map(m => `<span class="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">${escapeHtml(m.mandantName)} ${escapeHtml(m.customer_no || 'K-?')}</span>`).join('')
-            : '<span class="text-[10px] text-amber-700">noch nicht angelegt</span>'}
+          <i data-lucide="${ctx.fs?.id ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${ctx.fs?.id ? 'text-emerald-600' : 'text-ink-300'}"></i>
+          <span class="text-ink-700 font-medium">Freshsales</span>
+          ${ctx.fs?.id ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Account #${ctx.fs.id}</span>` : ''}
+          ${ctx.fsContact?.id ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.fsContact.id}</span>` : ''}
+          ${!ctx.fs?.id ? `<button type="button" onclick="_tcmPushFdToFs(this)" class="ml-auto text-[10px] bg-purple-600 hover:bg-purple-700 text-white px-2 py-1 rounded font-semibold inline-flex items-center gap-1">
+            <i data-lucide="plus" class="w-3 h-3"></i> Sales-Account anlegen
+          </button>` : ''}
+        </div>
+
+        <!-- Freshdesk -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <i data-lucide="${ctx.fdCompany?.id ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${ctx.fdCompany?.id ? 'text-emerald-600' : 'text-ink-300'}"></i>
+          <span class="text-ink-700 font-medium">Freshdesk</span>
+          ${ctx.fdCompany?.id ? `<span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Company #${ctx.fdCompany.id}</span>` : ''}
+          ${ctx.fd?.id ? `<span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.fd.id}</span>` : ''}
+          ${!ctx.fdCompany?.id && ctx.fd?.id ? `<button type="button" onclick="_tcmCreateFdCompany(this)" class="ml-auto text-[10px] bg-brand-600 hover:bg-brand-700 text-white px-2 py-1 rounded font-semibold inline-flex items-center gap-1">
+            <i data-lucide="plus" class="w-3 h-3"></i> Firma in FD anlegen
+          </button>` : ''}
+        </div>
+
+        <!-- ERP -->
+        <div class="flex items-start gap-2 flex-wrap">
+          <i data-lucide="${master.mandants.length ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${master.mandants.length ? 'text-emerald-600' : 'text-ink-300'} mt-0.5"></i>
+          <div class="flex-1 min-w-0">
+            <span class="text-ink-700 font-medium">ERP</span>
+            ${master.mandants.length
+              ? '<div class="flex flex-wrap gap-1 mt-1">' + master.mandants.map(m => `<span class="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">${escapeHtml(m.mandantName)} · ${escapeHtml(m.customer_no || 'K-?')}</span>`).join('') + '</div>'
+              : ''}
+            ${(ctx.mandants || []).length
+              ? '<div class="flex flex-wrap gap-1 mt-1.5">' + (ctx.mandants || []).filter(m => !master.mandants.find(x => x.mandantId === m.id)).map(m =>
+                  `<button type="button" onclick="_tcmCreateErpForMandant('${m.id}', null)" class="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white px-2 py-1 rounded font-semibold inline-flex items-center gap-1">
+                    <i data-lucide="plus" class="w-3 h-3"></i> ${escapeHtml(m.fields.name || 'Mandant')}
+                  </button>`).join('') + '</div>'
+              : ''}
+          </div>
         </div>
       </div>
     </div>`;
@@ -6933,6 +6952,55 @@ async function _tcmReloadFs(btnEl) {
     console.error('[tcmReloadFs] failed', e);
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="refresh-cw" class="w-3 h-3"></i> FS erneut suchen'; if (window.lucide) lucide.createIcons(); }
     toast('Suche fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
+// Legt eine FD-Company aus den aktuellen Stammdaten an + verknüpft den FD-Contact
+async function _tcmCreateFdCompany(btnEl) {
+  const ctx = _tcmCtx;
+  if (!ctx?.fd?.id) return toast('Kein FD-Contact verknüpft', 'warn');
+  if (!APP_KEYS.proxyV2) return toast('Benötigt Val.town-Proxy v2', 'error', 7000);
+  _tcmSyncMaster();
+  const co = ctx.master?.company || {};
+  const name = (co.name || '').trim();
+  if (!name) return toast('Firmenname (oben in Stammdaten) muss erst ausgefüllt sein', 'warn', 6000);
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // Domain aus Email-Adresse
+    const dom = (ctx.fd.email && ctx.fd.email.includes('@')) ? [ctx.fd.email.split('@')[1]] : [];
+    const noteLines = [];
+    if (co.street || co.zipcode || co.city) noteLines.push('Adresse: ' + [co.street, [co.zipcode, co.city].filter(Boolean).join(' '), co.country].filter(Boolean).join(', '));
+    if (co.phone)   noteLines.push('Tel: ' + co.phone);
+    if (co.website) noteLines.push('Web: ' + co.website);
+    if (co.email)   noteLines.push('E-Mail: ' + co.email);
+    const body = { name, domains: dom };
+    if (noteLines.length) body.note = noteLines.join('\n');
+    console.log('[tcmCreateFdCompany] POST /companies', body);
+    let createdId = null;
+    try {
+      const created = await proxyFetch('freshdesk/api/v2/companies', { method: 'POST', body });
+      createdId = created?.id;
+    } catch (e) {
+      // 409: existiert schon → ID aus Error extrahieren
+      const m = String(e?.message || '');
+      const idMatch = m.match(/"company_id"\s*:\s*(\d+)/);
+      if (/409/.test(m) && idMatch) createdId = Number(idMatch[1]);
+      else throw e;
+    }
+    if (!createdId) throw new Error('Keine Company-ID erhalten');
+    // FD-Contact verknüpfen
+    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: { company_id: createdId } });
+    // State nachziehen
+    ctx.fd.company_id = createdId;
+    ctx.fdCompany = await _loadFdCompany(createdId, true);
+    _fdContactCache.delete(ctx.fd.id);
+    ctx.dirty = true;
+    _tcmConsolidateMaster(ctx);
+    toast('Freshdesk-Firma angelegt + Contact verknüpft ✓', 'success', 3500);
+    _tcmRender();
+  } catch (e) {
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="plus" class="w-3 h-3"></i> Firma in FD anlegen'; if (window.lucide) lucide.createIcons(); }
+    toast('FD-Firma-Anlage fehlgeschlagen: ' + (e.message || e), 'error', 7000);
   }
 }
 
