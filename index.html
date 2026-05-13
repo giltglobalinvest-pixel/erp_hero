@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.66';
+const APP_VERSION = 'v4.67';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -17285,6 +17285,11 @@ function substituteVariables(text, docType, ctx) {
       out = out.split(placeholder).join(String(cf[k] ?? ''));
     }
   });
+  // Auto-Cleanup: User-Templates haben manchmal "Sehr {{kontakt.anrede}}" → doppeltes
+  // "Sehr Sehr geehrt…" entfernen. Zusätzlich "Sehr geehrte Damen und Herren <Nachname>"
+  // → "Sehr geehrte Damen und Herren" (kein Nachname wenn Anrede unbekannt).
+  out = out.replace(/Sehr\s+(Sehr\s+geehrt[ea]?r?\s+)/gi, '$1');
+  out = out.replace(/(Sehr\s+geehrte\s+Damen\s+und\s+Herren)\s+\S+\s*,/gi, '$1,');
   return out;
 }
 
