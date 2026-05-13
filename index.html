@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.59';
+const APP_VERSION = 'v4.60';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -7900,7 +7900,10 @@ function _renderFdArticlePicker() {
                 <p class="text-xs font-medium text-ink-900 truncate">${escapeHtml(f.name1 || '')}</p>
               </div>
               <input type="number" id="fd-pick-qty-${a.id}" value="1" min="1" class="w-12 px-1 py-0.5 border border-ink-200 rounded text-xs text-center shrink-0">
-              <button type="button" onclick="_addFdArticle('${a.id}')" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-2 py-1 text-xs inline-flex items-center gap-1 shrink-0"><i data-lucide="plus" class="w-3 h-3"></i></button>
+              <button type="button" onclick="_addFdArticle('${a.id}')" class="bg-blue-600 hover:bg-blue-700 text-white rounded px-2 py-1 text-xs inline-flex items-center gap-1 shrink-0" title="Zur Auswahl hinzufügen"><i data-lucide="plus" class="w-3 h-3"></i></button>
+              <button type="button" onclick="_deleteFdArticleStammdaten('${a.id}', '${escapeHtml((f.article_no || '') + ' ' + (f.name1 || '')).replace(/'/g, "\\'")}', this)" class="text-ink-400 hover:text-red-600 hover:bg-red-50 rounded p-1 shrink-0" title="Aus Artikel-Stammdaten löschen">
+                <i data-lucide="trash-2" class="w-3 h-3"></i>
+              </button>
             </div>
           `;
         }).join('')}
@@ -7957,6 +7960,29 @@ function _toggleFdArticlePicker() {
   _renderFreshdeskTicket();
   if (_fdTicketState.articlePickerOpen) setTimeout(() => document.getElementById('fdArticleSearch')?.focus(), 50);
 }
+// Löscht einen Artikel aus den ERP-Stammdaten (mit Bestätigung)
+async function _deleteFdArticleStammdaten(articleId, label, btnEl) {
+  if (!articleId) return;
+  if (!confirm('Artikel „' + label.trim() + '" wirklich aus den ERP-Stammdaten löschen?\n\nDas kann nicht rückgängig gemacht werden.')) return;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i>'; if (window.lucide) lucide.createIcons(); }
+  try {
+    await deleteData('Article', articleId);
+    // Aus Cache entfernen + Re-Render
+    if (_fdTicketState.cache?.articles) {
+      _fdTicketState.cache.articles = _fdTicketState.cache.articles.filter(a => a.id !== articleId);
+    }
+    // Falls Artikel schon in editFields.items: rausschmeißen
+    if (Array.isArray(_fdTicketState.editFields?.items)) {
+      _fdTicketState.editFields.items = _fdTicketState.editFields.items.filter(i => i.article_id !== articleId);
+    }
+    toast('Artikel gelöscht: ' + label.trim(), 'success', 3000);
+    _renderFreshdeskTicket();
+  } catch (e) {
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="trash-2" class="w-3 h-3"></i>'; if (window.lucide) lucide.createIcons(); }
+    toast('Löschen fehlgeschlagen: ' + (e.message || e), 'error', 6000);
+  }
+}
+
 function _setFdArticleSearch(q) {
   _fdTicketState.articleSearch = q;
   _renderFreshdeskTicket();
