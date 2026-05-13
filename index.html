@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.53';
+const APP_VERSION = 'v4.54';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6962,8 +6962,19 @@ async function _tcmCreateFdCompany(btnEl) {
   if (!APP_KEYS.proxyV2) return toast('Benötigt Val.town-Proxy v2', 'error', 7000);
   _tcmSyncMaster();
   const co = ctx.master?.company || {};
-  const name = (co.name || '').trim();
-  if (!name) return toast('Firmenname (oben in Stammdaten) muss erst ausgefüllt sein', 'warn', 6000);
+  // Firmenname-Resolution: Master → FD-Contact.company_name → Email-Domain → Prompt
+  let name = (co.name || '').trim();
+  if (!name) name = (ctx.fd?.company_name || ctx.fsContact?.company_name || '').trim();
+  if (!name && ctx.fd?.email && ctx.fd.email.includes('@')) {
+    const dom = ctx.fd.email.split('@')[1] || '';
+    name = dom.replace(/\.[a-z]{2,}$/i, '').replace(/[-.]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+  // Letzter Fallback: User-Prompt
+  name = prompt('Firmenname für neue FD-Firma:', name || '');
+  if (!name || !name.trim()) return;
+  name = name.trim();
+  // Im Master-View speichern, damit's für Save-All verfügbar bleibt
+  if (ctx.master?.company) ctx.master.company.name = name;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
   try {
     // Domain aus Email-Adresse
