@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.71';
+const APP_VERSION = 'v4.72';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -20694,6 +20694,8 @@ async function emailQuote() {
     </div>
   `;
 
+  // Initial-Body in Editor-Storage zwischenspeichern
+  window._eqInitialBody = templBody;
   openModal2(`
     <div class="p-5 max-w-2xl">
       <h3 class="text-base font-bold text-ink-900 mb-3 flex items-center gap-2">
@@ -20712,8 +20714,11 @@ async function emailQuote() {
           <input id="eqSubject" type="text" value="${escapeHtml(templSubject)}" class="w-full mt-1 px-2 py-1.5 border border-ink-200 rounded text-sm">
         </div>
         <div>
-          <label class="text-[11px] uppercase font-semibold text-ink-700 block">Nachricht (HTML)</label>
-          <textarea id="eqBody" rows="9" class="w-full mt-1 px-2 py-1.5 border border-ink-200 rounded text-xs font-mono resize-y">${escapeHtml(templBody)}</textarea>
+          <label class="text-[11px] uppercase font-semibold text-ink-700 block">Nachricht</label>
+          <div class="mt-1 border border-ink-200 rounded overflow-hidden bg-white">
+            <div id="eqBodyEditor" style="min-height: 220px;"></div>
+          </div>
+          <p class="text-[10px] text-ink-500 mt-0.5">Variablen wie {{kontakt.anrede}} sind bereits eingefügt — du kannst alles editieren.</p>
         </div>
         ${attListHtml}
       </div>
@@ -20726,13 +20731,54 @@ async function emailQuote() {
     </div>
   `, { maxWidth: 'max-w-2xl' });
   if (window.lucide) lucide.createIcons();
+  // Quill-Editor initialisieren (mit HTML-Body als Initial-Content)
+  setTimeout(() => _emailQuoteInitEditor(window._eqInitialBody || ''), 100);
+}
+
+// Initialisiert Quill für den Email-Body (lädt CDN bei Bedarf)
+async function _emailQuoteInitEditor(initialHtml) {
+  if (!window.Quill) {
+    await new Promise((resolve, reject) => {
+      if (!document.getElementById('quillCss')) {
+        const css = document.createElement('link');
+        css.id = 'quillCss';
+        css.rel = 'stylesheet';
+        css.href = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css';
+        document.head.appendChild(css);
+      }
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js';
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    }).catch(()=>{});
+  }
+  const el = document.getElementById('eqBodyEditor');
+  if (!el || !window.Quill) return;
+  const toolbar = typeof quillStandardToolbar === 'function' ? quillStandardToolbar() : [
+    [{ header: [1, 2, 3, false] }],
+    ['bold', 'italic', 'underline'],
+    [{ list: 'ordered' }, { list: 'bullet' }],
+    ['link', 'clean']
+  ];
+  const q = new window.Quill(el, { theme: 'snow', modules: { toolbar } });
+  if (initialHtml) q.root.innerHTML = initialHtml;
+  window._eqQuill = q;
 }
 
 // Eigentlicher Send: PDF generieren + Bundle-Anhänge laden + multipart POST via FD outbound_email
 async function _emailQuoteDoSend(quoteId, customerName, quoteNo, btnEl) {
   const to      = (document.getElementById('eqRecipient')?.value || '').trim();
   const subj    = (document.getElementById('eqSubject')?.value || '').trim();
-  const body    = (document.getElementById('eqBody')?.value || '').trim();
+  // Body aus Quill-Editor holen (HTML), Fallback auf Textarea wenn alter Modal noch im DOM
+  let body = '';
+  if (window._eqQuill) {
+    body = (window._eqQuill.root.innerHTML || '').trim();
+    // Quill liefert leeren Editor als '<p><br></p>' — als leer behandeln
+    if (body === '<p><br></p>' || body === '<p></p>') body = '';
+  } else {
+    body = (document.getElementById('eqBody')?.value || '').trim();
+  }
   if (!to)   return toast('Empfänger fehlt', 'warn');
   if (!subj) return toast('Betreff fehlt', 'warn');
   if (!body) return toast('Nachricht fehlt', 'warn');
