@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.51';
+const APP_VERSION = 'v4.52';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6491,6 +6491,27 @@ async function _tcmAiSuggest(contact, company, ticket, conv) {
     .slice().sort((a,b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
     .map(c => (c.private ? '[Notiz] ' : '') + (c.incoming ? 'Kunde' : 'Agent') + ': ' + _fdHtmlToText(c.body_text || c.body || '').slice(0, 1500))
     .join('\n\n');
+  // ZUSÄTZLICH: andere Tickets desselben Anfragenden als Kontext (für Felder die in diesem Ticket nicht erkennbar sind)
+  let otherTicketsText = '';
+  if (contact?.id) {
+    try {
+      console.log('[aiSuggest] suche weitere Tickets für Contact', contact.id);
+      // Letzte ~8 Tickets desselben Kontakts (außer dem aktuellen)
+      const other = await freshdeskFetch('contacts/' + contact.id + '/tickets?per_page=8').catch(()=>null);
+      const list = Array.isArray(other) ? other : (other?.tickets || []);
+      const filtered = list.filter(t => t.id !== ticket.id).slice(0, 6);
+      if (filtered.length) {
+        // Pro Ticket: Subject + Description + erste eingehende Conversation
+        const parts = [];
+        for (const t of filtered) {
+          const subj = (t.subject || '').slice(0, 100);
+          const body = _fdHtmlToText(t.description_text || t.description || '').slice(0, 1200);
+          parts.push('--- Ticket #' + t.id + ': ' + subj + ' ---\n' + body);
+        }
+        otherTicketsText = parts.join('\n\n');
+      }
+    } catch (e) { console.warn('[aiSuggest] Other-Tickets-Load fehlgeschlagen:', e.message); }
+  }
   const curContact = {
     name: contact.name || null, email: contact.email || null,
     phone: contact.phone || null, mobile: contact.mobile || null,
@@ -6519,7 +6540,19 @@ REGELN:
 - company_industry MUSS EXAKT einer dieser Werte sein (sonst Feld komplett weglassen):
   ${JSON.stringify(FD_INDUSTRY_VALUES)}
   Für unklare Branchen "Other" verwenden oder Feld weglassen.
-- Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":…,"source":"woraus, max 60 Zeichen"}.
+
+ZUSÄTZLICHE QUELLEN — nutze sie wenn das aktuelle Ticket allein nicht genug Info hat:
+1. WEITERE TICKETS DES KONTAKTS (unten als Block "ANDERE TICKETS"): durchsuche besonders nach Signaturen,
+   die Adresse/Telefonnummer/USt-IdNr enthalten — diese sind verlässlich.
+2. WEB-SEARCH (web_search Tool verfügbar): Wenn die Firma identifizierbar ist (z.B. "KONE GmbH"),
+   nutze web_search um offizielle Stammdaten zu verifizieren — vor allem:
+   - Anschrift (Straße/PLZ/Stadt) auf der offiziellen Firmen-Website oder im Impressum
+   - USt-IdNr (DE… aus Impressum)
+   - Branche/Industry
+   - Telefon-Hauptnummer + Website
+   Beim Vorschlag: source-Feld muss klar zeigen woher (z.B. "Web: kone.de/impressum" oder "Ticket #12345").
+
+- Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":…,"source":"woraus, max 80 Zeichen"}.
 
 JSON-FORMAT (Felder weglassen wenn unsicher):
 {
@@ -6544,7 +6577,7 @@ JSON-FORMAT (Felder weglassen wenn unsicher):
 
 Wichtig: Adresse möglichst NICHT als gesammelter String, sondern STRUKTURIERT in company_street + company_zipcode + company_city + company_country aufteilen, falls eine Firmen-Adresse erkennbar ist. Das address-Feld (oben) ist nur für den Contact (persönliche Adresse falls anders).
 
-TICKET:
+AKTUELLES TICKET:
 Betreff: ${ticket.subject || ''}
 Von: ${ticket.requester?.name || '?'}${ticket.requester?.email ? ' <' + ticket.requester.email + '>' : ''}
 
@@ -6553,9 +6586,15 @@ ${desc}
 
 ${convText ? 'Verlauf:\n' + convText : ''}
 
-Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text extrahieren oder verbessern?`;
+${otherTicketsText ? '\nANDERE TICKETS desselben Kontakts (als Zusatz-Quelle für Signaturen / Adressen / Telefonnummern):\n' + otherTicketsText + '\n' : ''}
 
-  const raw = await askAI(prompt, { purpose: 'tcmSuggest', maxTokens: 2000 });
+Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text und ggf. dem Web extrahieren?`;
+
+  const raw = await askAI(prompt, {
+    purpose: 'tcmSuggest',
+    maxTokens: 3000,
+    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }]
+  });
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
   try { return JSON.parse(cleaned); }
   catch (_) {
@@ -8823,24 +8862,26 @@ async function askAI(prompt, opts = {}) {
     }
   }
   content.push({ type: 'text', text: prompt });
-  // Proxy leitet an api.anthropic.com/v1/messages weiter — Anthropic-Key liegt
-  // in Val.town als env var. Browser sendet keinen Anthropic-Key mehr.
+  const body = {
+    model: opts.model || 'claude-sonnet-4-5-20250929',
+    max_tokens: opts.maxTokens || 2048,
+    messages: [{ role: 'user', content: content.length === 1 ? content[0].text : content }]
+  };
+  // Optional: Web-Search-Tool aktivieren — Anthropic-native, sucht direkt im Netz
+  if (opts.tools) body.tools = opts.tools;
   let data;
   try {
-    data = await proxyFetch('anthropic/v1/messages', {
-      method: 'POST',
-      body: {
-        model: opts.model || 'claude-sonnet-4-5-20250929',
-        max_tokens: opts.maxTokens || 2048,
-        messages: [{ role: 'user', content: content.length === 1 ? content[0].text : content }]
-      }
-    });
+    data = await proxyFetch('anthropic/v1/messages', { method: 'POST', body });
   } catch (e) {
     throw new Error('AI-Anfrage fehlgeschlagen: ' + e.message);
   }
-  // Usage-Logging (fire-and-forget, blockiert nicht)
   _logAiUsage(data, { purpose: opts.purpose || 'askAI', model: opts.model });
-  return (data && data.content && data.content[0]) ? data.content[0].text : '';
+  // Bei Tool-Use kann die Response mehrere content blocks haben (text, tool_use, text…) — alle Text-Blöcke konkatenieren
+  if (data?.content?.length) {
+    const texts = data.content.filter(c => c.type === 'text' && c.text).map(c => c.text);
+    if (texts.length) return texts.join('\n');
+  }
+  return '';
 }
 
 /* ============================================================
