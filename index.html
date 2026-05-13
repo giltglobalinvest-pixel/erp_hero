@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.62';
+const APP_VERSION = 'v4.63';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3829,11 +3829,12 @@ async function _loadFdCachesIfNeeded() {
   if (_fdTicketState.cache?.customers?.length) return;
   const cur = getCurrentCompany();
   try {
-    const [allCustomers, allContacts, allArticles, allBundles] = await Promise.all([
+    const [allCustomers, allContacts, allArticles, allBundles, allAttachments] = await Promise.all([
       readData('Customer').catch(() => []),
       readData('Contact').catch(() => []),
       readData('Article').catch(() => []),
-      readData('QuoteBundle').catch(() => [])
+      readData('QuoteBundle').catch(() => []),
+      readData('Attachment').catch(() => [])
     ]);
     _fdTicketState.cache = {
       customers: allCustomers.filter(c => (c.fields.company_id || []).includes(cur?.id) && c.fields.status !== 'archiviert')
@@ -3842,8 +3843,15 @@ async function _loadFdCachesIfNeeded() {
       articles: allArticles.filter(a => (a.fields.company_id || []).includes(cur?.id) && a.fields.status !== 'archiviert')
         .sort((a,b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de')),
       bundles: allBundles.filter(b => b.fields.company_id === cur?.id && (b.fields.status || 'aktiv') !== 'archiviert')
+        .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de')),
+      attachments: allAttachments.filter(a => (a.fields.company_id || []).includes(cur?.id) && (a.fields.status || 'aktiv') === 'aktiv')
         .sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'))
     };
+    // Initial: Default-Bundle Anhänge in editFields.attachment_ids übernehmen (wenn noch leer)
+    if (!Array.isArray(_fdTicketState.editFields?.attachment_ids)) {
+      _fdTicketState.editFields = _fdTicketState.editFields || {};
+      _fdTicketState.editFields.attachment_ids = _fdResolveDefaultBundleAttachments();
+    }
   } catch (_) {}
 }
 
@@ -7890,6 +7898,51 @@ function _renderAiEditableFieldsBlock() {
         ${_renderFdArticlePicker()}
       </div>
 
+      <!-- Anhänge (PDFs aus Bundle, einzeln entfernbar / hinzufügbar) -->
+      ${(() => {
+        const attCache = _fdTicketState.cache?.attachments || [];
+        if (!attCache.length) return '';
+        const selectedIds = Array.isArray(ef.attachment_ids) ? ef.attachment_ids : [];
+        const selectedItems = selectedIds.map(id => attCache.find(a => a.id === id)).filter(Boolean);
+        const availableToAdd = attCache.filter(a => !selectedIds.includes(a.id));
+        return `
+        <div class="mb-3">
+          <p class="text-[11px] uppercase tracking-wider text-ink-500 font-semibold flex items-center gap-1.5 mb-1.5">
+            <i data-lucide="paperclip" class="w-3 h-3"></i> Anhänge (${selectedItems.length})
+            <span class="text-ink-400 font-normal normal-case">— PDFs die mit dem Angebot versendet werden</span>
+          </p>
+          ${selectedItems.length ? `
+            <div class="space-y-1 mb-2">
+              ${selectedItems.map((a, idx) => {
+                const files = a.fields?.file || [];
+                const sz = files[0]?.size ? ' · ' + _formatFileSize(files[0].size) : '';
+                return `
+                  <div class="bg-white border border-blue-100 rounded-lg px-2 py-1.5 flex items-center gap-2">
+                    <i data-lucide="file" class="w-3.5 h-3.5 text-blue-600 shrink-0"></i>
+                    <span class="flex-1 text-xs font-medium text-ink-900 truncate">${escapeHtml(a.fields?.name || '–')}</span>
+                    <span class="text-[10px] text-ink-500 shrink-0">${files.length} Datei${files.length===1?'':'en'}${sz}</span>
+                    <button type="button" onclick="_fdRemoveAttachment(${idx})" class="text-ink-400 hover:text-red-600 p-0.5 shrink-0" title="Entfernen"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
+                  </div>`;
+              }).join('')}
+            </div>
+          ` : '<p class="text-xs text-ink-500 italic mb-2">Keine Anhänge ausgewählt.</p>'}
+          ${availableToAdd.length ? `
+            <details class="bg-ink-50 border border-ink-200 rounded-lg">
+              <summary class="cursor-pointer text-xs text-ink-700 px-2 py-1.5 select-none hover:bg-ink-100 rounded-lg">+ Weiteren Anhang hinzufügen (${availableToAdd.length} verfügbar)</summary>
+              <div class="p-2 space-y-1 max-h-40 overflow-y-auto border-t border-ink-200">
+                ${availableToAdd.map(a => `
+                  <button type="button" onclick="_fdAddAttachment('${a.id}')" class="w-full text-left bg-white border border-ink-200 rounded px-2 py-1 text-xs hover:bg-blue-50 hover:border-blue-300 flex items-center gap-2">
+                    <i data-lucide="plus" class="w-3 h-3 text-blue-600 shrink-0"></i>
+                    <span class="flex-1 truncate">${escapeHtml(a.fields?.name || '–')}</span>
+                  </button>
+                `).join('')}
+              </div>
+            </details>
+          ` : ''}
+        </div>
+        `;
+      })()}
+
       <!-- Action-Buttons -->
       <div class="flex items-center gap-2 flex-wrap pt-2 border-t border-blue-200">
         <button type="button" onclick="aiCreateQuoteFromEdits()" ${(!ready || loading) ? 'disabled' : ''} class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-emerald-700 inline-flex items-center gap-2 disabled:opacity-50">
@@ -7986,6 +8039,38 @@ function _moveFdItem(idx, dir) {
 function _setFdBundleOverride(bundleId) {
   _fdTicketState.editFields = _fdTicketState.editFields || {};
   _fdTicketState.editFields.bundle_id_override = bundleId || '';
+  // Anhänge automatisch aus dem (neu) gewählten Bundle übernehmen
+  let bundleAttIds = [];
+  if (bundleId) {
+    const b = (_fdTicketState.cache?.bundles || []).find(x => x.id === bundleId);
+    if (b) { try { bundleAttIds = JSON.parse(b.fields?.attachment_ids || '[]'); } catch (_) {} }
+  } else {
+    // "automatisch": Default-Bundle nehmen
+    bundleAttIds = _fdResolveDefaultBundleAttachments();
+  }
+  _fdTicketState.editFields.attachment_ids = bundleAttIds;
+  _renderFreshdeskTicket();
+}
+// Liest das Default-Bundle (is_default + doc_type='Angebot') und gibt seine Attachment-IDs zurück
+function _fdResolveDefaultBundleAttachments() {
+  const bundles = _fdTicketState.cache?.bundles || [];
+  const def = bundles.find(b => b.fields?.is_default && (b.fields?.doc_type || 'Angebot') === 'Angebot');
+  if (!def) return [];
+  try { return JSON.parse(def.fields?.attachment_ids || '[]'); } catch (_) { return []; }
+}
+function _fdRemoveAttachment(idx) {
+  const arr = _fdTicketState.editFields?.attachment_ids;
+  if (!Array.isArray(arr)) return;
+  arr.splice(idx, 1);
+  _renderFreshdeskTicket();
+}
+function _fdAddAttachment(attId) {
+  _fdTicketState.editFields = _fdTicketState.editFields || {};
+  _fdTicketState.editFields.attachment_ids = _fdTicketState.editFields.attachment_ids || [];
+  if (!_fdTicketState.editFields.attachment_ids.includes(attId)) {
+    _fdTicketState.editFields.attachment_ids.push(attId);
+  }
+  _renderFreshdeskTicket();
 }
 function _onFdCustomerChange(value) {
   _fdTicketState.editFields.customer_id = value || '';
@@ -8168,6 +8253,10 @@ async function aiCreateQuoteFromEdits() {
       }
     }
     if (chosenBundleId) fields.bundle_id = chosenBundleId;
+    // Anhänge: explizit gewählte Attachments mit übergeben (überschreibt Bundle-Default)
+    if (Array.isArray(ef.attachment_ids) && ef.attachment_ids.length) {
+      fields.attachment_ids = JSON.stringify(ef.attachment_ids);
+    }
     // Quote anlegen
     const created = await writeData('Quote', fields);
     // Items als QuoteItem (vollständig via Helper)
