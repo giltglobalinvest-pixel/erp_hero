@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.46';
+const APP_VERSION = 'v4.47';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5525,10 +5525,17 @@ function _tcmRender() {
             </li>`;
         }).join('')}
       </ul>
-      <p class="text-[10px] text-ink-500 italic mt-3">Anlegen-Funktion (Klick → ERP-Customer-Record erstellen + mit FS-Account verknüpfen) folgt in v4.37.</p>
+      <p class="text-[10px] text-ink-500 italic mt-3">Anlegen-Funktion pro Mandant (ERP-Customer-Record + Verknüpfung mit FS-Account) folgt im nächsten Schritt.</p>
     </div>` : '';
 
-  body.innerHTML = aiTop + fsBlock + fsContactBlock + mandantsBlock + erpBlock + fdBlock + fdCompanyBlock;
+  // Reihenfolge: Freshsales (Master, Vertrieb) → Freshdesk (Support-Spiegel) → ERP (Buchungs-Master pro Mandant)
+  body.innerHTML = aiTop
+    + fsBlock           // 1. Freshsales-Sales-Account (Master)
+    + fsContactBlock    // 2. Freshsales-Contact (Master)
+    + fdCompanyBlock    // 3. Freshdesk-Firma (Support-Spiegel)
+    + fdBlock           // 4. Freshdesk-Kontakt (Support-Spiegel)
+    + mandantsBlock     // 5. ERP-Mandanten Multi-Select (welche Mandanten haben Customer-Record)
+    + erpBlock;         // 6. ERP-Status (read-only mit K-Nummer)
   if (window.lucide) lucide.createIcons();
 }
 
