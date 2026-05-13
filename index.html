@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.55';
+const APP_VERSION = 'v4.56';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6394,7 +6394,7 @@ async function _tcmLoadSuggestions(force) {
     // Conversations für Signaturen + Verlauf
     let conv = [];
     try { conv = await freshdeskFetch('tickets/' + ctx.ticketId + '/conversations'); } catch (_) {}
-    const raw = await _tcmAiSuggest(ctx.fd, ctx.fdCompany, ctx.ticket, conv);
+    const raw = await _tcmAiSuggest(ctx.fd, ctx.fdCompany, ctx.ticket, conv, ctx.master);
     const norm = {};
     ['name','email','phone','mobile','job_title','address',
      'company_name','company_phone','company_website','company_street','company_zipcode','company_city','company_country',
@@ -6414,7 +6414,7 @@ async function _tcmLoadSuggestions(force) {
   }
 }
 
-async function _tcmAiSuggest(contact, company, ticket, conv) {
+async function _tcmAiSuggest(contact, company, ticket, conv, master) {
   const desc = _fdHtmlToText(ticket.description_text || ticket.description || '').slice(0, 2500);
   const convText = (Array.isArray(conv) ? conv : [])
     .slice().sort((a,b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
@@ -6441,22 +6441,56 @@ async function _tcmAiSuggest(contact, company, ticket, conv) {
       }
     } catch (e) { console.warn('[aiSuggest] Other-Tickets-Load fehlgeschlagen:', e.message); }
   }
-  const curContact = {
-    name: contact.name || null, email: contact.email || null,
-    phone: contact.phone || null, mobile: contact.mobile || null,
-    job_title: contact.job_title || null, address: contact.address || null,
+  // KONSOLIDIERTE Master-Werte aus FS + ERP + FD (mit Quellen-Indikator wo's herkommt)
+  const m = master || {};
+  const mco = m.company || {};
+  const mcn = m.contact || {};
+  const activeM = m.mandants?.find(x => x.customerId === m.activeMandantTab) || m.mandants?.[0] || {};
+
+  // Alles was wir SCHON wissen aus den 3 Systemen — konsolidiert mit Prio FS > ERP > FD
+  const knownData = {
+    firma: {
+      name:     mco.name     || null,
+      phone:    mco.phone    || null,
+      website:  mco.website  || null,
+      email:    mco.email    || null,
+      strasse:  mco.street   || null,
+      plz:      mco.zipcode  || null,
+      stadt:    mco.city     || null,
+      land:     mco.country  || null
+    },
+    person: {
+      vorname:  mcn.first_name || null,
+      nachname: mcn.last_name  || null,
+      email:    mcn.email    || null,
+      festnetz: mcn.work_phone || null,
+      mobil:    mcn.mobile   || null,
+      position: mcn.job_title || null
+    },
+    erp_stammdaten_aktuell: activeM.customerId ? {
+      kundennummer:    activeM.customer_no    || null,
+      ust_idnr:        activeM.vat_id         || null,
+      zahlungsziel:    activeM.payment_terms  || null,
+      lieferbedingung: activeM.delivery_terms || null,
+      mandant:         activeM.mandantName    || null
+    } : null,
+    systeme_status: {
+      freshsales_account_id: m.mandants?.[0] ? 'verknüpft' : 'nicht verknüpft',
+      freshdesk_contact_id:  contact?.id ? 'verknüpft' : 'nicht verknüpft',
+      anzahl_erp_mandanten:  m.mandants?.length || 0
+    }
   };
-  const curCompany = company ? {
-    name: company.name || null, domains: company.domains || [],
-    industry: company.industry || null, description: company.description || null, note: company.note || null,
-  } : null;
-  const prompt = `Du extrahierst Kontakt- UND Firmendaten aus einem Helpdesk-Ticket. Analysiere Betreff, Anfragen, Konversation und vor allem EMAIL-SIGNATUREN am Ende von Nachrichten — die enthalten meist Name, Position, Firma, Telefonnummern, Adresse, Domain.
 
-AKTUELLE KONTAKTDATEN (überschreibe nur wenn du wirklich bessere/präzisere Werte findest):
-${JSON.stringify(curContact, null, 2)}
+  const prompt = `Du extrahierst Kontakt- UND Firmendaten aus einem Helpdesk-Ticket.
+Analysiere Betreff, Anfragen, Konversation und vor allem EMAIL-SIGNATUREN am Ende von Nachrichten — die enthalten meist Name, Position, Firma, Telefonnummern, Adresse, Domain.
 
-AKTUELLE FIRMENDATEN${curCompany ? ' (mit Kontakt verknüpft)' : ' (keine Firma verknüpft)'}:
-${JSON.stringify(curCompany, null, 2)}
+WICHTIG — BEREITS BEKANNTE DATEN AUS FS + ERP + FD (konsolidiert, Priorität FS > ERP > FD):
+${JSON.stringify(knownData, null, 2)}
+
+REGELN für deine Vorschläge:
+- Wenn ein Feld oben BEREITS einen Wert hat → schlage es NUR vor wenn du SICHER einen besseren/aktuelleren Wert hast (z.B. neuere Telefonnummer in einer aktuellen Signatur). Sonst Feld weglassen.
+- Wenn ein Feld oben null/leer ist → versuche es aus Ticket + Signaturen + Web zu erkennen.
+- Bevorzugt nicht überschreiben, sondern ergänzen.
 
 REGELN:
 - Schlage nur Werte vor, die du KLAR aus dem Text belegen kannst.
