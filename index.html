@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.68';
+const APP_VERSION = 'v4.69';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -20406,11 +20406,13 @@ function renderQuotePdfHtml(ctx, items, introRaw, closingRaw) {
 }
 
 async function exportQuoteAsPdf() {
+  console.log('[exportQuoteAsPdf] start');
   const previewEl = document.getElementById('quotePreview');
   if (!previewEl) {
     toast('Vorschau nicht gefunden — bitte Modal neu öffnen', 'error');
     return;
   }
+  console.log('[exportQuoteAsPdf] previewEl:', { width: previewEl.scrollWidth, height: previewEl.scrollHeight, sheets: previewEl.querySelectorAll('.quote-sheet').length });
 
   const ctx = await buildQuoteVariableContext();
   const customer = ctx.customer || {};
@@ -20448,14 +20450,21 @@ async function exportQuoteAsPdf() {
     // Schritt 1: Wenn noch keine Canvases gecached sind, jetzt explizit erzeugen
     if (!window._quoteCanvases || !window._quoteCanvases.length) {
       clearTimeout(_quoteCanvasTimer);
-      // Sheets müssen vorhanden sein — falls nicht: paginatePreview hat noch nicht gelaufen
       const sheetsExist = previewEl.querySelectorAll('.quote-sheet').length > 0;
+      console.log('[exportQuoteAsPdf] keine Canvases - sheets vorhanden?', sheetsExist);
       if (!sheetsExist) {
         // Vorschau erst aufbauen (paginatePreview → HTML-Sheets)
-        // updateQuotePreview wurde oben schon aufgerufen, aber paginatePreview könnte noch laufen
-        await new Promise(r => setTimeout(r, 120));
+        await new Promise(r => setTimeout(r, 250));
+        // Falls UPDATE noch nicht durch ist, erzwingen
+        try { await updateQuotePreview(); } catch(e) {}
+        await new Promise(r => setTimeout(r, 150));
       }
       await refreshQuoteCanvasPreview();
+    }
+    console.log('[exportQuoteAsPdf] Canvases:', window._quoteCanvases?.length || 0);
+    if (window._quoteCanvases?.length) {
+      const c0 = window._quoteCanvases[0];
+      console.log('[exportQuoteAsPdf] erstes Canvas:', { w: c0.width, h: c0.height });
     }
 
     // PDF mit pdf-lib zusammenbauen
@@ -20467,13 +20476,27 @@ async function exportQuoteAsPdf() {
     if (canvases.length) {
       for (const c of canvases) {
         const imgData = c.toDataURL('image/png');
+        // Sanity-Check: ist das Canvas wirklich befüllt? (toDataURL liefert immer Bytes — aber komplett weißes Canvas hat eine bekannte kurze Signatur)
+        if (imgData.length < 5000) console.warn('[exportQuoteAsPdf] verdächtig kleines PNG (' + imgData.length + ' bytes) — Canvas vermutlich leer');
         const pngImg = await pdfDoc.embedPng(imgData);
         const page = pdfDoc.addPage([A4_W, A4_H]);
         page.drawImage(pngImg, { x: 0, y: 0, width: A4_W, height: A4_H });
       }
     } else {
-      // Letzter Fallback: ganzen Preview-Container capturen (gestreckte Page)
-      const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: false, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
+      // Letzter Fallback: ganzen Preview-Container capturen
+      console.warn('[exportQuoteAsPdf] FALLBACK: capture ganzen previewEl');
+      // Preview-Element NICHT mehr offscreen — temporär sichtbar machen wenn nötig
+      const origStyle = previewEl.getAttribute('style') || '';
+      const origPos   = previewEl.style.position;
+      const origTop   = previewEl.style.top;
+      previewEl.style.position = 'fixed';
+      previewEl.style.top = '0';
+      previewEl.style.left = '-200vw';   // sichtbar fürs Render, außerhalb des Sichtfelds
+      previewEl.style.zIndex = '-1';
+      await new Promise(r => setTimeout(r, 100));
+      const canvas = await window.html2canvas(previewEl, { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#FFFFFF', logging: true, width: previewEl.scrollWidth, height: previewEl.scrollHeight });
+      console.log('[exportQuoteAsPdf] Fallback-Canvas:', canvas.width, 'x', canvas.height);
+      previewEl.setAttribute('style', origStyle);
       const imgData = canvas.toDataURL('image/png');
       const pngImg = await pdfDoc.embedPng(imgData);
       const widthScale = A4_W / pngImg.width;
