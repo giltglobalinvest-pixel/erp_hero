@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.72';
+const APP_VERSION = 'v4.73';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -11635,10 +11635,10 @@ async function initTemplateRichEditor(initialContent) {
     placeholder: 'Sehr {{kontakt.anrede}} {{kontakt.nachname}},\n\nvielen Dank für Ihre Anfrage …',
     modules: { toolbar: quillStandardToolbar() }
   });
-  // Initial-Content laden — HTML-erkennen, sonst als plain text
+  // Initial-Content laden — Quill 2.x dangerouslyPasteHTML statt direktes innerHTML
   if (initialContent) {
     if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initialContent)) {
-      quill.root.innerHTML = initialContent;
+      quill.clipboard.dangerouslyPasteHTML(initialContent);
     } else {
       quill.setText(initialContent);
     }
@@ -20762,7 +20762,14 @@ async function _emailQuoteInitEditor(initialHtml) {
     ['link', 'clean']
   ];
   const q = new window.Quill(el, { theme: 'snow', modules: { toolbar } });
-  if (initialHtml) q.root.innerHTML = initialHtml;
+  if (initialHtml) {
+    // Quill 2.x: dangerouslyPasteHTML statt root.innerHTML (sonst landet HTML als Textknoten)
+    if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initialHtml)) {
+      q.clipboard.dangerouslyPasteHTML(initialHtml);
+    } else {
+      q.setText(initialHtml);
+    }
+  }
   window._eqQuill = q;
 }
 
@@ -21152,15 +21159,19 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
         placeholder: 'Position-Beschreibung — mit Größe 5-12pt und Format formatierbar',
         modules: { toolbar: quillStandardToolbar() }
       });
-      const initial = hidden?.value || '';
+      // Helper: trailing leere Absätze entfernen (Quill fügt häufig <p><br></p> am Ende an)
+      const cleanHtml = (s) => String(s || '').replace(/(<p>\s*<br\s*\/?\s*>\s*<\/p>\s*)+$/gi, '').trim();
+      const initial = cleanHtml(hidden?.value || '');
       if (initial) {
         if (/<(p|br|strong|em|b|i|u|ol|ul|li|h[1-6]|span|div)\b/i.test(initial)) {
-          q.root.innerHTML = initial;
+          // KRITISCH: Quill 2.x mag KEIN direktes innerHTML — sonst landet HTML als Textknoten.
+          // dangerouslyPasteHTML parsed den HTML-String korrekt in Quills internes Modell.
+          q.clipboard.dangerouslyPasteHTML(initial);
         } else {
           q.setText(initial);
         }
       }
-      const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
+      const sync = () => { if (hidden) hidden.value = cleanHtml(q.root.innerHTML); };
       q.on('text-change', sync);
       sync();
       // Quill-Instanz für späteren Article-Prefill verfügbar machen
@@ -21211,8 +21222,10 @@ function onQiArticleChange(value, comboboxId) {
       const bodyHtml  = descRest
         ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('')
         : '';
-      quill.root.innerHTML = titleHtml + bodyHtml;
-      if (descEl) descEl.value = quill.root.innerHTML;
+      // Quill 2.x: KEIN direktes innerHTML — dangerouslyPasteHTML parsed in Quills Modell
+      quill.setText('');
+      quill.clipboard.dangerouslyPasteHTML(0, titleHtml + bodyHtml);
+      if (descEl) descEl.value = (quill.root.innerHTML || '').replace(/(<p>\s*<br\s*\/?\s*>\s*<\/p>\s*)+$/gi, '').trim();
     } else if (descEl) {
       descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
     }
@@ -24036,8 +24049,10 @@ function onOiArticleChange(value, comboboxId) {
       const bodyHtml  = descRest
         ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('')
         : '';
-      quill.root.innerHTML = titleHtml + bodyHtml;
-      if (descEl) descEl.value = quill.root.innerHTML;
+      // Quill 2.x: KEIN direktes innerHTML — dangerouslyPasteHTML parsed in Quills Modell
+      quill.setText('');
+      quill.clipboard.dangerouslyPasteHTML(0, titleHtml + bodyHtml);
+      if (descEl) descEl.value = (quill.root.innerHTML || '').replace(/(<p>\s*<br\s*\/?\s*>\s*<\/p>\s*)+$/gi, '').trim();
     } else if (descEl) {
       descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
     }
