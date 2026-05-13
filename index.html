@@ -532,6 +532,10 @@
               <i data-lucide="package" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">Vorlagenpakete</span>
             </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-attachments">
+              <i data-lucide="paperclip" class="w-4 h-4"></i>
+              <span class="text-sm flex-1 text-left">Anhänge</span>
+            </button>
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="admin-ai-costs">
               <i data-lucide="bar-chart-3" class="w-4 h-4"></i>
               <span class="text-sm flex-1 text-left">API-Kosten</span>
@@ -622,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.64';
+const APP_VERSION = 'v4.65';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -10755,6 +10759,7 @@ function dispatchRoute(route) {
     case 'admin-users':     renderAdminUsers(); break;
     case 'admin-templates': renderAdminTextemplates(); break;
     case 'admin-bundles':   renderAdminQuoteBundles(); break;
+    case 'admin-attachments': renderAdminAttachments(); break;
     case 'admin-ai-costs':  renderAdminAiCosts(); break;
     case 'admin-settings':  renderAdminSettings(); break;
     default:                renderWelcome();
@@ -19833,6 +19838,94 @@ function _formatFileSize(bytes) {
 }
 
 let _attMgmtModal2 = false;
+// Admin-Page für Anhänge (volle Seite) — nutzt das gleiche Modal-Markup im Page-Container
+async function renderAdminAttachments() {
+  setPageTitle('Anhänge');
+  if (!APP_KEYS.user?.is_admin) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Nur für Admins.</div></div>`;
+    return;
+  }
+  const cur = getCurrentCompany();
+  if (!cur) {
+    document.getElementById('pageContent').innerHTML = `
+      <div class="max-w-3xl mx-auto"><div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-amber-900">Kein Mandant ausgewählt.</div></div>`;
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = `
+    <div class="max-w-4xl mx-auto">
+      <div id="adminAttContent"></div>
+    </div>`;
+  // Render-Helper-Funktion (zieht Daten + zeigt Liste + Anlegen-Form)
+  await _renderAdminAttachmentsInner();
+}
+async function _renderAdminAttachmentsInner() {
+  const cur = getCurrentCompany();
+  if (!cur) return;
+  let all = [];
+  try { all = await readData('Attachment'); } catch (e) { toast(e.message, 'error'); return; }
+  const list = all.filter(a => (a.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  const rows = list.length === 0
+    ? '<p class="px-3 py-6 text-sm text-ink-500 italic text-center">Noch keine Anhänge angelegt.</p>'
+    : list.map(r => {
+        const f = r.fields || {};
+        const files = f.file || [];
+        const filesHtml = files.length === 0
+          ? '<p class="text-xs text-ink-400 italic px-2">noch keine Datei</p>'
+          : files.map((fl, idx) => `
+              <div class="flex items-center gap-2 px-2 py-1 hover:bg-ink-50 rounded">
+                <i data-lucide="file" class="w-3.5 h-3.5 text-ink-500 shrink-0"></i>
+                <a href="${escapeHtml(fl.url)}" target="_blank" rel="noopener" class="text-xs text-brand-600 hover:underline truncate flex-1">${escapeHtml(fl.filename || '–')}</a>
+                <span class="text-[10px] text-ink-500 shrink-0">${_formatFileSize(fl.size)}</span>
+                <button type="button" onclick="(async()=>{await removeAttachmentFile('${r.id}', ${idx}); _renderAdminAttachmentsInner();})()" class="p-0.5 text-ink-400 hover:text-red-600" title="Datei entfernen"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
+              </div>
+            `).join('');
+        return `
+          <div class="border-b border-ink-100 last:border-b-0 p-3">
+            <div class="flex items-center justify-between mb-2 gap-2">
+              <div class="flex items-center gap-2 flex-1 min-w-0">
+                <i data-lucide="paperclip" class="w-4 h-4 text-ink-500 shrink-0"></i>
+                <span class="font-medium text-ink-900 text-sm truncate">${escapeHtml(f.name || '–')}</span>
+                <span class="text-[10px] text-ink-500">${files.length} Datei${files.length===1?'':'en'}</span>
+              </div>
+              <div class="flex gap-1 shrink-0">
+                <label class="cursor-pointer p-1.5 text-ink-500 hover:text-brand-600 hover:bg-brand-50 rounded" title="Datei hinzufügen">
+                  <i data-lucide="upload" class="w-3.5 h-3.5"></i>
+                  <input type="file" class="hidden" onchange="(async()=>{await addAttachmentFile('${r.id}', this); _renderAdminAttachmentsInner();})()">
+                </label>
+                <button type="button" onclick="(async()=>{await renameAttachment('${r.id}', '${escapeHtml((f.name || '').replace(/'/g,"\\'"))}'); _renderAdminAttachmentsInner();})()" class="p-1.5 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Umbenennen"><i data-lucide="pencil" class="w-3.5 h-3.5"></i></button>
+                <button type="button" onclick="(async()=>{await deleteAttachment('${r.id}'); _renderAdminAttachmentsInner();})()" class="p-1.5 text-ink-500 hover:text-red-700 hover:bg-ink-100 rounded" title="Anhang löschen"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+              </div>
+            </div>
+            <div class="bg-ink-50/50 rounded-lg py-1 space-y-0.5">${filesHtml}</div>
+          </div>
+        `;
+      }).join('');
+  document.getElementById('adminAttContent').innerHTML = `
+    <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-6 mb-4">
+      <div class="flex items-baseline justify-between mb-3">
+        <h2 class="text-lg font-bold text-ink-900">Anhänge — ${escapeHtml(cur.name)}</h2>
+      </div>
+      <p class="text-xs text-ink-500 mb-3">Wiederverwendbare Anhänge (AGB, Datenblätter, Zertifikate, …) — werden beim Angebot per Klick mit ins PDF gehängt. Pro Bundle kann eine Vorauswahl konfiguriert werden (Admin → Vorlagenpakete).</p>
+      <div class="bg-white border border-ink-200 rounded-lg overflow-hidden mb-4 max-h-[60vh] overflow-y-auto">${rows}</div>
+      <div class="border border-brand-200 bg-brand-50/40 rounded-lg p-3">
+        <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Neuer Anhang</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+          <input id="newAttName" type="text" placeholder="Name (z.B. AGB)" class="px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="newAttFile" type="file" class="px-3 py-2 text-sm border border-ink-200 rounded-lg bg-white">
+        </div>
+        <div class="flex justify-end">
+          <button type="button" onclick="(async()=>{await addAttachmentWithFile(); _renderAdminAttachmentsInner();})()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
+            <i data-lucide="plus" class="w-4 h-4"></i> Anlegen + Hochladen
+          </button>
+        </div>
+        <p class="text-[11px] text-ink-500 mt-2">Datei optional — kann auch nachträglich hochgeladen werden. Mehrere Dateien pro Anhang möglich (max 5 MB pro Datei).</p>
+      </div>
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
 async function openAttachmentManagement(useModal2 = false) {
   _attMgmtModal2 = useModal2;
   const cur = getCurrentCompany();
