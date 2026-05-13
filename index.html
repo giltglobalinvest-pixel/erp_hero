@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.50';
+const APP_VERSION = 'v4.51';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1780,6 +1780,233 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
 
   console.error('[fsLink] ✗ Keine Strategie hat geklappt. Manuelle Verknüpfung in FS nötig.');
   return false;
+}
+
+// ============================================================
+// MASTER-SAVE — verteilt ctx.master in FS + FD + ERP (alle parallel sequentiell)
+// ============================================================
+async function _tcmSaveAll(btnEl) {
+  console.log('[saveAll] start');
+  const ctx = _tcmCtx;
+  if (!ctx?.master) return toast('Master-View nicht initialisiert', 'error');
+  _tcmSyncMaster();
+  ctx.savingAll = true;
+  ctx.dirty = true;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i> Verteile in 3 Systeme…'; if (window.lucide) lucide.createIcons(); }
+
+  const co = ctx.master.company;
+  const cn = ctx.master.contact;
+  const results = { fs: 'skip', fsc: 'skip', fd: 'skip', fdco: 'skip', erp: [] };
+
+  // -------- 1. Freshsales Sales Account (falls verknüpft) --------
+  if (ctx.fs?.id && APP_KEYS.proxyV2) {
+    const fields = {};
+    if (co.name)    fields.name    = co.name;
+    if (co.phone)   fields.phone   = co.phone;
+    if (co.website) fields.website = co.website;
+    if (co.street)  fields.address = co.street;
+    if (co.city)    fields.city    = co.city;
+    if (co.zipcode) fields.zipcode = co.zipcode;
+    if (co.country) fields.country = co.country;
+    try {
+      console.log('[saveAll] PUT FS-Account', fields);
+      await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, { method: 'PUT', body: { sales_account: fields } });
+      _fsAccountCache.delete(ctx.fs.id);
+      results.fs = 'ok';
+    } catch (e) {
+      console.warn('[saveAll] FS-Account failed:', e.message);
+      results.fs = 'fail';
+    }
+  }
+
+  // -------- 2. Freshsales Contact (falls verknüpft) --------
+  if (ctx.fsContact?.id && APP_KEYS.proxyV2) {
+    const cFields = {};
+    if (cn.first_name) cFields.first_name = cn.first_name;
+    if (cn.last_name)  cFields.last_name  = cn.last_name;
+    if (cn.email)      cFields.email      = cn.email;
+    if (cn.work_phone) cFields.work_number = cn.work_phone;
+    if (cn.mobile)     cFields.mobile_number = cn.mobile;
+    if (cn.job_title)  cFields.job_title  = cn.job_title;
+    // cf_kontaktid Auto-Fill (siehe v4.44)
+    const existCf = ctx.fsContact.custom_field || {};
+    const autoCf = { ...existCf };
+    if (!existCf.cf_kontaktid && !existCf.cf_kontakt_id) autoCf.cf_kontaktid = String(ctx.fsContact.id);
+    cFields.custom_field = autoCf;
+    try {
+      console.log('[saveAll] PUT FS-Contact', cFields);
+      await proxyFetch('freshsales/api/contacts/' + ctx.fsContact.id, { method: 'PUT', body: { contact: cFields } });
+      _fsContactCache.delete(ctx.fsContact.id);
+      results.fsc = 'ok';
+    } catch (e) {
+      console.warn('[saveAll] FS-Contact failed:', e.message);
+      results.fsc = 'fail';
+    }
+  }
+
+  // -------- 3. Freshdesk Company (falls verknüpft) --------
+  if (ctx.fdCompany?.id && APP_KEYS.proxyV2) {
+    const fdcFields = {};
+    if (co.name) fdcFields.name = co.name;
+    // FD-Company: Adresse + Tel in note-Freitext (FD hat keine strukturierten Adress-Felder)
+    const noteLines = [];
+    if (co.street || co.zipcode || co.city) noteLines.push('Adresse: ' + [co.street, [co.zipcode, co.city].filter(Boolean).join(' '), co.country].filter(Boolean).join(', '));
+    if (co.phone)   noteLines.push('Tel: ' + co.phone);
+    if (co.website) noteLines.push('Web: ' + co.website);
+    if (co.email)   noteLines.push('E-Mail: ' + co.email);
+    if (noteLines.length) fdcFields.note = noteLines.join('\n');
+    try {
+      console.log('[saveAll] PUT FD-Company', fdcFields);
+      await proxyFetch('freshdesk/api/v2/companies/' + ctx.fdCompany.id, { method: 'PUT', body: fdcFields });
+      _fdCompanyCache.delete(ctx.fdCompany.id);
+      results.fdco = 'ok';
+    } catch (e) {
+      // 204-Bug Workaround
+      if (/null body status|204/i.test(String(e?.message))) results.fdco = 'ok';
+      else { console.warn('[saveAll] FD-Company failed:', e.message); results.fdco = 'fail'; }
+    }
+  }
+
+  // -------- 4. Freshdesk Contact (falls verknüpft) --------
+  if (ctx.fd?.id && APP_KEYS.proxyV2) {
+    const fdcFields = {};
+    const fullName = ((cn.first_name || '') + ' ' + (cn.last_name || '')).trim();
+    if (fullName)     fdcFields.name = fullName;
+    if (cn.email)     fdcFields.email = cn.email;
+    if (cn.work_phone)fdcFields.phone = cn.work_phone;
+    if (cn.mobile)    fdcFields.mobile = cn.mobile;
+    if (cn.job_title) fdcFields.job_title = cn.job_title;
+    try {
+      console.log('[saveAll] PUT FD-Contact', fdcFields);
+      await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: fdcFields });
+      _fdContactCache.delete(ctx.fd.id);
+      results.fd = 'ok';
+    } catch (e) {
+      console.warn('[saveAll] FD-Contact failed:', e.message);
+      results.fd = 'fail';
+    }
+  }
+
+  // -------- 5. Pro Mandant: ERP-Customer + ERP-Contact --------
+  for (const m of ctx.master.mandants) {
+    const erpStatus = { mandant: m.mandantName, customer: 'skip', contact: 'skip' };
+    const patch = {};
+    if (co.name)    patch.name1 = co.name;
+    if (co.phone)   patch.phone = co.phone;
+    if (co.website) patch.website = co.website;
+    if (co.email)   patch.email = co.email;
+    if (co.street)  patch.street = co.street;
+    if (co.zipcode) patch.zip = co.zipcode;
+    if (co.city)    patch.city = co.city;
+    if (co.country) patch.country = co.country;
+    if (m.customer_no)    patch.customer_no = m.customer_no;
+    if (m.vat_id)         patch.vat_id = m.vat_id;
+    if (m.payment_terms)  patch.payment_terms = m.payment_terms;
+    if (m.delivery_terms) patch.delivery_terms = m.delivery_terms;
+    try {
+      console.log('[saveAll] PATCH ERP-Customer', m.customerId, patch);
+      await updateData('Customer', m.customerId, patch);
+      erpStatus.customer = 'ok';
+    } catch (e) {
+      console.warn('[saveAll] ERP-Customer failed:', e.message);
+      erpStatus.customer = 'fail';
+    }
+    // ERP-Contact
+    const ec = ctx.master.erpContacts[m.customerId];
+    if (ec?.id) {
+      const cpatch = {};
+      if (ec.first_name) cpatch.first_name = ec.first_name;
+      if (ec.last_name)  cpatch.last_name  = ec.last_name;
+      if (ec.email)      cpatch.email      = ec.email;
+      if (ec.phone)      cpatch.phone      = ec.phone;
+      if (ec.mobile)     cpatch.mobile     = ec.mobile;
+      if (ec.role)       cpatch.role       = ec.role;
+      try {
+        await updateData('Contact', ec.id, cpatch);
+        erpStatus.contact = 'ok';
+      } catch (e) {
+        console.warn('[saveAll] ERP-Contact failed:', e.message);
+        erpStatus.contact = 'fail';
+      }
+    } else if (cn.last_name || cn.first_name) {
+      // Kein ERP-Contact bisher → aus Stammdaten anlegen
+      try {
+        const cFields = {
+          first_name: cn.first_name,
+          last_name:  cn.last_name || cn.first_name || 'Unbekannt',
+          email:      cn.email,
+          phone:      cn.work_phone,
+          mobile:     cn.mobile,
+          role:       cn.job_title,
+          customer_id: [m.customerId]
+        };
+        await writeData('Contact', cFields);
+        erpStatus.contact = 'created';
+      } catch (e) {
+        console.warn('[saveAll] ERP-Contact create failed:', e.message);
+        erpStatus.contact = 'fail';
+      }
+    }
+    results.erp.push(erpStatus);
+  }
+
+  // -------- 6. FS-Custom-Fields (vat_id, customer_no, payment_terms, delivery_terms) --------
+  if (ctx.fs?.id && APP_KEYS.proxyV2 && ctx.master.activeMandantTab) {
+    const activeM = ctx.master.mandants.find(m => m.customerId === ctx.master.activeMandantTab);
+    if (activeM) {
+      const cfPayload = {};
+      if (activeM.customer_no)    cfPayload.erp_customer_no = activeM.customer_no;
+      if (activeM.vat_id)         cfPayload.vat_id = activeM.vat_id;
+      if (activeM.payment_terms)  cfPayload.payment_terms = activeM.payment_terms;
+      if (activeM.delivery_terms) cfPayload.delivery_terms = activeM.delivery_terms;
+      if (activeM.mandantName)    cfPayload.erp_mandant = activeM.mandantName;
+      if (Object.keys(cfPayload).length) {
+        const tryBodies = [
+          { sales_account: { custom_field: cfPayload } },
+          { sales_account: { custom_fields: cfPayload } },
+          { sales_account: cfPayload }
+        ];
+        for (const body of tryBodies) {
+          try {
+            await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, { method: 'PUT', body });
+            _fsAccountCache.delete(ctx.fs.id);
+            const refreshed = await _fsLoadAccount(ctx.fs.id, true);
+            const cf = refreshed?.custom_field || refreshed?.custom_fields || {};
+            const matches = Object.keys(cfPayload).some(k => String(cf[k] ?? cf['cf_'+k] ?? '').trim() === String(cfPayload[k]).trim());
+            if (matches) { console.log('[saveAll] ✓ FS-CF Sync via', body); break; }
+          } catch (e) { console.warn('[saveAll] FS-CF body failed:', e.message); }
+        }
+      }
+    }
+  }
+
+  // -------- Caches + State refresh --------
+  if (ctx.fs?.id) ctx.fs = await _fsLoadAccount(ctx.fs.id, true) || ctx.fs;
+  if (ctx.fsContact?.id) ctx.fsContact = await _fsLoadContact(ctx.fsContact.id, true) || ctx.fsContact;
+  if (ctx.fdCompany?.id) ctx.fdCompany = await _loadFdCompany(ctx.fdCompany.id, true) || ctx.fdCompany;
+  if (ctx.fd?.id) { _fdContactCache.delete(ctx.fd.id); ctx.fd = await _loadFdContact(ctx.fd.id) || ctx.fd; }
+  if (ctx.fs?.id) ctx.erpCustomers = await _findErpCustomersByFsAccountId(ctx.fs.id);
+  ctx._erpContactsAll = await readData('Contact').catch(()=>ctx._erpContactsAll);
+  _tcmConsolidateMaster(ctx);
+  ctx.savingAll = false;
+
+  // -------- Toast-Zusammenfassung --------
+  const summary = [];
+  if (results.fs === 'ok')   summary.push('FS-Account ✓');
+  else if (results.fs === 'fail') summary.push('FS-Account ✗');
+  if (results.fsc === 'ok')  summary.push('FS-Contact ✓');
+  else if (results.fsc === 'fail') summary.push('FS-Contact ✗');
+  if (results.fdco === 'ok') summary.push('FD-Firma ✓');
+  else if (results.fdco === 'fail') summary.push('FD-Firma ✗');
+  if (results.fd === 'ok')   summary.push('FD-Contact ✓');
+  else if (results.fd === 'fail') summary.push('FD-Contact ✗');
+  results.erp.forEach(e => {
+    if (e.customer === 'ok') summary.push('ERP ' + e.mandant + ' ✓');
+    else if (e.customer === 'fail') summary.push('ERP ' + e.mandant + ' ✗');
+  });
+  const hasFail = /✗/.test(summary.join(''));
+  toast(summary.join(' · ') || 'Nichts zu speichern', hasFail ? 'warn' : 'success', hasFail ? 8000 : 4500);
+  _tcmRender();
 }
 
 // Speichert die geänderten Felder eines ERP-Customers + zugehörigen Contacts (Airtable PATCH)
@@ -5200,7 +5427,134 @@ async function _aiCmdExecute(ticketId, actions) {
    - "Im Freshdesk speichern" (PUT /api/v2/contacts/{id})
    - ERP-Block: Status mit Kundennummer + Anlegen/Öffnen
 */
-let _tcmCtx = null;  // { ticketId, ticket, fd, fdCompany, fs, fsContact, mandants, erpCustomers, erp, suggestions, ... }
+let _tcmCtx = null;  // { ticketId, ticket, fd, fdCompany, fs, fsContact, mandants, erpCustomers, erp, suggestions, master, ... }
+
+/* ============================================================
+   MASTER-VIEW — Working Copy zentral
+   ============================================================
+   Konsolidiert FS + ERP + FD → ctx.master. Bearbeitet wird ctx.master,
+   gespeichert wird in alle 3 Systeme verteilt. Priorität FS > ERP > FD.
+*/
+function _tcmConsolidateMaster(ctx) {
+  if (!ctx) return;
+  const fs   = ctx.fs   || null;
+  const fsc  = ctx.fsContact || null;
+  const fdco = ctx.fdCompany  || null;
+  const fd   = ctx.fd   || null;
+  const erpCusts = ctx.erpCustomers || [];
+
+  const pick = (...vals) => { for (const v of vals) { const s = String(v ?? '').trim(); if (s) return s; } return ''; };
+  const parseFirst = (n) => { const p = String(n||'').trim().split(/\s+/); return p.length > 1 ? p.slice(0,-1).join(' ') : (p[0] || ''); };
+  const parseLast  = (n) => { const p = String(n||'').trim().split(/\s+/); return p.length > 1 ? p[p.length-1] : ''; };
+  const erpFirst = erpCusts[0]?.fields || {};
+  const cf = fs?.custom_field || fs?.custom_fields || {};
+  const cfGet = (key) => cf[key] ?? cf['cf_' + key];
+
+  ctx.master = {
+    company: {
+      name:     pick(fs?.name, erpFirst.name1, fdco?.name),
+      phone:    pick(fs?.phone, erpFirst.phone),
+      website:  pick(fs?.website, erpFirst.website),
+      email:    pick(erpFirst.email, fd?.email),
+      street:   pick(fs?.address, erpFirst.street),
+      zipcode:  pick(fs?.zipcode, erpFirst.zip),
+      city:     pick(fs?.city, erpFirst.city),
+      country:  pick(fs?.country, erpFirst.country) || 'Deutschland'
+    },
+    contact: {
+      first_name: pick(fsc?.first_name, parseFirst(fd?.name)),
+      last_name:  pick(fsc?.last_name, parseLast(fd?.name)),
+      email:      pick(fsc?.email, fd?.email),
+      work_phone: pick(fsc?.work_number, fd?.phone),
+      mobile:     pick(fsc?.mobile_number, fd?.mobile),
+      job_title:  pick(fsc?.job_title, fd?.job_title)
+    },
+    mandants: erpCusts.map(c => {
+      const ff = c.fields || {};
+      const mId = (ff.company_id || [])[0];
+      return {
+        customerId:     c.id,
+        mandantId:      mId,
+        mandantName:    ctx.mandants.find(m => m.id === mId)?.fields?.name || '–',
+        customer_no:    pick(ff.customer_no, cfGet('erp_customer_no')),
+        vat_id:         pick(ff.vat_id, cfGet('vat_id')),
+        payment_terms:  pick(ff.payment_terms, cfGet('payment_terms')) || '14 Tage netto',
+        delivery_terms: pick(ff.delivery_terms, cfGet('delivery_terms')) || 'EXW Fellbach'
+      };
+    }),
+    erpContacts: (() => {
+      const out = {};
+      erpCusts.forEach(c => {
+        const cont = (ctx._erpContactsAll || []).find(co => (co.fields?.customer_id || []).includes(c.id));
+        if (cont) {
+          const f = cont.fields;
+          out[c.id] = {
+            id:         cont.id,
+            first_name: f.first_name || '',
+            last_name:  f.last_name || '',
+            email:      f.email || '',
+            phone:      f.phone || '',
+            mobile:     f.mobile || '',
+            role:       f.role || ''
+          };
+        }
+      });
+      return out;
+    })(),
+    activeMandantTab: erpCusts[0]?.id || null
+  };
+}
+
+// Liest aktuelle DOM-Werte zurück in ctx.master (für persistent edits)
+function _tcmSyncMaster() {
+  const ctx = _tcmCtx;
+  if (!ctx?.master) return;
+  const get = (id) => (document.getElementById(id)?.value || '').trim();
+  // Stammdaten Firma
+  const co = ctx.master.company;
+  if (document.getElementById('tcmM_name'))    co.name    = get('tcmM_name');
+  if (document.getElementById('tcmM_phone'))   co.phone   = get('tcmM_phone');
+  if (document.getElementById('tcmM_website')) co.website = get('tcmM_website');
+  if (document.getElementById('tcmM_email'))   co.email   = get('tcmM_email');
+  if (document.getElementById('tcmM_street'))  co.street  = get('tcmM_street');
+  if (document.getElementById('tcmM_zip'))     co.zipcode = get('tcmM_zip');
+  if (document.getElementById('tcmM_city'))    co.city    = get('tcmM_city');
+  if (document.getElementById('tcmM_country')) co.country = get('tcmM_country');
+  // Stammdaten Kontakt
+  const cn = ctx.master.contact;
+  if (document.getElementById('tcmM_first'))   cn.first_name = get('tcmM_first');
+  if (document.getElementById('tcmM_last'))    cn.last_name  = get('tcmM_last');
+  if (document.getElementById('tcmM_cemail'))  cn.email      = get('tcmM_cemail');
+  if (document.getElementById('tcmM_workph'))  cn.work_phone = get('tcmM_workph');
+  if (document.getElementById('tcmM_mobile'))  cn.mobile     = get('tcmM_mobile');
+  if (document.getElementById('tcmM_job'))     cn.job_title  = get('tcmM_job');
+  // Aktiver Mandanten-Tab
+  const tab = ctx.master.activeMandantTab;
+  const m = ctx.master.mandants.find(x => x.customerId === tab);
+  if (m) {
+    if (document.getElementById('tcmM_cno'))     m.customer_no    = get('tcmM_cno');
+    if (document.getElementById('tcmM_vat'))     m.vat_id         = get('tcmM_vat');
+    if (document.getElementById('tcmM_payterm')) m.payment_terms  = get('tcmM_payterm');
+    if (document.getElementById('tcmM_delterm')) m.delivery_terms = get('tcmM_delterm');
+    // ERP-Contact-Felder pro aktivem Tab
+    const ec = ctx.master.erpContacts[tab];
+    if (ec) {
+      if (document.getElementById('tcmM_efirst'))  ec.first_name = get('tcmM_efirst');
+      if (document.getElementById('tcmM_elast'))   ec.last_name  = get('tcmM_elast');
+      if (document.getElementById('tcmM_eemail'))  ec.email      = get('tcmM_eemail');
+      if (document.getElementById('tcmM_ephone'))  ec.phone      = get('tcmM_ephone');
+      if (document.getElementById('tcmM_emobile')) ec.mobile     = get('tcmM_emobile');
+      if (document.getElementById('tcmM_erole'))   ec.role       = get('tcmM_erole');
+    }
+  }
+}
+
+function _tcmSwitchMandantTab(customerId) {
+  if (!_tcmCtx?.master) return;
+  _tcmSyncMaster();
+  _tcmCtx.master.activeMandantTab = customerId;
+  _tcmRender();
+}
 
 async function openTicketContactModal(ticketId) {
   if (!ticketId) return;
@@ -5257,7 +5611,8 @@ async function openTicketContactModal(ticketId) {
       try { _tcmCtx.erp = await _findCustomerContactByEmail(_tcmCtx.fd.email); } catch (_) {}
     }
     // Mandanten-Liste (für Multi-Select) parallel laden
-    _listActiveMandants().then(list => { _tcmCtx.mandants = list; _tcmRender(); }).catch(() => {});
+    _listActiveMandants().then(list => { _tcmCtx.mandants = list; _tcmConsolidateMaster(_tcmCtx); _tcmRender(); }).catch(() => {});
+    _tcmConsolidateMaster(_tcmCtx);
     _tcmRender();
     // Freshsales-Daten im Hintergrund laden (Email → Contact → Account)
     if (APP_KEYS.freshsalesSubdomain && _tcmCtx.fd.email) {
@@ -5270,6 +5625,7 @@ async function openTicketContactModal(ticketId) {
           // ERP-Contacts für alle verknüpften Customer laden
           try { _tcmCtx._erpContactsAll = await readData('Contact'); } catch (_) {}
         }
+        _tcmConsolidateMaster(_tcmCtx);
         _tcmRender();
       }).catch(e => console.warn('[tcm] FS-Load fehlgeschlagen:', e.message));
     }
@@ -5888,14 +6244,213 @@ function _tcmRender() {
       <p class="text-[10px] text-ink-500 italic mt-3">Klick auf „+ Anlegen" erstellt einen ERP-Customer mit den Freshsales-Werten als Prefill und verknüpft ihn über die FS-Account-ID. Zusätzlich wird der Contact angelegt wenn ein FS-Contact vorhanden ist.</p>
     </div>` : '';
 
-  // Reihenfolge: Freshsales (Master, Vertrieb) → Freshdesk (Support-Spiegel) → ERP (Buchungs-Master pro Mandant)
+  // ============ MASTER-VIEW ============
+  const master = ctx.master || null;
+  let masterBlock = '';
+  if (master) {
+    const co = master.company;
+    const cn = master.contact;
+    const activeId = master.activeMandantTab;
+    const activeMand = master.mandants.find(m => m.customerId === activeId);
+    const activeCont = activeId ? master.erpContacts[activeId] : null;
+
+    // Mandanten-Tabs
+    const tabsHtml = master.mandants.length
+      ? `<div class="flex gap-1 mb-3 flex-wrap border-b border-ink-200 pb-1">
+          ${master.mandants.map(m => {
+            const isActive = m.customerId === activeId;
+            return `<button type="button" onclick="_tcmSwitchMandantTab('${m.customerId}')" class="text-xs px-3 py-1.5 rounded-t-lg ${isActive ? 'bg-emerald-100 text-emerald-900 border-b-2 border-emerald-500 font-bold' : 'text-ink-600 hover:bg-ink-50'}">
+              ${escapeHtml(m.mandantName)}
+              <span class="font-mono text-[10px] ${isActive ? 'bg-emerald-200' : 'bg-ink-100'} px-1 ml-1 rounded">${escapeHtml(m.customer_no || 'K-?')}</span>
+            </button>`;
+          }).join('')}
+        </div>`
+      : '';
+
+    masterBlock = `
+    <!-- ============ STAMMDATEN (gehen an alle Systeme) ============ -->
+    <div class="bg-white border-2 border-brand-300 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="layers" class="w-4 h-4 text-brand-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Stammdaten</h3>
+        <span class="ml-auto text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">→ alle Systeme</span>
+      </div>
+
+      <!-- Firma -->
+      <div class="space-y-2 text-xs">
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Firma</label>
+          <input id="tcmM_name" type="text" value="${escapeHtml(co.name)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('company_name', co.name)}
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Telefon</label>
+            <input id="tcmM_phone" type="tel" value="${escapeHtml(co.phone)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('company_phone', co.phone)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Website</label>
+            <input id="tcmM_website" type="url" value="${escapeHtml(co.website)}" placeholder="https://…" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('company_website', co.website)}
+          </div>
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email (Firma)</label>
+          <input id="tcmM_email" type="email" value="${escapeHtml(co.email)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-semibold text-brand-800 block">Straße + Hausnr.</label>
+          <input id="tcmM_street" type="text" value="${escapeHtml(co.street)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+          ${sBan('company_street', co.street)}
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">PLZ</label>
+            <input id="tcmM_zip" type="text" value="${escapeHtml(co.zipcode)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+            ${sBan('company_zipcode', co.zipcode)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Stadt</label>
+            <input id="tcmM_city" type="text" value="${escapeHtml(co.city)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('company_city', co.city)}
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Land</label>
+            <input id="tcmM_country" type="text" value="${escapeHtml(co.country)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('company_country', co.country)}
+          </div>
+        </div>
+      </div>
+
+      <!-- Anfragende Person -->
+      <div class="border-t border-brand-100 pt-3 mt-3">
+        <div class="flex items-center gap-2 mb-2">
+          <i data-lucide="user" class="w-3.5 h-3.5 text-brand-700"></i>
+          <h4 class="text-xs font-semibold text-brand-900">Anfragende Person</h4>
+        </div>
+        <div class="space-y-2 text-xs">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Vorname</label>
+              <input id="tcmM_first" type="text" value="${escapeHtml(cn.first_name)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Nachname</label>
+              <input id="tcmM_last" type="text" value="${escapeHtml(cn.last_name)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            </div>
+          </div>
+          ${sBan('name', (cn.first_name + ' ' + cn.last_name).trim())}
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Email</label>
+            <input id="tcmM_cemail" type="email" value="${escapeHtml(cn.email)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('email', cn.email)}
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Festnetz</label>
+              <input id="tcmM_workph" type="tel" value="${escapeHtml(cn.work_phone)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+              ${sBan('phone', cn.work_phone)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-brand-800 block">Mobil</label>
+              <input id="tcmM_mobile" type="tel" value="${escapeHtml(cn.mobile)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm font-mono">
+              ${sBan('mobile', cn.mobile)}
+            </div>
+          </div>
+          <div>
+            <label class="text-[10px] uppercase font-semibold text-brand-800 block">Position</label>
+            <input id="tcmM_job" type="text" value="${escapeHtml(cn.job_title)}" class="w-full mt-1 px-2 py-1.5 border border-brand-200 bg-white rounded text-sm">
+            ${sBan('job_title', cn.job_title)}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    ${master.mandants.length ? `
+    <!-- ============ MANDANTEN-SPEZIFISCH ============ -->
+    <div class="bg-white border-2 border-emerald-300 rounded-2xl p-4">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="building-2" class="w-4 h-4 text-emerald-700"></i>
+        <h3 class="font-semibold text-ink-900 text-sm">Mandanten-spezifisch</h3>
+        <span class="ml-auto text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wider">ERP + FS-Custom-Fields</span>
+      </div>
+      ${tabsHtml}
+      ${activeMand ? `
+        <div class="space-y-2 text-xs">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Kundennummer</label>
+              <input id="tcmM_cno" type="text" value="${escapeHtml(activeMand.customer_no)}" placeholder="K-1042" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm font-mono">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-emerald-800 block">USt-IdNr</label>
+              <input id="tcmM_vat" type="text" value="${escapeHtml(activeMand.vat_id)}" placeholder="DE…" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm font-mono">
+              ${sBan('company_vat_id', activeMand.vat_id)}
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Zahlungsziel</label>
+              <input id="tcmM_payterm" type="text" value="${escapeHtml(activeMand.payment_terms)}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+            </div>
+            <div>
+              <label class="text-[10px] uppercase font-semibold text-emerald-800 block">Lieferbedingungen</label>
+              <input id="tcmM_delterm" type="text" value="${escapeHtml(activeMand.delivery_terms)}" class="w-full mt-1 px-2 py-1.5 border border-emerald-200 bg-white rounded text-sm">
+            </div>
+          </div>
+          ${activeCont ? `
+          <div class="border-t border-emerald-100 pt-2 mt-2">
+            <p class="text-[10px] uppercase font-semibold text-emerald-800 mb-1.5">ERP-Contact (für diesen Mandanten)</p>
+            <div class="grid grid-cols-2 gap-2">
+              <div><label class="text-[10px] uppercase font-medium text-emerald-700 block">Vorname</label><input id="tcmM_efirst" type="text" value="${escapeHtml(activeCont.first_name)}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs"></div>
+              <div><label class="text-[10px] uppercase font-medium text-emerald-700 block">Nachname</label><input id="tcmM_elast" type="text" value="${escapeHtml(activeCont.last_name)}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs"></div>
+              <div><label class="text-[10px] uppercase font-medium text-emerald-700 block">Email</label><input id="tcmM_eemail" type="email" value="${escapeHtml(activeCont.email)}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs"></div>
+              <div><label class="text-[10px] uppercase font-medium text-emerald-700 block">Position</label><input id="tcmM_erole" type="text" value="${escapeHtml(activeCont.role)}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs"></div>
+              <div><label class="text-[10px] uppercase font-medium text-emerald-700 block">Festnetz</label><input id="tcmM_ephone" type="tel" value="${escapeHtml(activeCont.phone)}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono"></div>
+              <div><label class="text-[10px] uppercase font-medium text-emerald-700 block">Mobil</label><input id="tcmM_emobile" type="tel" value="${escapeHtml(activeCont.mobile)}" class="w-full mt-0.5 px-2 py-1.5 border border-emerald-200 bg-white rounded text-xs font-mono"></div>
+            </div>
+            <p class="text-[10px] text-ink-500 italic mt-1.5">Beim Save werden die ERP-Contact-Daten dieses Mandanten aktualisiert. Andere Mandanten haben jeweils eigene Contacts.</p>
+          </div>
+          ` : '<p class="text-[11px] text-amber-700 italic mt-2">⚠ Kein ERP-Contact für diesen Mandanten — wird beim Save aus den Stammdaten oben automatisch angelegt.</p>'}
+        </div>
+      ` : '<p class="text-xs text-ink-500 italic">Bitte Mandant über Tabs wählen.</p>'}
+    </div>
+    ` : ''}
+
+    <!-- ============ SAVE-ALL ============ -->
+    <button id="tcmSaveAllBtn" type="button" onclick="_tcmSaveAll(this)" ${ctx.savingAll ? 'disabled' : ''} class="w-full bg-gradient-to-r from-brand-600 to-emerald-600 hover:from-brand-700 hover:to-emerald-700 disabled:opacity-60 text-white px-3 py-3 rounded-xl text-sm font-bold inline-flex items-center justify-center gap-2 shadow">
+      <i data-lucide="${ctx.savingAll ? 'loader-2' : 'zap'}" class="w-5 h-5 ${ctx.savingAll ? 'animate-spin' : ''}"></i> ${ctx.savingAll ? 'Verteile in 3 Systeme…' : '⚡ Alles speichern + in 3 Systeme verteilen'}
+    </button>
+
+    <!-- ============ SYSTEM-STATUS (read-only) ============ -->
+    <div class="bg-ink-50 border border-ink-200 rounded-xl p-3 text-xs">
+      <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-2">System-Status</p>
+      <div class="space-y-1.5">
+        <div class="flex items-center gap-2">
+          <i data-lucide="${ctx.fs?.id ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${ctx.fs?.id ? 'text-emerald-600' : 'text-ink-300'}"></i>
+          <span class="text-ink-700">Freshsales</span>
+          ${ctx.fs?.id ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Account #${ctx.fs.id}</span>` : '<span class="text-[10px] text-amber-700">kein Account</span>'}
+          ${ctx.fsContact?.id ? `<span class="text-[10px] text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.fsContact.id}</span>` : '<span class="text-[10px] text-amber-700">kein Contact</span>'}
+        </div>
+        <div class="flex items-center gap-2">
+          <i data-lucide="${ctx.fdCompany?.id ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${ctx.fdCompany?.id ? 'text-emerald-600' : 'text-ink-300'}"></i>
+          <span class="text-ink-700">Freshdesk</span>
+          ${ctx.fdCompany?.id ? `<span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Company #${ctx.fdCompany.id}</span>` : '<span class="text-[10px] text-amber-700">keine Firma</span>'}
+          ${ctx.fd?.id ? `<span class="text-[10px] text-brand-700 bg-brand-100 px-1.5 py-0.5 rounded font-mono">Contact #${ctx.fd.id}</span>` : ''}
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <i data-lucide="${master.mandants.length ? 'check-circle-2' : 'circle'}" class="w-3.5 h-3.5 ${master.mandants.length ? 'text-emerald-600' : 'text-ink-300'}"></i>
+          <span class="text-ink-700">ERP</span>
+          ${master.mandants.length
+            ? master.mandants.map(m => `<span class="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">${escapeHtml(m.mandantName)} ${escapeHtml(m.customer_no || 'K-?')}</span>`).join('')
+            : '<span class="text-[10px] text-amber-700">noch nicht angelegt</span>'}
+        </div>
+      </div>
+    </div>`;
+  }
+
   body.innerHTML = aiTop
-    + fsBlock           // 1. Freshsales-Sales-Account (Master)
-    + fsContactBlock    // 2. Freshsales-Contact (Master)
-    + fdCompanyBlock    // 3. Freshdesk-Firma (Support-Spiegel)
-    + fdBlock           // 4. Freshdesk-Kontakt (Support-Spiegel)
-    + mandantsBlock     // 5. ERP-Mandanten Multi-Select (welche Mandanten haben Customer-Record)
-    + erpBlock;         // 6. ERP-Status (read-only mit K-Nummer)
+    + mandantsBlock     // Mandanten-Multi-Select (für + Anlegen neuer Mandanten)
+    + masterBlock;      // Master-Editor + Save-All + System-Status
   if (window.lucide) lucide.createIcons();
 }
 
@@ -6017,6 +6572,30 @@ Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text extrahieren ode
 function _tcmApplySuggestion(field, value) {
   const ctx = _tcmCtx;
   if (!ctx) return false;
+  // Master-View hat Vorrang: schreibe in ctx.master.company / ctx.master.contact
+  if (ctx.master) {
+    const co = ctx.master.company;
+    const cn = ctx.master.contact;
+    const m = {
+      // Person-Felder
+      name:      () => { const p = String(value||'').trim().split(/\s+/); cn.first_name = p.length>1 ? p.slice(0,-1).join(' ') : (p[0]||''); cn.last_name = p.length>1 ? p[p.length-1] : ''; },
+      email:     () => { cn.email = value; },
+      phone:     () => { cn.work_phone = value; },
+      mobile:    () => { cn.mobile = value; },
+      job_title: () => { cn.job_title = value; },
+      // Firma-Felder
+      company_name:    () => { co.name = value; },
+      company_phone:   () => { co.phone = value; },
+      company_website: () => { co.website = value; },
+      company_street:  () => { co.street = value; },
+      company_zipcode: () => { co.zipcode = value; },
+      company_city:    () => { co.city = value; },
+      company_country: () => { co.country = value; },
+      company_vat_id:  () => { const tab = ctx.master.activeMandantTab; const md = ctx.master.mandants.find(x => x.customerId === tab); if (md) md.vat_id = value; }
+    };
+    if (m[field]) { _tcmSyncMaster(); m[field](); return true; }
+    // Unbekanntes Feld (industry/description/note/domains) → still ignorieren oder weiter unten an FS schreiben
+  }
   // FS-Account-Felder haben Vorrang (FS = Master). company_* schreibt in FS, fallback FD-Company.
   if (field.startsWith('company_')) {
     const f = field.replace(/^company_/, '');
@@ -6096,26 +6675,21 @@ function _tcmAccept(field) {
   }
   s.accepted = true;
   _tcmRender();
-  const ctx2 = _tcmCtx;
+  // Master-View-Inputs (alle Suggestions landen jetzt in der zentralen Maske)
   const map = {
-    // Person-Felder: bevorzugt FS-Contact-Inputs (Master), sonst FD-Contact
-    name:      ctx2?.fsContact?.id ? 'tcmFsCFirst' : 'tcmName',
-    email:     ctx2?.fsContact?.id ? 'tcmFsCEmail' : 'tcmEmail',
-    phone:     ctx2?.fsContact?.id ? 'tcmFsCPhone' : 'tcmPhone',
-    mobile:    ctx2?.fsContact?.id ? 'tcmFsCMobile' : 'tcmMobile',
-    job_title: ctx2?.fsContact?.id ? 'tcmFsCJob' : 'tcmJob',
-    address:   'tcmAddress',
-    // Firma-Felder: FS-Account hat Vorrang
-    company_name:    'tcmFsName',
-    company_phone:   'tcmFsPhone',
-    company_website: 'tcmFsWebsite',
-    company_street:  'tcmFsStreet',
-    company_zipcode: 'tcmFsZipcode',
-    company_city:    'tcmFsCity',
-    company_country: 'tcmFsCountry',
-    company_vat_id:  'tcmFsVatId',
-    company_domains:'tcmCoDomains', company_industry:'tcmCoIndustry',
-    company_description:'tcmCoDesc', company_note:'tcmCoNote'
+    name:       'tcmM_first',
+    email:      'tcmM_cemail',
+    phone:      'tcmM_workph',
+    mobile:     'tcmM_mobile',
+    job_title:  'tcmM_job',
+    company_name:    'tcmM_name',
+    company_phone:   'tcmM_phone',
+    company_website: 'tcmM_website',
+    company_street:  'tcmM_street',
+    company_zipcode: 'tcmM_zip',
+    company_city:    'tcmM_city',
+    company_country: 'tcmM_country',
+    company_vat_id:  'tcmM_vat'
   };
   setTimeout(() => {
     const el = document.getElementById(map[field]);
