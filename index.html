@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.58';
+const APP_VERSION = 'v4.59';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6578,7 +6578,8 @@ Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text und ggf. dem We
 function _tcmApplySuggestion(field, value) {
   const ctx = _tcmCtx;
   if (!ctx) return false;
-  // Master-View hat Vorrang: schreibe in ctx.master.company / ctx.master.contact
+  // ACHTUNG: KEIN _tcmSyncMaster() hier drin — das überschreibt den Master mit leeren DOM-Werten
+  // bei jedem Aufruf. Caller (_tcmAccept / _tcmAcceptAll) ist verantwortlich für EINEN Sync vor der Schleife.
   if (ctx.master) {
     const co = ctx.master.company;
     const cn = ctx.master.contact;
@@ -6599,11 +6600,10 @@ function _tcmApplySuggestion(field, value) {
       company_country: () => { co.country = value; },
       company_vat_id:  () => { const tab = ctx.master.activeMandantTab; const md = ctx.master.mandants.find(x => x.customerId === tab); if (md) md.vat_id = value; }
     };
-    if (m[field]) { _tcmSyncMaster(); m[field](); return true; }
+    if (m[field]) { m[field](); return true; }
     // Firma-Felder die im UI nicht direkt editierbar sind (industry/description/note/domains)
     // → trotzdem in master.company speichern. Werden beim Save mitgepusht (FS-Account + FD-note + ERP).
     if (field.startsWith('company_')) {
-      _tcmSyncMaster();
       const f = field.replace(/^company_/, '');
       if (f === 'domains') {
         co.domains = Array.isArray(value) ? value : String(value || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -6682,6 +6682,7 @@ function _tcmAccept(field) {
   const ctx = _tcmCtx;
   const s = ctx?.suggestions?.[field];
   if (!s) return;
+  if (ctx.master) _tcmSyncMaster();
   _tcmSyncInputs();
   if (!_tcmApplySuggestion(field, s.value)) {
     // Einzelner Fall: hier darf der Toast kommen, weil's nur einmal triggert
@@ -6720,6 +6721,8 @@ function _tcmAccept(field) {
 function _tcmAcceptAll() {
   const ctx = _tcmCtx;
   if (!ctx?.suggestions) return;
+  // Aktuelle DOM-Werte einmalig ins ctx zurücksynchronisieren (Master + alte Editoren) — bevor wir Vorschläge anwenden
+  if (ctx.master) _tcmSyncMaster();
   _tcmSyncInputs();
   let count = 0;
   let skipped = 0;
