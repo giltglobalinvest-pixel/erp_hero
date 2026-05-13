@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.69';
+const APP_VERSION = 'v4.70';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -19643,27 +19643,45 @@ async function refreshQuoteCanvasPreview(targetId) {
     await _loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
     if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch(e) {} }
 
+    // KRITISCH: Pane temporär in normalen Render-Pfad bringen — die offscreen position:fixed top:-200vh
+    // sorgt dafür, dass html2canvas leere Canvases erzeugt (Element wird gemessen aber nicht gerendert).
+    // Wir bewegen es nach left:-200vw mit visibility:visible — sichtbar fürs Render, außerhalb User-Sicht.
+    const ownPane = target.closest('[data-mobile-hidden]') || target;
+    const origInlineStyle = ownPane.getAttribute('style') || '';
+    const origMobileShow  = ownPane.dataset.mobileShow || '';
+    ownPane.style.cssText = (origInlineStyle ? origInlineStyle + ';' : '') +
+      'position:fixed !important; top:0 !important; left:-2000px !important; visibility:visible !important; z-index:-1 !important; width:840px !important; pointer-events:none !important;';
+    ownPane.dataset.mobileShow = '1';
+    await new Promise(r => setTimeout(r, 80));
+
     const canvases = [];
-    for (const sheet of sheets) {
-      if (!sheet.parentNode) break;
-      const origZoom = sheet.style.zoom;
-      sheet.style.zoom = '1';
-      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-      try {
-        const c = await window.html2canvas(sheet, {
-          scale: 2,
-          useCORS: true,
-          allowTaint: true,
-          backgroundColor: '#FFFFFF',
-          logging: false,
-          width: 794,
-          height: 1123,
-          windowWidth: 794,
-        });
-        canvases.push(c);
-      } finally {
-        if (sheet.parentNode) sheet.style.zoom = origZoom;
+    try {
+      for (const sheet of sheets) {
+        if (!sheet.parentNode) break;
+        const origZoom = sheet.style.zoom;
+        sheet.style.zoom = '1';
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        try {
+          const c = await window.html2canvas(sheet, {
+            scale: 2,
+            useCORS: true,
+            allowTaint: true,
+            backgroundColor: '#FFFFFF',
+            logging: false,
+            width: 794,
+            height: 1123,
+            windowWidth: 794,
+          });
+          canvases.push(c);
+        } finally {
+          if (sheet.parentNode) sheet.style.zoom = origZoom;
+        }
       }
+    } finally {
+      // Pane wieder zurücksetzen
+      ownPane.setAttribute('style', origInlineStyle);
+      if (origMobileShow) ownPane.dataset.mobileShow = origMobileShow;
+      else delete ownPane.dataset.mobileShow;
     }
     window._quoteCanvases = canvases;
     // KEIN DOM-Replace mehr — HTML-Sheets bleiben sichtbar
