@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.73';
+const APP_VERSION = 'v4.74';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -12440,14 +12440,24 @@ export default async function (req: Request): Promise<Response> {
     }, 500);
     const target = \`https://\${domain}.freshdesk.com/\${fdPath}\${url.search}\`;
     const basic = btoa(\`\${fdKey}:X\`);
-    const init: RequestInit = {
-      method: req.method,
-      headers: {
-        "Authorization": \`Basic \${basic}\`,
-        "Content-Type": "application/json"
-      }
+    // Content-Type vom Client-Request übernehmen (multipart/form-data oder application/json)
+    const clientCT = req.headers.get("content-type") || "application/json";
+    const isMultipart = clientCT.toLowerCase().startsWith("multipart/");
+    const fdHeaders: Record<string, string> = {
+      "Authorization": \`Basic \${basic}\`
     };
-    if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
+    // Bei multipart KEIN Content-Type setzen — fetch übernimmt mit Boundary
+    if (!isMultipart) fdHeaders["Content-Type"] = clientCT;
+    else fdHeaders["Content-Type"] = clientCT;   // mit Boundary aus Client
+    const init: RequestInit = { method: req.method, headers: fdHeaders };
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      if (isMultipart) {
+        // Multipart: Body als ArrayBuffer durchreichen (Boundary bleibt erhalten)
+        init.body = await req.arrayBuffer();
+      } else {
+        init.body = await req.text();
+      }
+    }
     const upstream = await fetch(target, init);
     const text = await upstream.text();
     return new Response(text, {
