@@ -622,7 +622,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.57';
+const APP_VERSION = 'v4.58';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6507,13 +6507,17 @@ REGELN:
 ZUSÄTZLICHE QUELLEN — nutze sie wenn das aktuelle Ticket allein nicht genug Info hat:
 1. WEITERE TICKETS DES KONTAKTS (unten als Block "ANDERE TICKETS"): durchsuche besonders nach Signaturen,
    die Adresse/Telefonnummer/USt-IdNr enthalten — diese sind verlässlich.
-2. WEB-SEARCH (web_search Tool verfügbar): Wenn die Firma identifizierbar ist (z.B. "KONE GmbH"),
-   nutze web_search um offizielle Stammdaten zu verifizieren — vor allem:
-   - Anschrift (Straße/PLZ/Stadt) auf der offiziellen Firmen-Website oder im Impressum
-   - USt-IdNr (DE… aus Impressum)
-   - Branche/Industry
-   - Telefon-Hauptnummer + Website
-   Beim Vorschlag: source-Feld muss klar zeigen woher (z.B. "Web: kone.de/impressum" oder "Ticket #12345").
+2. WEB-SEARCH (web_search Tool MUSS genutzt werden in folgenden Fällen):
+   - Wenn FIRMA IDENTIFIZIERBAR (Email-Domain oder Firmenname klar erkennbar) UND ein oder mehrere
+     dieser Felder fehlen oder leer sind: Adresse (Straße/PLZ/Stadt), Telefon (Hauptnr), Website, USt-IdNr, Branche.
+   - Gute Suchanfragen:
+     · "[Firmenname] Impressum"           — für offizielle Adresse + USt-IdNr
+     · "[Firmenname] Hauptsitz Adresse"   — alternative Suche
+     · "[Email-Domain]"                   — findet oft direkt die Firmen-Homepage
+   - Priorisiere offizielle Quellen: Firmen-Website > Impressum > Wikipedia > sonstige.
+   - Beim Vorschlag: source-Feld zeigt klar woher (z.B. "Web: schmitt-aufzuege.de/impressum" oder "Ticket #12345").
+   - WICHTIG: Nutze Web-Search AKTIV — wenn die Domain bekannt ist, ist es selten dass das Impressum
+     keine vollständige Adresse hat. Lieber 2-3 Searches als gar keine Vorschläge.
 
 - Antworte AUSSCHLIESSLICH mit JSON, kein Markdown. Pro Feld: {"value":…,"source":"woraus, max 80 Zeichen"}.
 
@@ -6555,8 +6559,8 @@ Welche Kontakt- und Firmendaten kannst du sicher aus diesem Text und ggf. dem We
 
   const raw = await askAI(prompt, {
     purpose: 'tcmSuggest',
-    maxTokens: 3000,
-    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }]
+    maxTokens: 4000,
+    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }]
   });
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
   try { return JSON.parse(cleaned); }
@@ -8910,6 +8914,17 @@ async function askAI(prompt, opts = {}) {
     throw new Error('AI-Anfrage fehlgeschlagen: ' + e.message);
   }
   _logAiUsage(data, { purpose: opts.purpose || 'askAI', model: opts.model });
+  // Diagnose: zeige welche Tools die KI tatsächlich genutzt hat
+  if (opts.tools && data?.content?.length) {
+    const toolCalls = data.content.filter(c => c.type === 'server_tool_use' || c.type === 'tool_use');
+    const toolResults = data.content.filter(c => c.type === 'web_search_tool_result');
+    if (toolCalls.length || toolResults.length) {
+      console.log('[askAI/' + (opts.purpose || 'askAI') + '] Tool-Calls:', toolCalls.length, '| Results:', toolResults.length);
+      toolCalls.forEach((tc, i) => console.log('  → Tool-Call ' + i + ':', tc.name, tc.input));
+    } else {
+      console.warn('[askAI/' + (opts.purpose || 'askAI') + '] KI hat KEIN Tool genutzt — obwohl tools verfügbar waren.');
+    }
+  }
   // Bei Tool-Use kann die Response mehrere content blocks haben (text, tool_use, text…) — alle Text-Blöcke konkatenieren
   if (data?.content?.length) {
     const texts = data.content.filter(c => c.type === 'text' && c.text).map(c => c.text);
