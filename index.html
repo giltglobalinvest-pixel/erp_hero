@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.65';
+const APP_VERSION = 'v4.66';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -19912,11 +19912,11 @@ async function _renderAdminAttachmentsInner() {
       <div class="border border-brand-200 bg-brand-50/40 rounded-lg p-3">
         <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Neuer Anhang</p>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
-          <input id="newAttName" type="text" placeholder="Name (z.B. AGB)" class="px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
-          <input id="newAttFile" type="file" class="px-3 py-2 text-sm border border-ink-200 rounded-lg bg-white">
+          <input id="adminNewAttName" type="text" placeholder="Name (z.B. AGB)" class="px-3 py-2 text-sm border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="adminNewAttFile" type="file" class="px-3 py-2 text-sm border border-ink-200 rounded-lg bg-white">
         </div>
         <div class="flex justify-end">
-          <button type="button" onclick="(async()=>{await addAttachmentWithFile(); _renderAdminAttachmentsInner();})()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
+          <button type="button" onclick="_adminAddAttachment()" class="px-3 py-2 text-sm rounded-lg bg-brand-500 text-white hover:bg-brand-600 flex items-center gap-1.5">
             <i data-lucide="plus" class="w-4 h-4"></i> Anlegen + Hochladen
           </button>
         </div>
@@ -19924,6 +19924,31 @@ async function _renderAdminAttachmentsInner() {
       </div>
     </div>`;
   if (window.lucide) lucide.createIcons();
+}
+
+// Admin-spezifische Anlegen-Funktion mit eigenen Input-IDs (verhindert Kollision mit Stack-Modal)
+async function _adminAddAttachment() {
+  const cur = getCurrentCompany();
+  if (!cur) return toast('Kein Mandant', 'error');
+  const nameInp = document.getElementById('adminNewAttName');
+  const fileInp = document.getElementById('adminNewAttFile');
+  const name = (nameInp?.value || '').trim();
+  const file = fileInp?.files?.[0];
+  if (!name) { toast('Name fehlt', 'error'); nameInp?.focus(); return; }
+  if (file && file.size > 5 * 1024 * 1024) return toast('Datei zu groß (max 5 MB)', 'error');
+  try {
+    const created = await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
+    if (file && created?.id) {
+      toast('Datei wird hochgeladen …', 'info', 1500);
+      await uploadFileToRecord(created.id, 'file', file);
+    }
+    if (nameInp) nameInp.value = '';
+    if (fileInp) fileInp.value = '';
+    toast('Anhang angelegt' + (file ? ' + Datei hochgeladen' : ''), 'success', 3000);
+    await _renderAdminAttachmentsInner();
+  } catch (e) {
+    toast('Fehler: ' + (e.message || e), 'error', 6000);
+  }
 }
 
 async function openAttachmentManagement(useModal2 = false) {
