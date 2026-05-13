@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.67';
+const APP_VERSION = 'v4.68';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3946,14 +3946,14 @@ function _renderFreshdeskTicket() {
         })()}</div>
         ${Array.isArray(t.attachments) && t.attachments.length > 0 ? `
           <div class="mt-2 flex flex-wrap gap-1.5">
-            ${t.attachments.map(a => {
+            ${t.attachments.map((a, idx) => {
               const isImg = /^image\//i.test(a.content_type || '');
               const sz = a.size ? Math.round(a.size/1024) + ' kB' : '';
-              return `<a href="${escapeHtml(a.attachment_url || '#')}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-ink-200 rounded-full bg-white hover:bg-ink-50 max-w-[220px]">
+              return `<button type="button" onclick="_attGalleryShow(_fdTicketState.ticket.attachments, ${idx})" class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-ink-200 rounded-full bg-white hover:bg-purple-50 hover:border-purple-300 max-w-[220px]" title="In Galerie öffnen">
                 <i data-lucide="${isImg ? 'image' : 'paperclip'}" class="w-3 h-3 shrink-0"></i>
                 <span class="truncate">${escapeHtml(a.name || '(unbenannt)')}</span>
                 ${sz ? `<span class="text-ink-400 shrink-0">${sz}</span>` : ''}
-              </a>`;
+              </button>`;
             }).join('')}
           </div>` : ''}
       </div>
@@ -4054,14 +4054,15 @@ function _renderFreshdeskTicket() {
                           <div class="mt-2 pt-2 border-t border-ink-100">
                             <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1">Anhänge (${c.attachments.length})</p>
                             <div class="flex flex-wrap gap-1.5">
-                              ${c.attachments.map(a => {
+                              ${c.attachments.map((a, idx) => {
                                 const isImg = /^image\//i.test(a.content_type || '');
                                 const sz = a.size ? Math.round(a.size/1024) + ' kB' : '';
-                                return `<a href="${escapeHtml(a.attachment_url || '#')}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 border border-ink-200 rounded-full bg-white hover:bg-ink-50 max-w-[200px]">
+                                const cid = c.id;
+                                return `<button type="button" onclick="(function(cid,i){var conv=(_fdTicketState.conversations||[]).find(x=>x.id===cid);if(conv) _attGalleryShow(conv.attachments,i);})(${cid},${idx})" class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 border border-ink-200 rounded-full bg-white hover:bg-purple-50 hover:border-purple-300 max-w-[200px]" title="In Galerie öffnen">
                                   <i data-lucide="${isImg ? 'image' : 'paperclip'}" class="w-3 h-3 shrink-0"></i>
                                   <span class="truncate">${escapeHtml(a.name || '(unbenannt)')}</span>
                                   ${sz ? `<span class="text-ink-400 shrink-0">${sz}</span>` : ''}
-                                </a>`;
+                                </button>`;
                               }).join('')}
                             </div>
                           </div>` : ''}
@@ -7485,17 +7486,19 @@ async function showAiSummaryQuickView(ticketId) {
         const allAtts = _collectFreshdeskAttachmentsFrom(t, conversations);
         const attBox = document.getElementById('qvAttachmentsBox');
         if (allAtts.length > 0 && attBox) {
+          // Im globalen State stashed für Lightbox-Aufruf
+          window._currentQvAttachments = allAtts;
           attBox.innerHTML = `
-            <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1.5">Anhänge (${allAtts.length})</p>
+            <p class="text-[10px] uppercase tracking-wider text-ink-500 font-semibold mb-1.5">Anhänge (${allAtts.length}) <span class="normal-case text-ink-400">— Klick öffnet Galerie</span></p>
             <div class="flex flex-wrap gap-1.5">
-              ${allAtts.map(a => {
+              ${allAtts.map((a, idx) => {
                 const isImg = /^image\//i.test(a.content_type || '');
                 const sz = a.size ? Math.round(a.size/1024) + ' kB' : '';
-                return `<a href="${escapeHtml(a.attachment_url || '#')}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-ink-200 rounded-lg bg-white hover:bg-ink-50 max-w-[240px]" title="${escapeHtml(a.origin || '')}">
+                return `<button type="button" onclick="_attGalleryShow(window._currentQvAttachments, ${idx})" class="inline-flex items-center gap-1 text-[11px] px-2 py-1 border border-ink-200 rounded-lg bg-white hover:bg-purple-50 hover:border-purple-300 max-w-[240px]" title="${escapeHtml(a.origin || '')}">
                   <i data-lucide="${isImg ? 'image' : 'paperclip'}" class="w-3 h-3 shrink-0"></i>
                   <span class="truncate">${escapeHtml(a.name || '(unbenannt)')}</span>
                   ${sz ? `<span class="text-ink-400 shrink-0">${sz}</span>` : ''}
-                </a>`;
+                </button>`;
               }).join('')}
             </div>`;
           if (window.lucide) lucide.createIcons();
@@ -17556,8 +17559,140 @@ function _renderQuoteFreshdeskBox(f) {
   `;
 }
 
+// ============================================================
+// ATTACHMENT-GALLERY · Lightbox mit Blätter-Navigation
+// ============================================================
+// Globaler State: aktuelle Galerie + Index
+let _attGalleryState = { items: [], idx: 0, keyHandler: null };
+
+function _attGalleryFmtSize(b) {
+  if (!b || isNaN(b)) return '';
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(0) + ' KB';
+  return (b/1024/1024).toFixed(1) + ' MB';
+}
+
+function _attGalleryShow(items, startIdx) {
+  if (!Array.isArray(items) || !items.length) return;
+  _attGalleryState.items = items;
+  _attGalleryState.idx = Math.max(0, Math.min(startIdx || 0, items.length - 1));
+
+  // Modal-Container (eigener z-Index, deckt auch Stack-Modale ab)
+  let host = document.getElementById('attGalleryHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'attGalleryHost';
+    document.body.appendChild(host);
+  }
+  // Tastatur-Navigation
+  if (_attGalleryState.keyHandler) document.removeEventListener('keydown', _attGalleryState.keyHandler);
+  _attGalleryState.keyHandler = (e) => {
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); _attGalleryNav(-1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); _attGalleryNav(1); }
+    if (e.key === 'Escape')     { e.preventDefault(); _attGalleryClose(); }
+  };
+  document.addEventListener('keydown', _attGalleryState.keyHandler);
+  _attGalleryRender();
+}
+
+function _attGalleryNav(dir) {
+  const s = _attGalleryState;
+  if (!s.items.length) return;
+  s.idx = (s.idx + dir + s.items.length) % s.items.length;
+  _attGalleryRender();
+}
+
+function _attGalleryClose() {
+  const host = document.getElementById('attGalleryHost');
+  if (host) host.innerHTML = '';
+  if (_attGalleryState.keyHandler) {
+    document.removeEventListener('keydown', _attGalleryState.keyHandler);
+    _attGalleryState.keyHandler = null;
+  }
+  _attGalleryState.items = [];
+}
+
+function _attGalleryRender() {
+  const host = document.getElementById('attGalleryHost');
+  if (!host) return;
+  const s = _attGalleryState;
+  const a = s.items[s.idx] || {};
+  const url = a.attachment_url || a.url || '';
+  const ct = a.content_type || '';
+  const name = a.name || 'Anhang';
+  const isImg = /^image\//i.test(ct) || /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(name);
+  const isPdf = /pdf/i.test(ct) || /\.pdf$/i.test(name);
+  const meta = [
+    a._source || '',
+    a.size ? _attGalleryFmtSize(a.size) : '',
+    a._date ? (typeof _fdFmtDate === 'function' ? _fdFmtDate(a._date) : '') : ''
+  ].filter(Boolean).join(' · ');
+
+  let preview;
+  if (isImg) {
+    preview = `<img src="${escapeHtml(url)}" alt="${escapeHtml(name)}" class="max-w-full max-h-[78vh] object-contain mx-auto rounded shadow-lg bg-white">`;
+  } else if (isPdf) {
+    preview = `<iframe src="${escapeHtml(url)}" class="w-full bg-white rounded shadow-lg" style="height: 78vh;" title="${escapeHtml(name)}"></iframe>`;
+  } else {
+    preview = `
+      <div class="bg-white rounded-lg shadow-lg p-8 text-center max-w-md mx-auto">
+        <i data-lucide="file" class="w-16 h-16 mx-auto text-ink-400 mb-3"></i>
+        <p class="font-semibold text-ink-900">${escapeHtml(name)}</p>
+        <p class="text-xs text-ink-500 mt-1">${escapeHtml(ct || 'Unbekannter Typ')}</p>
+        <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="mt-4 inline-flex items-center gap-1.5 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium">
+          <i data-lucide="external-link" class="w-4 h-4"></i> Im Browser öffnen
+        </a>
+      </div>`;
+  }
+
+  host.innerHTML = `
+    <div class="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex flex-col" onclick="if(event.target===this)_attGalleryClose()">
+      <!-- Header -->
+      <div class="flex items-center justify-between gap-3 p-3 text-white">
+        <div class="flex items-center gap-2 min-w-0 flex-1">
+          <i data-lucide="${isImg ? 'image' : isPdf ? 'file-text' : 'paperclip'}" class="w-4 h-4 shrink-0"></i>
+          <div class="min-w-0">
+            <p class="text-sm font-semibold truncate">${escapeHtml(name)}</p>
+            ${meta ? `<p class="text-[11px] text-white/70 truncate">${escapeHtml(meta)}</p>` : ''}
+          </div>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <span class="text-xs text-white/70">${s.idx + 1} / ${s.items.length}</span>
+          <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="p-2 hover:bg-white/10 rounded" title="Original öffnen / Download"><i data-lucide="download" class="w-4 h-4"></i></a>
+          <button type="button" onclick="_attGalleryClose()" class="p-2 hover:bg-white/10 rounded" title="Schließen (Esc)"><i data-lucide="x" class="w-5 h-5"></i></button>
+        </div>
+      </div>
+      <!-- Main + Nav -->
+      <div class="flex-1 flex items-center justify-center gap-2 px-2 sm:px-4 min-h-0">
+        <button type="button" onclick="_attGalleryNav(-1)" ${s.items.length === 1 ? 'disabled' : ''} class="p-3 hover:bg-white/10 disabled:opacity-30 rounded-full text-white shrink-0" title="Zurück (←)">
+          <i data-lucide="chevron-left" class="w-7 h-7"></i>
+        </button>
+        <div class="flex-1 flex items-center justify-center min-w-0 max-h-full overflow-auto">
+          ${preview}
+        </div>
+        <button type="button" onclick="_attGalleryNav(1)" ${s.items.length === 1 ? 'disabled' : ''} class="p-3 hover:bg-white/10 disabled:opacity-30 rounded-full text-white shrink-0" title="Weiter (→)">
+          <i data-lucide="chevron-right" class="w-7 h-7"></i>
+        </button>
+      </div>
+      <!-- Thumbnails -->
+      ${s.items.length > 1 ? `
+        <div class="p-2 flex gap-2 overflow-x-auto scrollbar-thin">
+          ${s.items.map((it, i) => {
+            const itName = it.name || '';
+            const itIsImg = /^image\//i.test(it.content_type || '') || /\.(jpe?g|png|gif|webp)$/i.test(itName);
+            const active = i === s.idx;
+            return `
+              <button type="button" onclick="_attGalleryState.idx=${i};_attGalleryRender()" class="shrink-0 w-16 h-16 rounded border-2 ${active ? 'border-brand-400 ring-2 ring-brand-300' : 'border-white/30 hover:border-white/60'} overflow-hidden bg-white/10 grid place-items-center" title="${escapeHtml(itName)}">
+                ${itIsImg ? `<img src="${escapeHtml(it.attachment_url || it.url || '')}" class="w-full h-full object-cover">` : `<i data-lucide="${/pdf/i.test(it.content_type || '') || /\\.pdf$/i.test(itName) ? 'file-text' : 'paperclip'}" class="w-5 h-5 text-white/70"></i>`}
+              </button>`;
+          }).join('')}
+        </div>` : ''}
+    </div>`;
+  if (window.lucide) lucide.createIcons();
+}
+
 // Lädt alle Attachments aus Ticket + Conversations und rendert sie als Liste.
-// Klick auf einen Anhang öffnet die signierte Freshdesk-URL in neuem Tab.
+// Klick auf einen Anhang öffnet die Lightbox-Galerie zum Blättern.
 async function loadQuoteFreshdeskAttachments(ticketId) {
   const wrap = document.getElementById('quoteFdAttachmentsWrap');
   if (!wrap) return;
@@ -17596,24 +17731,25 @@ async function loadQuoteFreshdeskAttachments(ticketId) {
     if (b < 1024*1024) return (b/1024).toFixed(0) + ' KB';
     return (b/1024/1024).toFixed(1) + ' MB';
   };
+  // Im globalen State speichern, damit der Klick-Handler die Lightbox öffnen kann
+  window._currentTicketAttachments = all;
   wrap.innerHTML = `
-    <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1.5 font-semibold">Anhänge (${all.length})</p>
+    <p class="text-[10px] uppercase tracking-wider text-ink-500 mb-1.5 font-semibold">Anhänge (${all.length}) <span class="text-ink-400 normal-case">— Klick öffnet Galerie zum Blättern</span></p>
     <div class="space-y-1">
-      ${all.map(a => {
-        const url = a.attachment_url || a.url || '';
+      ${all.map((a, idx) => {
         const icon = (a.content_type || '').startsWith('image/') ? 'image'
                   : (a.content_type || '').includes('pdf') ? 'file-text'
                   : 'paperclip';
         const dt = a._date ? _fdFmtDate(a._date) : '';
         return `
-          <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="flex items-center gap-2 px-2 py-1.5 bg-white rounded border border-purple-100 hover:border-purple-300 hover:bg-purple-50 transition group">
+          <button type="button" onclick="_attGalleryShow(window._currentTicketAttachments, ${idx})" class="w-full text-left flex items-center gap-2 px-2 py-1.5 bg-white rounded border border-purple-100 hover:border-purple-300 hover:bg-purple-50 transition group">
             <i data-lucide="${icon}" class="w-4 h-4 text-purple-600 shrink-0"></i>
             <div class="min-w-0 flex-1">
               <p class="text-xs font-medium text-ink-900 truncate group-hover:text-purple-700">${escapeHtml(a.name || 'Anhang')}</p>
               <p class="text-[10px] text-ink-500">${escapeHtml(a._source || '')}${a.size ? ' · ' + fmtSize(a.size) : ''}${dt ? ' · ' + escapeHtml(dt) : ''}</p>
             </div>
-            <i data-lucide="external-link" class="w-3.5 h-3.5 text-ink-400 shrink-0"></i>
-          </a>
+            <i data-lucide="maximize-2" class="w-3.5 h-3.5 text-ink-400 shrink-0 group-hover:text-purple-600"></i>
+          </button>
         `;
       }).join('')}
     </div>
