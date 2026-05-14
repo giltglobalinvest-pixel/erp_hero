@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.82';
+const APP_VERSION = 'v4.83';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3342,6 +3342,191 @@ function _toggleTicketResponderMenu(ticketId) {
   }
 }
 
+/* ============================================================
+   ERP-STATUS PRO FD-TICKET — fuer Anfragen/Bestellungen-Liste
+   Berechnet ob Kunde + Kontakt im ERP vorhanden + vollstaendig sind
+   (Voraussetzung fuer den KI-Angebot-Workflow).
+   ============================================================ */
+
+// Helper: prueft ob ein ERP-Contact "vollstaendig" ist (alle Felder die fuer ein
+// KI-generiertes Angebot/Mail noetig sind). Liefert Array mit fehlenden Feldern.
+function _erpContactCompletenessIssues(contact) {
+  const issues = [];
+  if (!contact) { issues.push('Kontakt fehlt'); return issues; }
+  const f = contact.fields || {};
+  const hasName = (f.first_name || '').trim() || (f.last_name || '').trim() || (f.name || '').trim();
+  if (!hasName) issues.push('Name fehlt');
+  if (!(f.email || '').trim()) issues.push('Email fehlt');
+  // Geschlecht/Anrede ist Pflicht fuer 'Sehr geehrter Herr / Frau' in der Angebot-Mail
+  if (!(f.gender || '').trim()) issues.push('Anrede / Geschlecht fehlt');
+  return issues;
+}
+
+// Helper: Liefert ein State-Objekt fuer ein FD-Ticket.
+// state: 'green' = alles ok, KI-Angebot moeglich
+//        'yellow' = Kunde + Kontakt da, aber unvollstaendig
+//        'red' = Kunde oder Kontakt fehlt im ERP
+//        'unknown' = Requester noch nicht geladen
+function _getTicketErpState(fdContact, customersInMandant, contactsByEmail) {
+  const state = { state: 'red', customer: null, contact: null, issues: [], email: '' };
+  if (!fdContact) { state.state = 'unknown'; state.issues.push('Anfragender noch nicht geladen'); return state; }
+  const email = String(fdContact.email || '').toLowerCase().trim();
+  state.email = email;
+  if (!email) { state.issues.push('Keine Email beim Anfragenden hinterlegt'); return state; }
+  const contact = contactsByEmail.get(email) || null;
+  // Customer via Contact.customer_id, sonst via Customer.email direkt
+  let customer = null;
+  if (contact) {
+    const custId = (contact.fields.customer_id || [])[0];
+    if (custId) customer = customersInMandant.find(c => c.id === custId) || null;
+  }
+  if (!customer) {
+    customer = customersInMandant.find(c => String(c.fields.email || '').toLowerCase().trim() === email) || null;
+  }
+  state.customer = customer;
+  state.contact  = contact;
+  if (!customer) state.issues.push('Kunde nicht im ERP angelegt');
+  if (!contact) state.issues.push('Kontakt nicht im ERP angelegt');
+  else state.issues.push(..._erpContactCompletenessIssues(contact));
+  if (state.issues.length === 0) state.state = 'green';
+  else if (customer && contact) state.state = 'yellow';
+  else state.state = 'red';
+  return state;
+}
+
+// Globaler Cache fuer ERP-Status pro Render-Zyklus
+window._inquiriesErpCache = { customers: [], contactsByEmail: new Map(), tsKey: '' };
+
+async function _prepareErpStateCache() {
+  const cur = getCurrentCompany();
+  if (!cur) return null;
+  let customers = [], contacts = [];
+  try { customers = await readData('Customer'); } catch (_) {}
+  try { contacts  = await readData('Contact');  } catch (_) {}
+  const customersInMandant = customers.filter(c => (c.fields.company_id || []).includes(cur.id));
+  const inMandantIds = new Set(customersInMandant.map(c => c.id));
+  const contactsByEmail = new Map();
+  contacts.forEach(c => {
+    const em = String(c.fields.email || '').toLowerCase().trim();
+    if (!em) return;
+    const custId = (c.fields.customer_id || [])[0];
+    if (custId && !inMandantIds.has(custId)) return; // anderer Mandant
+    contactsByEmail.set(em, c);
+  });
+  window._inquiriesErpCache = { customers: customersInMandant, contactsByEmail, tsKey: String(Date.now()) };
+  return window._inquiriesErpCache;
+}
+
+// Rendert das Badge + den KI-Angebot-Button auf einer Ticket-Card.
+// Wird sowohl initial (mit gecachtem Requester) als auch lazy nach _loadFdContact aufgerufen.
+function _renderTicketErpBadge(ticketId, fdContact) {
+  const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]');
+  if (!row) return;
+  const slot = row.querySelector('.ticket-erp-slot');
+  const btnSlot = row.querySelector('.ticket-aiquote-slot');
+  if (!slot && !btnSlot) return;
+  const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
+  const st = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+  row.dataset.erpState = st.state;
+  // Badge
+  if (slot) {
+    let badgeHtml = '';
+    if (st.state === 'green') {
+      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 hover:bg-emerald-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="ERP-Status: Kunde + Kontakt vollstaendig"><i data-lucide="check-circle-2" class="w-2.5 h-2.5"></i> ERP OK</button>`;
+    } else if (st.state === 'yellow') {
+      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 hover:bg-amber-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="ERP: ${escapeHtml(st.issues.join(', '))}"><i data-lucide="alert-circle" class="w-2.5 h-2.5"></i> ERP unvollstaendig</button>`;
+    } else if (st.state === 'red') {
+      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 hover:bg-red-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="ERP: ${escapeHtml(st.issues.join(', '))}"><i data-lucide="x-circle" class="w-2.5 h-2.5"></i> ERP fehlt</button>`;
+    } else {
+      badgeHtml = `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5"><i data-lucide="loader-2" class="w-2.5 h-2.5 animate-spin"></i> ERP…</span>`;
+    }
+    slot.innerHTML = badgeHtml;
+  }
+  // KI-Angebot-Button
+  if (btnSlot) {
+    const disabled = st.state !== 'green';
+    const cls = disabled
+      ? 'opacity-50 cursor-not-allowed bg-ink-100 text-ink-500'
+      : 'bg-purple-100 hover:bg-purple-200 text-purple-800';
+    btnSlot.innerHTML = `<button type="button" onclick="event.stopPropagation();aiAutoQuoteFromTicket(${ticketId})" class="text-[10px] uppercase tracking-wider ${cls} px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="${disabled ? 'Erst ERP-Daten vervollstaendigen' : 'KI erzeugt + versendet Angebot automatisch'}"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI-Angebot</button>`;
+  }
+  if (window.lucide) lucide.createIcons();
+  return st;
+}
+
+// Detail-Modal das die fehlenden Felder zeigt und einen "Kontakt oeffnen"-Shortcut.
+async function showTicketErpStatusModal(ticketId) {
+  const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]');
+  const reqIdRaw = row?.dataset.requesterId || null;
+  const reqId = reqIdRaw ? Number(reqIdRaw) : null;
+  // Map-Key kann Number sein (so wird er beim FD-Load gesetzt) → beide Varianten probieren
+  const fdContact = reqId != null ? (_fdContactCache.get(reqId) || _fdContactCache.get(reqIdRaw)) : null;
+  const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
+  const st = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  const stateBadge = st.state === 'green'
+    ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">OK</span>'
+    : st.state === 'yellow'
+      ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-2 py-0.5 rounded">unvollstaendig</span>'
+      : '<span class="text-[10px] uppercase font-bold tracking-wider bg-red-100 text-red-700 px-2 py-0.5 rounded">fehlt</span>';
+  opener(`
+    <div class="p-5 max-w-md">
+      <h3 class="text-base font-bold text-ink-900 mb-3 flex items-center gap-2">
+        <i data-lucide="info" class="w-5 h-5 text-brand-600"></i>
+        ERP-Status fuer FT-${ticketId}
+        ${stateBadge}
+      </h3>
+      <div class="space-y-2 text-sm">
+        <div class="flex items-center gap-2">
+          <i data-lucide="${st.customer ? 'check-circle-2' : 'x-circle'}" class="w-4 h-4 ${st.customer ? 'text-emerald-600' : 'text-red-600'}"></i>
+          <span class="text-ink-700">Kunde im ERP: <strong>${st.customer ? escapeHtml(st.customer.fields.name1 || '–') : '<span class="text-red-700">fehlt</span>'}</strong></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <i data-lucide="${st.contact ? 'check-circle-2' : 'x-circle'}" class="w-4 h-4 ${st.contact ? 'text-emerald-600' : 'text-red-600'}"></i>
+          <span class="text-ink-700">Kontakt im ERP: <strong>${st.contact ? escapeHtml(((st.contact.fields.first_name || '') + ' ' + (st.contact.fields.last_name || '')).trim() || st.contact.fields.name || '–') : '<span class="text-red-700">fehlt</span>'}</strong></span>
+        </div>
+        ${st.issues.length ? `
+          <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 mt-2">
+            <p class="text-xs font-semibold text-amber-900 mb-1.5 flex items-center gap-1.5">
+              <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Was noch fehlt fuer KI-Angebot:
+            </p>
+            <ul class="text-xs text-amber-900 space-y-0.5 ml-4 list-disc">
+              ${st.issues.map(i => '<li>' + escapeHtml(i) + '</li>').join('')}
+            </ul>
+          </div>
+        ` : `
+          <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 mt-2">
+            <p class="text-xs text-emerald-900 flex items-center gap-1.5">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Alle Daten vollstaendig — KI-Angebot kann erzeugt werden.
+            </p>
+          </div>
+        `}
+      </div>
+      <div class="flex gap-2 mt-4 flex-wrap justify-end">
+        <button type="button" onclick="closeTopModal()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Schliessen</button>
+        <button type="button" onclick="closeTopModal();openTicketContactModal(${ticketId})" class="px-3 py-2 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
+          <i data-lucide="user-cog" class="w-4 h-4"></i> Kontakt oeffnen / pflegen
+        </button>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-md' });
+  if (window.lucide) lucide.createIcons();
+}
+
+// MVP-Workflow: oeffnet das Ticket-Modal. Eigentlicher Auto-Send-Flow folgt in Phase 2.
+async function aiAutoQuoteFromTicket(ticketId) {
+  const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]');
+  const st = row?.dataset.erpState || 'unknown';
+  if (st !== 'green') {
+    showTicketErpStatusModal(ticketId);
+    return;
+  }
+  toast('KI-Workflow startet … (Auto-Versand kommt im naechsten Update)', 'info', 3500);
+  // Vorerst: Ticket-Modal oeffnen, damit User den bestehenden AI-Flow nutzen kann
+  // (Bulk-Analyse-Button + dann "Angebot erzeugen"). Auto-Send kommt in Phase 2.
+  if (typeof openFreshdeskTicket === 'function') openFreshdeskTicket(ticketId);
+}
+
 async function loadFreshdeskTicketsPreview() {
   const wrap = document.getElementById('freshdeskTicketsWrap');
   if (!wrap) return;
@@ -3466,6 +3651,8 @@ async function loadFreshdeskTicketsPreview() {
       : s === 'Angenommen' ? 'bg-emerald-100 text-emerald-700'
       : s === 'Abgelehnt'  ? 'bg-red-100 text-red-700'
       :                       'bg-ink-100 text-ink-600';
+    // ERP-Status-Cache vorbereiten (Customers + Contacts des aktuellen Mandanten)
+    await _prepareErpStateCache();
 
     wrap.innerHTML = `
       <p class="text-xs text-ink-500 mb-3">${tickets.length} Ticket${tickets.length===1?'':'s'} · sortiert nach letzte Änderung · Klick öffnet Details</p>
@@ -3543,11 +3730,13 @@ async function loadFreshdeskTicketsPreview() {
               })()}</p>
               <!-- Zeile 2: Subject groß, 2 Zeilen erlaubt -->
               <p class="text-base font-semibold text-ink-900 group-hover:text-brand-700 leading-snug break-words mb-1.5" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escapeHtml(subject)}</p>
-              <!-- Zeile 3: Tags / KI-Badge / Own-Note-Badge / Quote-Badges (Async-Slots werden später befüllt) -->
+              <!-- Zeile 3: Tags / KI-Badge / Own-Note-Badge / Quote-Badges + ERP-Status + KI-Angebot-Button -->
               <div class="flex items-center gap-1.5 flex-wrap mb-1 empty:hidden">
                 ${tType ? `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-600 px-1.5 py-0.5 rounded font-medium">${tType}</span>` : ''}
                 <span class="ai-badge-slot inline-flex">${initialAi ? `<button type="button" onclick="event.stopPropagation(); showAiSummaryQuickView(${t.id})" class="text-[10px] uppercase tracking-wider bg-purple-100 text-purple-700 hover:bg-purple-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="KI-Zusammenfassung anzeigen"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI</button>` : ''}</span>
                 <span class="own-note-slot inline-flex">${initialOwn ? _ownNoteBadgeHtml(t.id, initialOwnNote) : ''}</span>
+                <span class="ticket-erp-slot inline-flex"></span>
+                <span class="ticket-aiquote-slot inline-flex"></span>
                 ${quoteBadges}
               </div>
               <!-- Zeile 4: Bearbeiter (statt Datum/Prio) -->
@@ -3604,21 +3793,31 @@ async function loadFreshdeskTicketsPreview() {
     });
     _runWithLimit(tasks, 5).catch(() => {});
     // Kunde-Vorschau auf jeder Karte lazy laden (Concurrency 5, niedrige Priorität)
+    // ZUSAETZLICH: ERP-Status-Badge + KI-Angebot-Button updaten sobald der Contact da ist
     const customerTasks = tickets.map(t => async () => {
       if (!t.requester_id) return;
       const c = await _loadFdContact(t.requester_id).catch(()=>null);
       if (!c) return;
       const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + t.id + '"]');
       const slot = row?.querySelector('.ticket-customer-slot');
-      if (!slot) return;
-      const nm = c.name || '';
-      const co = c.company_name || '';
-      if (nm || co) {
-        slot.innerHTML = '<i data-lucide="user" class="inline w-3 h-3 -mt-0.5"></i> ' + escapeHtml(nm) + (co ? ' · ' + escapeHtml(co) : '');
-        if (window.lucide) lucide.createIcons();
+      if (slot) {
+        const nm = c.name || '';
+        const co = c.company_name || '';
+        if (nm || co) {
+          slot.innerHTML = '<i data-lucide="user" class="inline w-3 h-3 -mt-0.5"></i> ' + escapeHtml(nm) + (co ? ' · ' + escapeHtml(co) : '');
+          if (window.lucide) lucide.createIcons();
+        }
       }
+      // ERP-Status-Badge + KI-Angebot-Button rendern
+      _renderTicketErpBadge(t.id, c);
     });
     _runWithLimit(customerTasks, 5).catch(() => {});
+    // Fuer alle Tickets bei denen der Requester schon im Cache ist: sofort Badge rendern
+    // (sonst sind die Slots leer bis customerTasks alle durch sind)
+    tickets.forEach(t => {
+      const cached = t.requester_id ? _fdContactCache.get(t.requester_id) : null;
+      _renderTicketErpBadge(t.id, cached);
+    });
     // Hinweis: Auto-KI-Analyse beim Laden ist abgeschaltet — manuelle Sammelaktion
     // erfolgt jetzt explizit über den „Bulk-Analyse"-Button im Header.
   } catch (err) {
