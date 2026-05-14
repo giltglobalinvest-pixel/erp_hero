@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.94';
+const APP_VERSION = 'v4.95';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -21720,11 +21720,43 @@ function paginatePreview(targetId) {
   measure.innerHTML = bodyHtml;
   document.body.appendChild(measure);
   const bodyEl2 = measure.firstElementChild;
-  const bodyHpx = bodyEl2 ? bodyEl2.scrollHeight : measure.scrollHeight;
+  let bodyHpx = bodyEl2 ? bodyEl2.scrollHeight : measure.scrollHeight;
   document.body.removeChild(measure);
 
+  let finalBodyHtml = bodyHtml;
+  let closingExtraFinal = closingExtra;
+
+  // Smart-Inline: Wenn force_closing_new_page eingeschaltet ist, aber der Schlusstext
+  // tatsaechlich auf die letzte Body-Seite passen wuerde, fuegen wir ihn dort ein und
+  // sparen die leere Seite davor. Das gibt's nur wenn der Inline-Variante NICHT mehr
+  // Seiten braucht als der Body alleine.
+  if (closingExtra) {
+    const aloneBodyPages = Math.max(1, Math.ceil(bodyHpx / usableH));
+    const measureCombined = document.createElement('div');
+    measureCombined.style.cssText = 'position:absolute; left:-99999px; top:-99999px; width:' + (A4_W - 2 * PAD_LR) + 'px; visibility:hidden;';
+    measureCombined.innerHTML = bodyHtml;
+    const bodyClone = measureCombined.firstElementChild;
+    if (bodyClone) {
+      const closingWrap = document.createElement('div');
+      closingWrap.style.cssText = 'margin-top:24px;';
+      closingWrap.innerHTML = closingExtra;
+      bodyClone.appendChild(closingWrap);
+      document.body.appendChild(measureCombined);
+      const combinedHpx = bodyClone.scrollHeight;
+      const combinedPages = Math.max(1, Math.ceil(combinedHpx / usableH));
+      if (combinedPages <= aloneBodyPages) {
+        // Schlusstext passt auf die letzte Body-Seite → inline + keine extra Seite
+        finalBodyHtml = bodyClone.outerHTML;
+        bodyHpx = combinedHpx;
+        closingExtraFinal = '';
+        console.log('[paginate] Schlusstext inline (' + combinedHpx + 'px in ' + combinedPages + ' Seite(n)) — Bundle-Seitenumbruch übersprungen, kein Platz verschwendet');
+      }
+      document.body.removeChild(measureCombined);
+    }
+  }
+
   const numBodyPages = Math.max(1, Math.ceil(bodyHpx / usableH));
-  const hasClosingPage = !!closingExtra;
+  const hasClosingPage = !!closingExtraFinal;
   const numPages = numBodyPages + (hasClosingPage ? 1 : 0);
 
   let html = '<div data-pages-wrap>';
@@ -21756,7 +21788,7 @@ function paginatePreview(targetId) {
         ` : ''}
         <!-- Content-Slice -->
         <div style="position:absolute;top:${contentTop}px;left:${PAD_LR}px;right:${PAD_LR}px;height:${usableH}px;overflow:hidden;">
-          <div style="transform:translateY(${offset}px);">${bodyHtml}</div>
+          <div style="transform:translateY(${offset}px);">${finalBodyHtml}</div>
         </div>
         <!-- Footer (jede Seite) -->
         <div style="position:absolute;bottom:${PAD_B}px;left:${PAD_LR}px;right:${PAD_LR}px;">
@@ -21788,7 +21820,7 @@ function paginatePreview(targetId) {
         </div>
         <!-- Schlusstext-Inhalt -->
         <div style="position:absolute;top:${PAD_T + HEADER_H + GAP}px;left:${PAD_LR}px;right:${PAD_LR}px;bottom:${PAD_B + 100}px;overflow:hidden;">
-          ${closingExtra}
+          ${closingExtraFinal}
         </div>
         <!-- Footer -->
         <div style="position:absolute;bottom:${PAD_B}px;left:${PAD_LR}px;right:${PAD_LR}px;">
