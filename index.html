@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.84';
+const APP_VERSION = 'v4.85';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3696,11 +3696,15 @@ async function _aqcRunAnalysis() {
     const cur = getCurrentCompany();
     let articles = [];
     try { articles = await readData('Article'); } catch (_) {}
-    const articlesInMandant = articles.filter(a => (a.fields.company_id || []).includes(cur?.id));
+    const articlesInMandant = articles.filter(a =>
+      (a.fields.company_id || []).includes(cur?.id) &&
+      (a.fields.status || 'aktiv') !== 'archiviert'
+    );
     const catalog = articlesInMandant.slice(0, 250).map(a => ({
       id: a.id,
-      sku: a.fields.sku || '',
-      name: a.fields.name || '',
+      sku: a.fields.article_no || '',
+      name: a.fields.name1 || '',
+      name2: a.fields.name2 || '',
       price: a.fields.sales_price || 0
     }));
 
@@ -3731,7 +3735,7 @@ ${ticketBody || '(leer)'}
 ${convSnippet ? 'Verlauf:\n' + convSnippet + '\n\n' : ''}
 
 ═══ Verfügbarer Artikel-Katalog (Auszug) ═══
-${catalog.length ? catalog.map(c => `[${c.id}] SKU=${c.sku} · ${c.name} · ${c.price}€`).join('\n') : '(kein Katalog)'}
+${catalog.length ? catalog.map(c => `[${c.id}] ArtNr=${c.sku} · ${c.name}${c.name2 ? ' / ' + c.name2 : ''} · ${c.price}€`).join('\n') : '(kein Katalog)'}
 
 ═══ Aufgabe ═══
 Antworte NUR mit gültigem JSON in dieser Struktur (keine Code-Fences, keine Erklärungen):
@@ -3740,16 +3744,34 @@ Antworte NUR mit gültigem JSON in dieser Struktur (keine Code-Fences, keine Erk
   "intro": "<p>Höfliche Einleitung in HTML, 2-4 Sätze. Beziehe dich auf die Anfrage.</p>",
   "closing": "<p>Höflicher Abschluss in HTML, 1-2 Sätze.</p>",
   "items": [
-    { "article_id": "rec...", "qty": 2, "note": "optional: zusätzlicher Hinweis zur Position" }
+    // ENTWEDER bestehender Artikel (article_id aus Katalog):
+    { "article_id": "rec...", "qty": 2, "note": "optional: Hinweis zur Position" },
+    // ODER neuer Artikel (wenn nicht im Katalog → wird automatisch angelegt):
+    {
+      "qty": 1,
+      "new_article": {
+        "name1":        "Hauptbezeichnung (max 80 Zeichen)",
+        "name2":        "optionaler Untertitel",
+        "article_no":   "vorgeschlagene Artikelnummer/SKU (alphanumerisch, kurz)",
+        "description":  "ausführliche Beschreibung (optional, mehrere Zeilen erlaubt)",
+        "manufacturer_no": "Hersteller-Typennummer (optional, wenn aus Brief erkennbar)",
+        "sales_price":  4500.00,
+        "unit":         "Stück"
+      },
+      "note": "optional: Hinweis zur Position"
+    }
   ],
-  "summary_for_user": "1 Satz Zusammenfassung was du gemacht hast (für den User-Toast)"
+  "summary_for_user": "1 Satz Zusammenfassung was du gemacht hast"
 }
 
 REGELN:
-- items[].article_id MUSS eine ID aus dem Katalog oben sein (Format "rec…"). Wenn der User-Brief Artikel erwähnt die NICHT im Katalog sind, lass sie weg und erwähne das in summary_for_user.
-- Wenn der User-Brief KEINE konkreten Artikel nennt, lass items leer ([]) und nutze nur intro/closing.
-- intro/closing in der Sie-Form, höflich, B2B-typisch knapp.
-- Keine Preise raten — nur Mengen + article_id + optionale Notiz.`;
+- Bei bestehendem Artikel: article_id MUSS eine ID aus dem Katalog oben sein (Format "rec…")
+- Bei neuem Artikel: new_article-Block füllen — KEIN article_id setzen. Die App legt den Artikel automatisch im Katalog an.
+- Wenn der User-Brief Preise nennt → in sales_price übernehmen. Sonst sales_price auf 0 setzen.
+- Wenn keine Preise/Mengen erkennbar → Item trotzdem mit qty=1, sales_price=0 anlegen
+- article_no für neue Artikel: erfinde eine plausible kurze Nummer (z.B. "ANTRIEB-V3F25L" oder "NEU-2026-001") wenn keine erkennbar
+- intro/closing in der Sie-Form, höflich, B2B-typisch knapp
+- Wenn User-Brief KEINE Artikel nennt, lass items leer ([]) und nutze nur intro/closing`;
 
     const result = await askAI(prompt, { maxTokens: 2500, purpose: 'ai_quote_create' });
     let parsed = null;
@@ -3781,10 +3803,28 @@ function _aqcRenderPreview(parsed, articlesInMandant, erpState) {
 
   const articleById = new Map(articlesInMandant.map(a => [a.id, a]));
   const itemRows = (parsed.items || []).map(it => {
+    // Fall 1: neuer Artikel — wird automatisch angelegt
+    if (it.new_article && (it.new_article.name1 || it.new_article.name || '').trim()) {
+      const na = it.new_article;
+      const name = na.name1 || na.name || '';
+      const sku = na.article_no || na.sku || '–';
+      const price = (typeof na.sales_price === 'number' && na.sales_price > 0) ? na.sales_price.toFixed(2) + '€' : '';
+      return `<li class="text-ink-700">
+        <strong>${escapeHtml(String(it.qty || 1))}×</strong>
+        <span class="font-mono text-[10px] text-ink-500">${escapeHtml(sku)}</span>
+        · ${escapeHtml(name)}
+        ${price ? '<span class="text-ink-500"> · ' + escapeHtml(price) + '</span>' : ''}
+        <span class="ml-1 text-[9px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1 py-0.5 rounded">NEU — wird angelegt</span>
+        ${it.note ? ' · <em class="text-ink-500">' + escapeHtml(it.note) + '</em>' : ''}
+      </li>`;
+    }
+    // Fall 2: bestehender Artikel aus Katalog
     const a = articleById.get(it.article_id);
-    if (!a) return `<li class="text-amber-700">⚠ Artikel-ID ${escapeHtml(it.article_id || '?')} nicht im Katalog</li>`;
+    if (!a) {
+      return `<li class="text-amber-700">⚠ Artikel-ID ${escapeHtml(it.article_id || '?')} nicht im Katalog — wird übersprungen</li>`;
+    }
     const f = a.fields;
-    return `<li><strong>${escapeHtml(String(it.qty || 1))}×</strong> <span class="font-mono text-xs text-ink-500">${escapeHtml(f.sku || '')}</span> · ${escapeHtml(f.name || '')}${it.note ? ' · <em class="text-ink-500">' + escapeHtml(it.note) + '</em>' : ''}</li>`;
+    return `<li class="text-ink-700"><strong>${escapeHtml(String(it.qty || 1))}×</strong> <span class="font-mono text-[10px] text-ink-500">${escapeHtml(f.article_no || '')}</span> · ${escapeHtml(f.name1 || '')}${it.note ? ' · <em class="text-ink-500">' + escapeHtml(it.note) + '</em>' : ''}</li>`;
   }).join('');
 
   body.innerHTML = `
@@ -3875,26 +3915,88 @@ async function _aqcCreateQuote() {
 
     const created = await writeData('Quote', fields);
 
-    // Items anlegen
-    let pos = 1;
-    let itemErrors = 0;
+    // Artikel-Cache + bestehender SKU-Index (case-insensitive) für Duplikat-Check
     const articleById = new Map();
+    const articleBySku = new Map();
     try {
       const articles = await readData('Article');
-      articles.forEach(a => articleById.set(a.id, a));
+      articles.forEach(a => {
+        articleById.set(a.id, a);
+        const sku = String(a.fields.article_no || '').trim().toLowerCase();
+        if (sku) articleBySku.set(sku, a);
+      });
     } catch (_) {}
+
+    // Items anlegen — bei new_article erst Artikel im Katalog anlegen, dann verknüpfen
+    let pos = 1;
+    let itemErrors = 0;
+    let newArticlesCreated = 0;
     for (const it of (parsed.items || [])) {
       try {
-        const article = articleById.get(it.article_id);
         const qty = Math.max(1, parseInt(it.qty || 1, 10) || 1);
-        if (article) {
-          await writeData('QuoteItem', _aiBuildQuoteItemFields(article, qty, pos, created.id));
-        } else {
+        let articleToUse = articleById.get(it.article_id) || null;
+
+        // Auto-Anlage wenn AI einen new_article-Block geliefert hat
+        if (!articleToUse && it.new_article && (it.new_article.name1 || it.new_article.name || '').trim()) {
+          const na = it.new_article;
+          const proposedName1 = (na.name1 || na.name || '').trim();
+          const proposedSku   = (na.article_no || na.sku || '').trim();
+          // Duplikat-Schutz: wenn SKU schon existiert, bestehenden Artikel verwenden
+          const existingBySku = proposedSku ? articleBySku.get(proposedSku.toLowerCase()) : null;
+          if (existingBySku) {
+            articleToUse = existingBySku;
+          } else {
+            // Neuen Artikel im Katalog anlegen
+            const artFields = {
+              name1:           proposedName1,
+              name2:           (na.name2 || '').trim(),
+              article_no:      proposedSku || ('NEU-' + Date.now() + '-' + pos),
+              description:     (na.description || '').trim(),
+              manufacturer_no: (na.manufacturer_no || '').trim(),
+              unit:            (na.unit || 'Stück').trim(),
+              sales_price:     (typeof na.sales_price === 'number' && na.sales_price >= 0) ? na.sales_price : 0,
+              vat_rate:        19,
+              status:          'aktiv',
+              company_id:      [cur.id],
+              notes:           '🤖 Auto-angelegt von KI-Angebot · ' + new Date().toLocaleString('de-DE') + ' · Quote ' + quoteNo
+            };
+            // Article_no Konflikt-Resilienz: falls Airtable die SKU als unique flagged ist,
+            // fall back zu einer eindeutigen Variante mit Timestamp-Suffix
+            let newArt = null;
+            try {
+              newArt = await writeData('Article', artFields);
+            } catch (e1) {
+              if (/unique|duplicate|conflict/i.test(e1.message)) {
+                artFields.article_no = artFields.article_no + '-' + Date.now().toString().slice(-5);
+                newArt = await writeData('Article', artFields).catch(() => null);
+              } else {
+                throw e1;
+              }
+            }
+            if (newArt && newArt.id) {
+              // In den Cache aufnehmen damit folgende Items die SKU wiederfinden falls duplikat
+              const newArtObj = { id: newArt.id, fields: artFields };
+              articleById.set(newArt.id, newArtObj);
+              articleBySku.set(artFields.article_no.toLowerCase(), newArtObj);
+              articleToUse = newArtObj;
+              newArticlesCreated++;
+              console.log('[aqc] Artikel auto-angelegt:', proposedName1, '→', newArt.id);
+            }
+          }
+        }
+
+        if (articleToUse) {
+          await writeData('QuoteItem', _aiBuildQuoteItemFields(articleToUse, qty, pos, created.id));
+        } else if (it.article_id) {
+          // Letzte Notlösung: link versuchen — kann scheitern wenn ID ungültig
           await writeData('QuoteItem', { quote_id: [created.id], article_id: [it.article_id], qty, pos });
+        } else {
+          console.warn('[aqc] Item ohne Artikel + ohne new_article-Block — uebersprungen:', it);
+          continue;
         }
         pos++;
       } catch (e) {
-        console.warn('[aqc] QuoteItem ' + (it.article_id) + ' fehlgeschlagen:', e.message);
+        console.warn('[aqc] QuoteItem fehlgeschlagen:', e.message);
         itemErrors++;
       }
     }
@@ -3913,8 +4015,10 @@ async function _aqcCreateQuote() {
     } catch (_) {}
 
     // Toast mit "Öffnen"-Button — User klickt drauf und sendet dann per Email
-    const successMsg = '✓ Angebot ' + quoteNo + ' angelegt' + (itemErrors > 0 ? ' (' + itemErrors + ' Item-Fehler)' : '');
-    toast(successMsg, 'success', 6000);
+    const parts2 = ['✓ Angebot ' + quoteNo + ' angelegt'];
+    if (newArticlesCreated > 0) parts2.push(newArticlesCreated + ' neue Artikel im Katalog');
+    if (itemErrors > 0) parts2.push(itemErrors + ' Item-Fehler');
+    toast(parts2.join(' · '), itemErrors > 0 ? 'warn' : 'success', 6500);
     closeTopModal();
     // Direkt das Quote-Modal öffnen damit User es prüfen + versenden kann
     setTimeout(() => {
