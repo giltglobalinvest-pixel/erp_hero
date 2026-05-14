@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.92';
+const APP_VERSION = 'v4.93';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3703,8 +3703,11 @@ async function _newTicketSubmit(mode, formEl) {
   if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege ' + (mode === 'order' ? 'Bestellung' : 'Anfrage') + ' an…'; if (window.lucide) lucide.createIcons(); }
 
   try {
-    // HTML-Body fuer description (mit Zeilenumbruechen aus textarea)
-    const descHtml = description.split(/\n+/).map(p => '<p>' + escapeHtml(p) + '</p>').join('');
+    // HTML-Body fuer description: leere Zeile (\n\n) = Absatz, einzelner \n = <br> innerhalb des Absatzes.
+    // So bleiben Zeilenumbrueche aus der Textarea sauber erhalten.
+    const descHtml = description.split(/\n{2,}/).map(p =>
+      '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>'
+    ).join('');
     const body = {
       subject,
       description: descHtml,
@@ -4016,13 +4019,13 @@ function _aqcRenderChatLog() {
     if (m._hidden) continue; // versteckte Auto-Init-Message
     if (m.role === 'user') {
       html.push(`<div class="flex justify-end">
-        <div class="bg-purple-600 text-white rounded-xl px-3 py-2 text-xs max-w-[85%] whitespace-pre-wrap break-words">${escapeHtml(m.content)}</div>
+        <div class="bg-purple-600 text-white rounded-xl px-3 py-2 text-xs max-w-[85%] break-words" style="white-space: pre-wrap; word-break: break-word;">${escapeHtml(m.content)}</div>
       </div>`);
     } else {
       // Assistant message
       html.push(`<div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-800 flex items-start gap-2 max-w-[95%]">
         <span class="text-base shrink-0">🤖</span>
-        <div class="whitespace-pre-wrap break-words flex-1">${escapeHtml(m.content)}</div>
+        <div class="break-words flex-1" style="white-space: pre-wrap; word-break: break-word;">${escapeHtml(m.content)}</div>
       </div>`);
     }
   }
@@ -4086,6 +4089,27 @@ async function _aqcBuildSystemPrompt() {
     return '### ' + dir + ' (' + (c.created_at || '').slice(0, 10) + '):\n' + _fdHtmlToText(c.body || c.body_text || '').slice(0, 800);
   }).join('\n\n');
 
+  // Custom-Fields fuer doc_type='Angebot' laden (KI soll diese aktiv abfragen)
+  let customFieldsList = [];
+  try {
+    const allCf = await readData('CustomField').catch(() => []);
+    customFieldsList = allCf
+      .filter(cf => (cf.fields.company_id || []).includes(cur?.id) &&
+                    (cf.fields.doc_type || '') === 'Angebot' &&
+                    (cf.fields.status || 'aktiv') === 'aktiv')
+      .sort((a, b) => (a.fields.label || a.fields.name || '').localeCompare(b.fields.label || b.fields.name || '', 'de'));
+  } catch (_) {}
+  _aqcState.customFields = customFieldsList;
+  const customFieldsHint = customFieldsList.length
+    ? '\n═══ MANDANTEN-SPEZIFISCHE PFLICHTFELDER (immer abfragen!) ═══\n' +
+      customFieldsList.map(cf => {
+        const f = cf.fields || {};
+        const typeHint = f.field_type ? ' [' + f.field_type + ']' : '';
+        return `- ${f.name}${typeHint}: ${f.label || f.name}${f.description ? ' — ' + f.description : ''}`;
+      }).join('\n') +
+      '\nWICHTIG: Diese Felder MUSST du aktiv beim User abfragen wenn sie nicht eindeutig aus dem Ticket/Brief hervorgehen. Die ausgefüllten Werte gehören in das JSON-Feld "custom_values": { "feldname": "wert", ... }.\n'
+    : '';
+
   // Vergangene KI-Angebot-Chats holen (lernen aus früheren Angeboten gleichen Mandanten)
   let pastExamples = '';
   try {
@@ -4128,7 +4152,7 @@ Anrede: ${erpState.contact?.fields?.gender || '?'}
 Erste Nachricht:
 ${ticketBody || '(leer)'}
 
-${convSnippet ? 'Bisheriger Verlauf:\n' + convSnippet + '\n' : ''}${attHint}${pastExamples}
+${convSnippet ? 'Bisheriger Verlauf:\n' + convSnippet + '\n' : ''}${attHint}${customFieldsHint}${pastExamples}
 ═══ VERFÜGBARE BUNDLES ═══
 ${bundles.length ? bundles.map(b => {
   const f = b.fields || {};
@@ -4168,7 +4192,7 @@ REGELN FÜR ARTIKEL:
 ═══ ANTWORT-FORMAT ═══
 ENTWEDER (wenn noch Infos fehlen): kurze Frage als normaler Deutsch-Text, KEIN JSON.
 
-ODER (wenn du alle Infos hast): NUR JSON, keine Code-Fences, kein Text drumherum:
+ODER (wenn du alle Infos hast — INKL. aller Custom-Fields oben falls vorhanden): NUR JSON, keine Code-Fences, kein Text drumherum:
 {
   "action": "create_quote",
   "bundle_id": "rec... oder null",
@@ -4176,12 +4200,15 @@ ODER (wenn du alle Infos hast): NUR JSON, keine Code-Fences, kein Text drumherum
   "intro": "<p>...</p>" oder "",
   "closing": "<p>...</p>" oder "",
   "lieferzeit": "3-5 Tage" oder "",
+  "custom_values": { "feldname": "wert", "feldname2": "wert2" },
   "items": [
     { "article_id": "recXXX", "qty": 2, "name1_override": null, "note": "" },
     { "qty": 1, "new_article": { "name1": "...", "article_no": "...", "sales_price": 4500 }, "note": "" }
   ],
   "summary_for_user": "1 Satz was du gemacht hast"
-}`;
+}
+
+WICHTIG für HTML-Felder (intro/closing): IMMER mit <p>...</p> wrappen. Mehrere Absätze als separate <p>-Tags. Zeilenumbrüche innerhalb eines Absatzes als <br>.`;
 }
 
 // Schickt User-Input + History an die KI. Antwort entweder Frage (text) oder JSON (finales Angebot).
@@ -4475,6 +4502,14 @@ function _aqcRenderPreview(parsed) {
         <p class="text-sm text-ink-900"><span class="font-mono bg-blue-100 text-blue-800 px-2 py-0.5 rounded">${escapeHtml(parsed.lieferzeit)}</span></p>
       </div>
       ` : ''}
+      ${parsed.custom_values && Object.keys(parsed.custom_values).length ? `
+      <div>
+        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Individuelle Felder</p>
+        <div class="flex flex-wrap gap-1">
+          ${Object.entries(parsed.custom_values).map(([k, v]) => `<span class="text-[11px] bg-amber-50 border border-amber-200 text-amber-900 px-2 py-0.5 rounded"><strong>${escapeHtml(k)}:</strong> ${escapeHtml(String(v))}</span>`).join('')}
+        </div>
+      </div>
+      ` : ''}
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Einleitung</p>
         <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.intro || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '<em class="text-ink-400">leer</em>')}</div>
@@ -4658,9 +4693,18 @@ async function _aqcCreateQuote() {
       freshdesk_ticket_id: String(ticketId),
       ai_summary: parsed.summary_for_user || ''
     };
-    // Lieferzeit (aus KI extrahiert) als custom_values JSON
+    // Custom-Values + Lieferzeit als custom_values JSON sammeln
+    const cfClean = {};
     if (parsed.lieferzeit && String(parsed.lieferzeit).trim()) {
-      const cfClean = { lieferzeit: String(parsed.lieferzeit).trim() };
+      cfClean.lieferzeit = String(parsed.lieferzeit).trim();
+    }
+    // Custom-Fields aus KI-Response uebernehmen (KI hat User abgefragt)
+    if (parsed.custom_values && typeof parsed.custom_values === 'object') {
+      Object.entries(parsed.custom_values).forEach(([k, v]) => {
+        if (v != null && String(v).trim()) cfClean[k] = String(v).trim();
+      });
+    }
+    if (Object.keys(cfClean).length > 0) {
       fields.custom_values = JSON.stringify(cfClean);
     }
     if (parsed.bundle_id) fields.bundle_id = parsed.bundle_id;
@@ -4744,7 +4788,9 @@ async function _aqcCreateQuote() {
             const title = String(it.name1_override).trim();
             const descBody = (af.description || '').trim();
             const titleHtml = '<p>' + escapeHtml(title) + '</p>';
-            const bodyHtml = descBody ? descBody.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('') : '';
+            const bodyHtml = descBody
+              ? descBody.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('')
+              : '';
             itemFields.description = titleHtml + bodyHtml;
             itemFields.label = 'Pos.' + pos + ' · ' + title.substring(0, 50);
           }
@@ -4807,7 +4853,9 @@ async function _aqcCreateQuote() {
           // Beschreibung NUR übernehmen wenn AI eine geliefert hat (Prompt-Regel)
           const customDesc = (na.description || '').trim();
           const titleHtml = title ? '<p>' + escapeHtml(title + (sku ? ' (' + sku + ')' : '')) + '</p>' : '';
-          const descHtml = customDesc ? customDesc.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('') : '';
+          const descHtml = customDesc
+            ? customDesc.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('')
+            : '';
           const safeQty = qty;
           const itemFields = {
             quote_id:       [created.id],
