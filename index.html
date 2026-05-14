@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.86';
+const APP_VERSION = 'v4.87';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3746,6 +3746,18 @@ async function openAiQuoteCreationModal(ticketId) {
     : (fdContact?.name || '–');
   const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
+  // Angebot-Bundles fuer aktuellen Mandanten laden (fuer Picker + AI-Prompt)
+  const cur2 = getCurrentCompany();
+  let bundles = [];
+  try {
+    const allBundles = await readData('QuoteBundle').catch(() => []);
+    bundles = allBundles
+      .filter(b => b.fields.company_id === cur2?.id && bundleDocType(b) === 'Angebot' && (b.fields.status || 'aktiv') !== 'archiviert')
+      .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  } catch (_) {}
+  const defaultBundle = bundles.find(b => b.fields.is_default);
+  window._aqcBundles = bundles;
+
   const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
   opener(`
     <div class="p-5">
@@ -3760,12 +3772,26 @@ async function openAiQuoteCreationModal(ticketId) {
         <div>
           <p class="font-semibold mb-0.5">So funktioniert's:</p>
           <ol class="list-decimal ml-4 space-y-0.5">
+            <li>Optional: Vorlagen-Paket wählen (sonst entscheidet KI bzw. erkennt im Text)</li>
             <li>Beschreib per Sprache oder Text was im Angebot stehen soll</li>
             <li>KI analysiert deinen Input + den Ticketverlauf</li>
             <li>Angebot wird als <strong>Entwurf</strong> angelegt — du kannst es prüfen und mit einem Klick versenden</li>
           </ol>
         </div>
       </div>
+
+      ${bundles.length > 0 ? `
+      <div class="mb-3">
+        <label class="block text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1 flex items-center gap-1.5">
+          <i data-lucide="package" class="w-3.5 h-3.5 text-purple-600"></i> Vorlagen-Paket
+        </label>
+        <select id="aqcBundle" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-purple-500/30">
+          <option value="">— kein Paket / KI entscheidet —</option>
+          ${bundles.map(b => `<option value="${b.id}" ${defaultBundle && defaultBundle.id === b.id ? 'selected' : ''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
+        </select>
+        <p class="text-[10px] text-ink-500 mt-0.5 italic">Wenn ausgewählt: Titel/Einleitung/Schluss + Anhänge kommen aus dem Paket. Du kannst Bundle-Namen auch einfach im Text nennen — KI erkennt's.</p>
+      </div>
+      ` : ''}
 
       <label class="block text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1">Was soll im Angebot stehen?</label>
       <div class="relative">
@@ -3916,6 +3942,10 @@ async function _aqcRunAnalysis() {
       return '### ' + dir + ' (' + (c.created_at || '').slice(0, 10) + '):\n' + _fdHtmlToText(c.body || c.body_text || '').slice(0, 800);
     }).join('\n\n');
 
+    // Bundles laden + vorausgewähltes Bundle aus dem Picker abgreifen
+    const bundles = window._aqcBundles || [];
+    const preselectedBundleId = (document.getElementById('aqcBundle')?.value || '').trim();
+
     const prompt = `Du bist Vertriebsassistent bei FLP Lift Parts GmbH (B2B-Großhandel für Aufzug-Ersatzteile).
 
 Erstelle ein Angebot basierend auf dem User-Brief unten + dem Freshdesk-Ticket-Kontext.
@@ -3934,12 +3964,22 @@ ${ticketBody || '(leer)'}
 
 ${convSnippet ? 'Verlauf:\n' + convSnippet + '\n\n' : ''}
 
+═══ Verfügbare Vorlagen-Pakete (Bundles) ═══
+${bundles.length ? bundles.map(b => {
+  const f = b.fields || {};
+  const desc = (f.description || '').slice(0, 100);
+  return `[${b.id}] "${f.name || '–'}"${f.is_default ? ' ★Standard' : ''}${desc ? ' · ' + desc : ''}`;
+}).join('\n') : '(keine Bundles definiert)'}
+
+User hat im Picker vorausgewählt: ${preselectedBundleId ? `[${preselectedBundleId}]` : '(nichts)'}
+
 ═══ Verfügbarer Artikel-Katalog (Auszug) ═══
 ${catalog.length ? catalog.map(c => `[${c.id}] ArtNr=${c.sku} · ${c.name}${c.name2 ? ' / ' + c.name2 : ''} · ${c.price}€`).join('\n') : '(kein Katalog)'}
 
 ═══ Aufgabe ═══
 Antworte NUR mit gültigem JSON in dieser Struktur (keine Code-Fences, keine Erklärungen):
 {
+  "bundle_id": "rec... oder null",
   "quote_title": "Kurzer Angebotstitel (max 80 Zeichen)",
   "intro": "<p>Höfliche Einleitung in HTML, 2-4 Sätze. Beziehe dich auf die Anfrage.</p>",
   "closing": "<p>Höflicher Abschluss in HTML, 1-2 Sätze.</p>",
@@ -3965,13 +4005,19 @@ Antworte NUR mit gültigem JSON in dieser Struktur (keine Code-Fences, keine Erk
 }
 
 REGELN:
+- BUNDLE-LOGIK:
+  · Wenn User im Picker vorausgewählt hat (siehe oben): nimm exakt diese bundle_id.
+  · Wenn User im Text einen Bundle-Namen erwähnt (z.B. "nimm das Standard-Bundle", "verwende Generalüberholung-Paket"): identifiziere den passenden bundle_id aus der Liste oben und gib ihn zurück.
+  · Wenn KEIN Bundle erkennbar und KEINS vorausgewählt: bundle_id = null.
+  · WICHTIG: Wenn bundle_id gesetzt ist, lasse intro="" und closing="" — die kommen automatisch aus dem Bundle.
+  · Wenn bundle_id null ist, generiere intro + closing selbst.
 - Bei bestehendem Artikel: article_id MUSS eine ID aus dem Katalog oben sein (Format "rec…")
 - Bei neuem Artikel: new_article-Block füllen — KEIN article_id setzen. Die App legt den Artikel automatisch im Katalog an.
 - Wenn der User-Brief Preise nennt → in sales_price übernehmen. Sonst sales_price auf 0 setzen.
 - Wenn keine Preise/Mengen erkennbar → Item trotzdem mit qty=1, sales_price=0 anlegen
 - article_no für neue Artikel: erfinde eine plausible kurze Nummer (z.B. "ANTRIEB-V3F25L" oder "NEU-2026-001") wenn keine erkennbar
-- intro/closing in der Sie-Form, höflich, B2B-typisch knapp
-- Wenn User-Brief KEINE Artikel nennt, lass items leer ([]) und nutze nur intro/closing`;
+- intro/closing (wenn ohne Bundle): Sie-Form, höflich, B2B-typisch knapp
+- Wenn User-Brief KEINE Artikel nennt, lass items leer ([]) und nutze nur intro/closing (oder Bundle)`;
 
     const result = await askAI(prompt, { maxTokens: 2500, purpose: 'ai_quote_create' });
     let parsed = null;
@@ -4027,15 +4073,27 @@ function _aqcRenderPreview(parsed, articlesInMandant, erpState) {
     return `<li class="text-ink-700"><strong>${escapeHtml(String(it.qty || 1))}×</strong> <span class="font-mono text-[10px] text-ink-500">${escapeHtml(f.article_no || '')}</span> · ${escapeHtml(f.name1 || '')}${it.note ? ' · <em class="text-ink-500">' + escapeHtml(it.note) + '</em>' : ''}</li>`;
   }).join('');
 
+  // Bundle-Info: was die KI ausgesucht hat (entweder vorausgewählt vom User oder aus Text erkannt)
+  const bundles = window._aqcBundles || [];
+  const chosenBundle = parsed.bundle_id ? bundles.find(b => b.id === parsed.bundle_id) : null;
+  const bundleBadge = chosenBundle
+    ? `<div class="mb-2 bg-purple-50 border border-purple-200 rounded-lg px-2.5 py-1.5 text-xs text-purple-900 flex items-center gap-1.5">
+        <i data-lucide="package" class="w-3.5 h-3.5"></i>
+        <span><strong>Bundle:</strong> ${escapeHtml(chosenBundle.fields.name || '–')}${chosenBundle.fields.is_default ? ' ★' : ''}
+        — Titel/Einleitung/Schluss kommen aus dem Paket</span>
+       </div>`
+    : '';
+
   body.innerHTML = `
     <div class="space-y-2.5">
+      ${bundleBadge}
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Angebotstitel</p>
-        <p class="text-sm font-semibold text-ink-900">${escapeHtml(parsed.quote_title || '–')}</p>
+        <p class="text-sm font-semibold text-ink-900">${escapeHtml(parsed.quote_title || (chosenBundle ? '(aus Bundle)' : '–'))}</p>
       </div>
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Einleitung</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.intro || ''}</div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.intro || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '')}</div>
       </div>
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Positionen (${(parsed.items || []).length})</p>
@@ -4043,7 +4101,7 @@ function _aqcRenderPreview(parsed, articlesInMandant, erpState) {
       </div>
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Schlusstext</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.closing || ''}</div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.closing || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '')}</div>
       </div>
       ${parsed.summary_for_user ? `<p class="text-[11px] text-purple-700 italic bg-purple-50 border border-purple-200 rounded px-2 py-1.5"><i data-lucide="info" class="inline w-3 h-3"></i> ${escapeHtml(parsed.summary_for_user)}</p>` : ''}
     </div>
@@ -4063,6 +4121,50 @@ function _aqcRenderPreview(parsed, articlesInMandant, erpState) {
   const btn = document.getElementById('aqcAnalyzeBtn');
   if (btn) btn.classList.add('hidden');
   resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Loest die Templates eines Bundles auf (Titel/Einleitung/Schluss) inkl. Variablen-Substitution.
+// Liefert { quote_title, intro, closing, layout_variant, attachment_ids_json } oder null.
+async function _aqcResolveBundleContent(bundleId, customer, contact, quoteNo, today, validUntil) {
+  if (!bundleId) return null;
+  let bundles = [];
+  let templates = [];
+  try { [bundles, templates] = await Promise.all([readData('QuoteBundle').catch(() => []), readData('Textemplate').catch(() => [])]); } catch (_) {}
+  const bundle = bundles.find(b => b.id === bundleId);
+  if (!bundle) return null;
+  const f = bundle.fields || {};
+  const tplById = new Map(templates.map(t => [t.id, t]));
+  const titleTpl   = f.title_template_id   ? tplById.get(f.title_template_id)   : null;
+  const introTpl   = f.intro_template_id   ? tplById.get(f.intro_template_id)   : null;
+  const closingTpl = f.closing_template_id ? tplById.get(f.closing_template_id) : null;
+  // Minimal-ctx fuer substituteVariables — reicht fuer Standard-Platzhalter
+  // (kontakt.anrede, kontakt.nachname, kunde.name, angebot.nr, angebot.datum, angebot.gueltig_bis, firma.name)
+  const ctx = {
+    quote: {
+      quote_no: quoteNo,
+      date: today.toISOString().slice(0, 10),
+      valid_until: validUntil.toISOString().slice(0, 10),
+      quote_title: titleTpl?.fields?.content || ''
+    },
+    customer: customer?.fields || {},
+    contact:  contact?.fields  || {},
+    company:  (window._quoteCompanyCache || (getCurrentCompany() ? { name: getCurrentCompany().name } : {})),
+    user:     APP_KEYS.user || {},
+    customFields: {}
+  };
+  // Variable-Werte aus dem Bundle selbst (vorbefüllte Custom-Fields)
+  try {
+    const presetVars = JSON.parse(f.variable_values || '{}');
+    Object.entries(presetVars).forEach(([k, v]) => { ctx.customFields[k] = v; });
+  } catch (_) {}
+  const apply = (tpl) => tpl ? substituteVariables(tpl.fields.content || '', 'Angebot', ctx) : '';
+  return {
+    quote_title:         apply(titleTpl).replace(/<[^>]+>/g, '').trim() || (f.name || ''),
+    intro:               apply(introTpl),
+    closing:             apply(closingTpl),
+    layout_variant:      f.layout_variant || '',
+    attachment_ids_json: f.attachment_ids || ''
+  };
 }
 
 async function _aqcCreateQuote() {
@@ -4092,6 +4194,18 @@ async function _aqcCreateQuote() {
     const today = new Date();
     const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
     const iso = (d) => d.toISOString().slice(0, 10);
+
+    // Bundle (falls von KI gewählt oder von User vorausgewählt) — Templates auflösen
+    // damit Titel/Einleitung/Schluss + Anhänge aus dem Bundle direkt in der Quote stehen.
+    let bundleResolved = null;
+    if (parsed.bundle_id) {
+      try {
+        bundleResolved = await _aqcResolveBundleContent(
+          parsed.bundle_id, erpState.customer, erpState.contact, quoteNo, today, validUntil
+        );
+      } catch (e) { console.warn('[aqc] Bundle-Auflösung fehlgeschlagen:', e.message); }
+    }
+
     const fields = {
       quote_no: quoteNo,
       company_id: [cur.id],
@@ -4099,12 +4213,15 @@ async function _aqcCreateQuote() {
       date: iso(today),
       valid_until: iso(validUntil),
       status: 'Entwurf',
-      quote_title: parsed.quote_title || '',
-      description: parsed.intro || '',
-      notes: parsed.closing || '',
+      quote_title: (bundleResolved?.quote_title || parsed.quote_title || '').trim(),
+      description: (bundleResolved?.intro       || parsed.intro       || '').trim(),
+      notes:       (bundleResolved?.closing     || parsed.closing     || '').trim(),
       freshdesk_ticket_id: String(ticketId),
       ai_summary: parsed.summary_for_user || ''
     };
+    if (parsed.bundle_id) fields.bundle_id = parsed.bundle_id;
+    if (bundleResolved?.layout_variant)      fields.layout_variant = bundleResolved.layout_variant;
+    if (bundleResolved?.attachment_ids_json) fields.attachment_ids = bundleResolved.attachment_ids_json;
     if (erpState.contact?.id) fields.contact_id = [erpState.contact.id];
     // Customer-Stammdaten (payment/delivery_terms)
     try {
@@ -10167,32 +10284,15 @@ function toast(msg, type = 'info', timeout = 3200) {
 function openDrawer()  {
   document.getElementById('sidebar').classList.remove('-translate-x-full');
   document.getElementById('drawerBackdrop').classList.remove('hidden');
-  // Body-Scroll sperren damit beim Scrollen im Menü nicht der Hintergrund mit-scrollt (mobile)
-  if (window.matchMedia('(max-width: 1023px)').matches) {
-    document.body.dataset._scrollY = String(window.scrollY || 0);
-    document.body.style.position = 'fixed';
-    document.body.style.top = '-' + (window.scrollY || 0) + 'px';
-    document.body.style.left = '0';
-    document.body.style.right = '0';
-    document.body.style.width = '100%';
-    document.body.style.overflow = 'hidden';
+  // Body-Scroll sperren — nur auf Mobile (Desktop-Sidebar ist immer sichtbar)
+  if (window.matchMedia('(max-width: 1023px)').matches && typeof lockBodyScroll === 'function') {
+    lockBodyScroll('drawer');
   }
 }
 function closeDrawer() {
   document.getElementById('sidebar').classList.add('-translate-x-full');
   document.getElementById('drawerBackdrop').classList.add('hidden');
-  // Body-Scroll wieder freigeben + ursprüngliche Scroll-Position herstellen
-  if (document.body.style.position === 'fixed') {
-    const y = parseInt(document.body.dataset._scrollY || '0', 10);
-    document.body.style.position = '';
-    document.body.style.top = '';
-    document.body.style.left = '';
-    document.body.style.right = '';
-    document.body.style.width = '';
-    document.body.style.overflow = '';
-    delete document.body.dataset._scrollY;
-    window.scrollTo(0, y);
-  }
+  if (typeof unlockBodyScroll === 'function') unlockBodyScroll('drawer');
 }
 
 function initNavSections() {
@@ -11564,19 +11664,58 @@ function viewModeToggle(currentMode, handlerName) {
 /* ============================================================
    MODAL
    ============================================================ */
+// Zentraler Body-Scroll-Lock — mehrere Sources (drawer, modal, modal2) koexistieren via Set.
+// Body bleibt fixiert bis ALLE Sources released sind. Auf iOS Safari wird die Scrollposition
+// gespeichert + nach Release wiederhergestellt (sonst springt der Hintergrund nach oben).
+window._bodyLockSources = window._bodyLockSources || new Set();
+function lockBodyScroll(source) {
+  source = source || 'default';
+  const wasEmpty = window._bodyLockSources.size === 0;
+  window._bodyLockSources.add(source);
+  if (wasEmpty) {
+    const y = window.scrollY || window.pageYOffset || 0;
+    document.body.dataset._bodyLockY = String(y);
+    document.body.style.position = 'fixed';
+    document.body.style.top = '-' + y + 'px';
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+    document.body.style.width = '100%';
+    document.body.style.overflow = 'hidden';
+  }
+}
+function unlockBodyScroll(source) {
+  source = source || 'default';
+  window._bodyLockSources.delete(source);
+  if (window._bodyLockSources.size === 0) {
+    const y = parseInt(document.body.dataset._bodyLockY || '0', 10);
+    document.body.style.position = '';
+    document.body.style.top = '';
+    document.body.style.left = '';
+    document.body.style.right = '';
+    document.body.style.width = '';
+    document.body.style.overflow = '';
+    delete document.body.dataset._bodyLockY;
+    window.scrollTo(0, y);
+  }
+}
+
 function openModal(html, opts) {
   const box = document.getElementById('modalBox');
   // Reset Klassen, optional weite Variante zulassen.
   // Default max-w-3xl (768px) — Mobile bleibt durch w-full nahe der Viewport-Breite.
   const maxW = (opts && opts.maxWidth) || 'max-w-3xl';
   box.className = 'w-full ' + maxW + ' bg-white rounded-2xl shadow-card max-h-[88vh] overflow-y-auto';
+  box.style.overscrollBehavior = 'contain';
+  box.style.webkitOverflowScrolling = 'touch';
   box.innerHTML = html;
   document.getElementById('modalBackdrop').classList.remove('hidden');
+  lockBodyScroll('modal');
   if (window.lucide) lucide.createIcons();
 }
 function closeModal() {
   document.getElementById('modalBackdrop').classList.add('hidden');
   document.getElementById('modalBox').innerHTML = '';
+  unlockBodyScroll('modal');
   // Inquiry-spezifischer Cleanup: Spracherkennung stoppen, Bilder + Wizard-State freigeben
   if (typeof _inquirySpeech !== 'undefined' && _inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
   if (typeof _inquiryImages !== 'undefined') _inquiryImages = [];
@@ -11598,14 +11737,21 @@ function closeModal() {
     releaseLock(lock.table, lock.recordId);
   }
 }
-function openModal2(html) {
-  document.getElementById('modalBox2').innerHTML = html;
+function openModal2(html, opts) {
+  const box = document.getElementById('modalBox2');
+  const maxW = (opts && opts.maxWidth) || 'max-w-md';
+  box.className = 'w-full ' + maxW + ' bg-white rounded-2xl shadow-card max-h-[88vh] overflow-y-auto';
+  box.style.overscrollBehavior = 'contain';
+  box.style.webkitOverflowScrolling = 'touch';
+  box.innerHTML = html;
   document.getElementById('modalBackdrop2').classList.remove('hidden');
+  lockBodyScroll('modal2');
   if (window.lucide) lucide.createIcons();
 }
 function closeModal2() {
   document.getElementById('modalBackdrop2').classList.add('hidden');
   document.getElementById('modalBox2').innerHTML = '';
+  unlockBodyScroll('modal2');
 }
 
 // Schließt das aktuell oberste Modal — bevorzugt das Stack-Modal (modalBox2),
