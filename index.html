@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.87';
+const APP_VERSION = 'v4.88';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4186,7 +4186,11 @@ async function _aqcCreateQuote() {
     try {
       await ensureFields('Quote', [
         { name: 'freshdesk_ticket_id', type: 'singleLineText' },
-        { name: 'ai_summary',          type: 'multilineText' }
+        { name: 'ai_summary',          type: 'multilineText' },
+        { name: 'bundle_id',           type: 'singleLineText' },
+        { name: 'layout_variant',      type: 'singleLineText' },
+        { name: 'attachment_ids',      type: 'multilineText' },
+        { name: 'quote_title',         type: 'singleLineText' }
       ]);
     } catch (_) {}
 
@@ -4221,16 +4225,46 @@ async function _aqcCreateQuote() {
     };
     if (parsed.bundle_id) fields.bundle_id = parsed.bundle_id;
     if (bundleResolved?.layout_variant)      fields.layout_variant = bundleResolved.layout_variant;
-    if (bundleResolved?.attachment_ids_json) fields.attachment_ids = bundleResolved.attachment_ids_json;
+    if (bundleResolved?.attachment_ids_json) {
+      // Sicherstellen dass attachment_ids ein String ist (Bundle speichert JSON-Array als String)
+      const v = bundleResolved.attachment_ids_json;
+      fields.attachment_ids = typeof v === 'string' ? v : JSON.stringify(v);
+    }
     if (erpState.contact?.id) fields.contact_id = [erpState.contact.id];
-    // Customer-Stammdaten (payment/delivery_terms)
+    // Customer-Stammdaten (payment/delivery_terms) — nur wenn String, sonst überspringen
     try {
       const terms = await getCustomerTerms(erpState.customer.id);
-      if (terms.payment_terms)  fields.payment_terms  = terms.payment_terms;
-      if (terms.delivery_terms) fields.delivery_terms = terms.delivery_terms;
+      if (typeof terms.payment_terms  === 'string' && terms.payment_terms.trim())  fields.payment_terms  = terms.payment_terms;
+      if (typeof terms.delivery_terms === 'string' && terms.delivery_terms.trim()) fields.delivery_terms = terms.delivery_terms;
     } catch (_) {}
 
-    const created = await writeData('Quote', fields);
+    // Resilientes Write: bei "Value is not an array of record IDs" lokal-Schema-Mismatch —
+    // optionale Felder iterativ entfernen + Retry. So bleibt das Angebot trotz krummer Schemas anlegbar.
+    console.log('[aqc] Quote-Write fields:', fields);
+    const OPTIONAL_FIELDS_FALLBACK = ['attachment_ids', 'bundle_id', 'layout_variant', 'ai_summary', 'quote_title', 'freshdesk_ticket_id'];
+    let created = null;
+    let lastErr = null;
+    let writeFields = { ...fields };
+    for (let attempt = 0; attempt <= OPTIONAL_FIELDS_FALLBACK.length; attempt++) {
+      try {
+        created = await writeData('Quote', writeFields);
+        if (attempt > 0) {
+          console.warn('[aqc] Quote angelegt nach Entfernen von ' + attempt + ' optionalen Feld(ern). Schema in Airtable prüfen.');
+        }
+        break;
+      } catch (err) {
+        lastErr = err;
+        // Schema-Mismatch erkennen — Airtable-Fehler ueber linked record
+        if (!/array of record|record id|invalid value|cannot accept/i.test(err.message)) throw err;
+        if (attempt >= OPTIONAL_FIELDS_FALLBACK.length) throw err;
+        const drop = OPTIONAL_FIELDS_FALLBACK[attempt];
+        if (drop in writeFields) {
+          console.warn('[aqc] Quote-Write scheiterte — entferne optionales Feld "' + drop + '" und versuche erneut. Fehler:', err.message);
+          delete writeFields[drop];
+        }
+      }
+    }
+    if (!created) throw lastErr || new Error('Quote-Write fehlgeschlagen ohne konkreten Fehler');
 
     // Artikel-Cache + bestehender SKU-Index (case-insensitive) für Duplikat-Check
     const articleById = new Map();
