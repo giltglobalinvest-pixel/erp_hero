@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.96';
+const APP_VERSION = 'v4.97';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -11416,7 +11416,7 @@ function renderWelcome() {
   const html = `
     <div class="max-w-3xl mx-auto">
       <div class="rounded-2xl border border-ink-200 bg-gradient-to-br from-brand-50 to-white p-6 lg:p-8">
-        <div class="flex items-start gap-4 mb-5">
+        <div class="flex items-start gap-4">
           <div class="w-12 h-12 rounded-xl bg-brand-500 text-white grid place-items-center shrink-0">
             <i data-lucide="hand-platter" class="w-6 h-6"></i>
           </div>
@@ -11425,22 +11425,23 @@ function renderWelcome() {
             ${role ? `<p class="text-sm text-ink-500 mt-0.5">${escapeHtml(role)}</p>` : ''}
           </div>
         </div>
-        <!-- Direkt-Sprung zu den Anfragen — prominenter CTA-Button -->
-        <button type="button" onclick="dispatchRoute('anfragen')"
-                class="w-full bg-gradient-to-r from-brand-500 to-brand-700 hover:from-brand-600 hover:to-brand-800 text-white rounded-xl px-5 py-4 shadow-md hover:shadow-lg transition flex items-center gap-4 group">
-          <div class="w-12 h-12 rounded-lg bg-white/15 grid place-items-center shrink-0 group-hover:bg-white/25 transition">
-            <i data-lucide="inbox" class="w-6 h-6"></i>
-          </div>
-          <div class="flex-1 text-left">
-            <p class="text-lg font-bold leading-tight">Zu den Anfragen</p>
-            <p class="text-xs text-white/85 mt-0.5">Freshdesk-Tickets ansehen + per KI in Angebote überführen</p>
-          </div>
-          <i data-lucide="arrow-right" class="w-5 h-5 shrink-0 group-hover:translate-x-1 transition"></i>
-        </button>
       </div>
 
+      <!-- Anfragen-CTA: aus der Welcome-Karte rausgezogen, jetzt eigene Karte oberhalb des KI-Assistenten -->
+      <button type="button" onclick="dispatchRoute('anfragen')"
+              class="mt-6 w-full bg-gradient-to-r from-brand-500 to-brand-700 hover:from-brand-600 hover:to-brand-800 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
+        <div class="w-12 h-12 rounded-xl bg-white/15 grid place-items-center shrink-0 group-hover:bg-white/25 transition">
+          <i data-lucide="inbox" class="w-6 h-6"></i>
+        </div>
+        <div class="flex-1 text-left">
+          <p class="text-lg font-bold leading-tight">Zu den Anfragen</p>
+          <p class="text-xs text-white/85 mt-0.5">Freshdesk-Tickets ansehen + per KI in Angebote überführen</p>
+        </div>
+        <i data-lucide="arrow-right" class="w-5 h-5 shrink-0 group-hover:translate-x-1 transition"></i>
+      </button>
+
       ${_proxyBase() ? `
-        <button type="button" onclick="openErpAssistant()" class="mt-6 w-full bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 hover:from-purple-700 hover:to-purple-950 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
+        <button type="button" onclick="openErpAssistant()" class="mt-4 w-full bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 hover:from-purple-700 hover:to-purple-950 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
           <div class="w-12 h-12 rounded-xl bg-white/15 grid place-items-center shrink-0 group-hover:bg-white/25 transition">
             <i data-lucide="sparkles" class="w-6 h-6"></i>
           </div>
