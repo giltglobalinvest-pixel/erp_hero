@@ -417,7 +417,7 @@
       </div>
 
       <!-- Nav -->
-      <nav class="flex-1 overflow-y-auto px-3 scrollbar-thin">
+      <nav class="flex-1 overflow-y-auto px-3 scrollbar-thin" style="overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y;">
         <!-- Übersicht (Home) -->
         <div class="mb-3">
           <button type="button" onclick="goToHome()" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/40 transition">
@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.78';
+const APP_VERSION = 'v4.79';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -9229,8 +9229,36 @@ function toast(msg, type = 'info', timeout = 3200) {
 /* ============================================================
    UI: SHELL (Sidebar / Drawer / Sections)
    ============================================================ */
-function openDrawer()  { document.getElementById('sidebar').classList.remove('-translate-x-full'); document.getElementById('drawerBackdrop').classList.remove('hidden'); }
-function closeDrawer() { document.getElementById('sidebar').classList.add('-translate-x-full');    document.getElementById('drawerBackdrop').classList.add('hidden'); }
+function openDrawer()  {
+  document.getElementById('sidebar').classList.remove('-translate-x-full');
+  document.getElementById('drawerBackdrop').classList.remove('hidden');
+  // Body-Scroll sperren damit beim Scrollen im Menü nicht der Hintergrund mit-scrollt (mobile)
+  if (window.matchMedia('(max-width: 1023px)').matches) {
+    document.body.dataset._scrollY = String(window.scrollY || 0);
+    document.body.style.position = 'fixed';
+    document.body.style.top = '-' + (window.scrollY || 0) + 'px';
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+    document.body.style.width = '100%';
+    document.body.style.overflow = 'hidden';
+  }
+}
+function closeDrawer() {
+  document.getElementById('sidebar').classList.add('-translate-x-full');
+  document.getElementById('drawerBackdrop').classList.add('hidden');
+  // Body-Scroll wieder freigeben + ursprüngliche Scroll-Position herstellen
+  if (document.body.style.position === 'fixed') {
+    const y = parseInt(document.body.dataset._scrollY || '0', 10);
+    document.body.style.position = '';
+    document.body.style.top = '';
+    document.body.style.left = '';
+    document.body.style.right = '';
+    document.body.style.width = '';
+    document.body.style.overflow = '';
+    delete document.body.dataset._scrollY;
+    window.scrollTo(0, y);
+  }
+}
 
 function initNavSections() {
   // Sektionen, die beim Start standardmäßig ausgeklappt sind
