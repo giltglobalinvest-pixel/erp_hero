@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.85';
+const APP_VERSION = 'v4.86';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3525,6 +3525,206 @@ async function aiAutoQuoteFromTicket(ticketId) {
     return;
   }
   openAiQuoteCreationModal(ticketId);
+}
+
+// Erzeugt manuell ein neues Freshdesk-Ticket (Anfrage/Bestellung). Push-Action
+// auf der Inquiries-Liste — das Ticket landet automatisch in der konfigurierten
+// FD-Gruppe (sales/order group_id pro Mandant) und erscheint danach in der Liste.
+async function openNewTicketModal(mode) {
+  mode = mode === 'order' ? 'order' : 'sales';
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'warn'); return; }
+  const groupId = mode === 'order' ? getCurrentOrderGroupId() : getCurrentSalesGroupId();
+  if (!groupId) { toast('Keine Group-ID konfiguriert — Admin → Einstellungen → Step 5', 'error', 7000); return; }
+  if (!_proxyBase()) { toast('Proxy nicht konfiguriert', 'error', 6000); return; }
+
+  // Daten für Combobox + Auto-Fill
+  let customers = [], contacts = [];
+  try { [customers, contacts] = await Promise.all([readData('Customer').catch(() => []), readData('Contact').catch(() => [])]); } catch (_) {}
+  const customersInMandant = customers
+    .filter(c => (c.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  window._newTicketContacts = contacts;
+  window._newTicketCustomers = customersInMandant;
+
+  const titleLabel = mode === 'order' ? 'Bestellung' : 'Anfrage';
+  const ticketTypesArr = String(APP_KEYS.freshdeskTicketTypes || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+  openModal(`
+    <form onsubmit="event.preventDefault();_newTicketSubmit('${mode}', this)" class="p-5">
+      <h3 class="text-base font-bold text-ink-900 mb-1 flex items-center gap-2">
+        <i data-lucide="plus-circle" class="w-5 h-5 text-emerald-600"></i>
+        Neue ${escapeHtml(titleLabel)} anlegen
+      </h3>
+      <p class="text-xs text-ink-500 mb-3">${escapeHtml(cur.name)} · landet als Freshdesk-Ticket in Gruppe <code class="bg-ink-100 px-1 py-0.5 rounded">${escapeHtml(groupId)}</code></p>
+
+      <div class="space-y-2.5 text-sm">
+        <!-- Kunde (optional, fuellt Email/Name/Telefon auto) -->
+        <div>
+          <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Kunde aus ERP (optional)</label>
+          <select id="ntCustomer" onchange="_newTicketOnCustomerChange()" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
+            <option value="">— frei eintragen / kein ERP-Kunde —</option>
+            ${customersInMandant.map(c => `<option value="${c.id}">${escapeHtml(c.fields.name1 || '–')}${c.fields.customer_no ? ' · ' + escapeHtml(c.fields.customer_no) : ''}${c.fields.city ? ' · ' + escapeHtml(c.fields.city) : ''}</option>`).join('')}
+          </select>
+          <p class="text-[10px] text-ink-500 mt-0.5 italic">Bei Auswahl werden Email/Name/Telefon des Hauptansprechpartners vorbelegt.</p>
+        </div>
+
+        <!-- Anfragender -->
+        <div class="grid sm:grid-cols-2 gap-2.5">
+          <div>
+            <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Email <span class="text-red-500">*</span></label>
+            <input type="email" id="ntEmail" required class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm" placeholder="kunde@example.de">
+          </div>
+          <div>
+            <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Name</label>
+            <input type="text" id="ntName" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm" placeholder="Max Mustermann">
+          </div>
+        </div>
+        <div class="grid sm:grid-cols-2 gap-2.5">
+          <div>
+            <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Telefon</label>
+            <input type="text" id="ntPhone" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm">
+          </div>
+          <div>
+            <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Quelle</label>
+            <select id="ntSource" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
+              <option value="1">Email (1)</option>
+              <option value="3">Telefon (3)</option>
+              <option value="7" selected>Outbound (7) — manuell aus App</option>
+              <option value="10">Chat (10)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Subject + Description -->
+        <div>
+          <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Betreff <span class="text-red-500">*</span></label>
+          <input type="text" id="ntSubject" required class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm" placeholder="z.B. Anfrage Servicetausch V3F16L">
+        </div>
+        <div>
+          <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Beschreibung <span class="text-red-500">*</span></label>
+          <textarea id="ntDescription" required rows="5" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm" placeholder="Was wuenscht der Kunde? Welche Artikel/Mengen? Welcher Aufzug?"></textarea>
+        </div>
+
+        <!-- Optional: Type + Priority -->
+        <div class="grid sm:grid-cols-2 gap-2.5">
+          ${ticketTypesArr.length ? `
+          <div>
+            <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Typ</label>
+            <select id="ntType" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
+              <option value="">— kein Typ —</option>
+              ${ticketTypesArr.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('')}
+            </select>
+          </div>
+          ` : ''}
+          <div${ticketTypesArr.length ? '' : ' class="sm:col-span-2"'}>
+            <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1">Prioritaet</label>
+            <select id="ntPriority" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white">
+              <option value="1" selected>Niedrig (1)</option>
+              <option value="2">Mittel (2)</option>
+              <option value="3">Hoch (3)</option>
+              <option value="4">Dringend (4)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex gap-2 mt-4 flex-wrap justify-end">
+        <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Abbrechen</button>
+        <button type="submit" id="ntSubmitBtn" class="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
+          <i data-lucide="plus-circle" class="w-4 h-4"></i> ${escapeHtml(titleLabel)} anlegen
+        </button>
+      </div>
+    </form>
+  `);
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById('ntSubject')?.focus(), 80);
+}
+
+// Fuellt Email/Name/Telefon aus dem ausgewaehlten Kunden + Hauptkontakt
+function _newTicketOnCustomerChange() {
+  const sel = document.getElementById('ntCustomer');
+  const cid = sel?.value || '';
+  if (!cid) return;
+  const customer = (window._newTicketCustomers || []).find(c => c.id === cid);
+  if (!customer) return;
+  const contacts = window._newTicketContacts || [];
+  const primaryId = typeof findPrimaryContactId === 'function'
+    ? findPrimaryContactId(contacts, cid, 'customer')
+    : (contacts.find(c => (c.fields.customer_id || []).includes(cid))?.id || null);
+  const primary = primaryId ? contacts.find(c => c.id === primaryId) : null;
+
+  const emailEl = document.getElementById('ntEmail');
+  const nameEl  = document.getElementById('ntName');
+  const phoneEl = document.getElementById('ntPhone');
+
+  if (primary) {
+    const cf = primary.fields || {};
+    if (emailEl && !emailEl.value) emailEl.value = cf.email || customer.fields.email || '';
+    const nm = ((cf.first_name || '') + ' ' + (cf.last_name || '')).trim() || cf.name || '';
+    if (nameEl  && !nameEl.value)  nameEl.value  = nm;
+    if (phoneEl && !phoneEl.value) phoneEl.value = cf.phone || cf.mobile || customer.fields.phone || '';
+  } else {
+    if (emailEl && !emailEl.value) emailEl.value = customer.fields.email || '';
+    if (phoneEl && !phoneEl.value) phoneEl.value = customer.fields.phone || '';
+  }
+}
+
+async function _newTicketSubmit(mode, formEl) {
+  const subject     = (document.getElementById('ntSubject')?.value || '').trim();
+  const description = (document.getElementById('ntDescription')?.value || '').trim();
+  const email       = (document.getElementById('ntEmail')?.value || '').trim();
+  const name        = (document.getElementById('ntName')?.value || '').trim();
+  const phone       = (document.getElementById('ntPhone')?.value || '').trim();
+  const sourceRaw   = parseInt(document.getElementById('ntSource')?.value || '7', 10) || 7;
+  const priorityRaw = parseInt(document.getElementById('ntPriority')?.value || '1', 10) || 1;
+  const typeVal     = (document.getElementById('ntType')?.value || '').trim();
+  if (!email || !subject || !description) { toast('Email, Betreff und Beschreibung sind Pflicht', 'warn'); return; }
+
+  const cur = getCurrentCompany();
+  const groupId = mode === 'order' ? getCurrentOrderGroupId() : getCurrentSalesGroupId();
+  if (!groupId) { toast('Keine Group-ID gesetzt — Admin → Einstellungen', 'error', 6500); return; }
+
+  const btn = document.getElementById('ntSubmitBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege ' + (mode === 'order' ? 'Bestellung' : 'Anfrage') + ' an…'; if (window.lucide) lucide.createIcons(); }
+
+  try {
+    // HTML-Body fuer description (mit Zeilenumbruechen aus textarea)
+    const descHtml = description.split(/\n+/).map(p => '<p>' + escapeHtml(p) + '</p>').join('');
+    const body = {
+      subject,
+      description: descHtml,
+      email,
+      priority: priorityRaw,
+      status: 2,
+      source: sourceRaw,
+      group_id: parseInt(groupId, 10),
+      tags: ['erp-hero', (mode === 'order' ? 'bestellung-app' : 'anfrage-app')]
+    };
+    if (name)    body.name = name;
+    if (phone)   body.phone = phone;
+    if (typeVal) body.type = typeVal;
+
+    const res = await proxyFetch('freshdesk/api/v2/tickets', { method: 'POST', body });
+    const newId = res?.id || res?.ticket?.id;
+    if (!newId) throw new Error('Antwort enthielt keine Ticket-ID');
+
+    toast('✓ ' + (mode === 'order' ? 'Bestellung' : 'Anfrage') + ' FT-' + newId + ' angelegt', 'success', 5000);
+    closeModal();
+    // Liste neu laden — Search-Index hat ein paar Sek Lag, deshalb mit kurzem Delay
+    setTimeout(() => { if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview(); }, 1500);
+    // Direkt das neue Ticket oeffnen damit User es weiter pflegen kann
+    setTimeout(() => { if (typeof openFreshdeskTicket === 'function') openFreshdeskTicket(newId); }, 600);
+  } catch (err) {
+    console.error('[newTicket]', err);
+    let msg = err.message || String(err);
+    if (/group/i.test(msg) && /not.*found|invalid/i.test(msg)) {
+      msg = 'Group-ID ' + groupId + ' ist in Freshdesk unbekannt. Bitte Admin → Einstellungen → Step 5 prüfen.';
+    }
+    toast('Anlage fehlgeschlagen: ' + msg, 'error', 9000);
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="plus-circle" class="w-4 h-4"></i> ' + (mode === 'order' ? 'Bestellung' : 'Anfrage') + ' anlegen'; if (window.lucide) lucide.createIcons(); }
+  }
 }
 
 async function openAiQuoteCreationModal(ticketId) {
@@ -17282,6 +17482,9 @@ async function renderInquiries(mode) {
           </select>
           <button type="button" onclick="loadFreshdeskTicketsPreview()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
             <i data-lucide="refresh-cw" class="w-4 h-4"></i> <span class="hidden sm:inline">Jetzt laden</span>
+          </button>
+          <button type="button" onclick="openNewTicketModal('${mode}')" class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-emerald-700 flex items-center gap-2">
+            <i data-lucide="plus" class="w-4 h-4"></i> <span class="hidden sm:inline">Neue ${mode === 'order' ? 'Bestellung' : 'Anfrage'}</span><span class="sm:hidden">Neu</span>
           </button>
         </div>
       </div>
