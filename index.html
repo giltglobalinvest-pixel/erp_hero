@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.75';
+const APP_VERSION = 'v4.76';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -11436,9 +11436,9 @@ async function revokeAllSessions(userId, userName) {
 /* ============================================================
    ADMIN: TEXTVORLAGEN
    ============================================================ */
-const _templateListState = { docType: 'alle' };
+const _templateListState = { docType: 'alle', search: '' };
 
-const TEMPLATE_DOCTYPES = ['Angebot','Auftrag','Bestellung','Rechnung','Lieferschein','Artikel','E-Mail','Allgemein'];
+const TEMPLATE_DOCTYPES = ['Angebot','Auftragsbestätigung','Auftrag','Bestellung','Rechnung','Lieferschein','Gutschrift','Mahnung','Artikel','E-Mail','Allgemein'];
 const TEMPLATE_SECTIONS = ['Titel','Einleitung','Schlusstext'];
 
 async function renderAdminTextemplates() {
@@ -11455,6 +11455,16 @@ async function renderAdminTextemplates() {
   let list = all.filter(t => (t.fields.company_id || []).includes(cur.id));
   if (_templateListState.docType !== 'alle') {
     list = list.filter(t => (t.fields.doc_type || '') === _templateListState.docType);
+  }
+  if (_templateListState.search) {
+    const needle = _templateListState.search.toLowerCase();
+    list = list.filter(t => {
+      const f = t.fields || {};
+      return (f.name || '').toLowerCase().includes(needle)
+          || (f.content || '').toLowerCase().includes(needle)
+          || (f.doc_type || '').toLowerCase().includes(needle)
+          || (f.section || '').toLowerCase().includes(needle);
+    });
   }
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-4xl mx-auto">
@@ -11479,6 +11489,17 @@ async function renderAdminTextemplates() {
             <option value="alle" ${_templateListState.docType==='alle'?'selected':''}>alle</option>
             ${TEMPLATE_DOCTYPES.map(d => `<option value="${d}" ${_templateListState.docType===d?'selected':''}>${d}</option>`).join('')}
           </select>
+          <div class="relative flex-1 min-w-[200px]">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-ink-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></i>
+            <input type="search" placeholder="Suchen (Name, Inhalt, Sektion…)" value="${escapeHtml(_templateListState.search || '')}"
+              oninput="clearTimeout(window._tplSearchTimer);window._tplSearchTimer=setTimeout(()=>{_templateListState.search=this.value;renderAdminTextemplates();},250)"
+              class="w-full pl-8 pr-2 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          ${(_templateListState.docType !== 'alle' || _templateListState.search) ? `
+            <button type="button" onclick="_templateListState.docType='alle';_templateListState.search='';renderAdminTextemplates()" class="text-xs text-ink-500 hover:text-ink-900 inline-flex items-center gap-1 px-2 py-1.5">
+              <i data-lucide="x" class="w-3.5 h-3.5"></i> Filter zurücksetzen
+            </button>
+          ` : ''}
         </div>
         <div class="divide-y divide-ink-100">
           ${list.length === 0
@@ -11785,7 +11806,7 @@ function bundleDocType(b) {
   return (b && b.fields && b.fields.doc_type) ? b.fields.doc_type : 'Angebot';
 }
 
-const _bundleAdminState = { docType: 'alle' };
+const _bundleAdminState = { docType: 'alle', search: '' };
 
 async function renderAdminQuoteBundles() {
   setPageTitle('Vorlagenpakete');
@@ -11802,6 +11823,15 @@ async function renderAdminQuoteBundles() {
   if (_bundleAdminState.docType !== 'alle') {
     bundles = bundles.filter(b => bundleDocType(b) === _bundleAdminState.docType);
   }
+  if (_bundleAdminState.search) {
+    const needle = _bundleAdminState.search.toLowerCase();
+    bundles = bundles.filter(b => {
+      const f = b.fields || {};
+      return (f.name || '').toLowerCase().includes(needle)
+          || (bundleDocType(b) || '').toLowerCase().includes(needle)
+          || (f.layout_variant || '').toLowerCase().includes(needle);
+    });
+  }
   bundles.sort((a,b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
 
   const rows = bundles.length === 0
@@ -11810,10 +11840,13 @@ async function renderAdminQuoteBundles() {
         const f = b.fields;
         const dt = bundleDocType(b);
         const dtBadge =
-          dt === 'Bestellung'   ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded">Bestellung</span>' :
-          dt === 'Rechnung'     ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded">Rechnung</span>' :
-          dt === 'Lieferschein' ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Lieferschein</span>' :
-          dt === 'Auftrag'      ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">Auftrag</span>' :
+          dt === 'Bestellung'         ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded">Bestellung</span>' :
+          dt === 'Rechnung'           ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded">Rechnung</span>' :
+          dt === 'Lieferschein'       ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Lieferschein</span>' :
+          dt === 'Auftrag'            ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">Auftrag</span>' :
+          dt === 'Auftragsbestätigung'? '<span class="text-[10px] uppercase font-bold tracking-wider bg-sky-100 text-sky-700 px-1.5 py-0.5 rounded">Auftragsbest.</span>' :
+          dt === 'Gutschrift'         ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-teal-100 text-teal-700 px-1.5 py-0.5 rounded">Gutschrift</span>' :
+          dt === 'Mahnung'            ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded">Mahnung</span>' :
           '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">Angebot</span>';
         return `
           <div class="flex items-center justify-between gap-3 px-4 py-3 hover:bg-ink-50 border-b border-ink-100">
@@ -11842,16 +11875,30 @@ async function renderAdminQuoteBundles() {
     <div class="max-w-5xl mx-auto">
       <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
         <p class="text-sm text-ink-600 flex-1 min-w-[260px]">Vorlagenpakete bündeln Titel, Einleitung, Schluss + Anhänge + Layout — wähle bei einem neuen Angebot oder Auftrag ein Paket aus, statt alles einzeln.</p>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 flex-wrap">
           <label class="text-xs text-ink-500">Typ:</label>
           <select onchange="_bundleAdminState.docType=this.value;renderAdminQuoteBundles()" class="text-sm border border-ink-200 rounded-lg px-2 py-2">
-            <option value="alle"         ${_bundleAdminState.docType==='alle'?'selected':''}>alle</option>
-            <option value="Angebot"      ${_bundleAdminState.docType==='Angebot'?'selected':''}>Angebot</option>
-            <option value="Auftrag"      ${_bundleAdminState.docType==='Auftrag'?'selected':''}>Auftrag</option>
-            <option value="Lieferschein" ${_bundleAdminState.docType==='Lieferschein'?'selected':''}>Lieferschein</option>
-            <option value="Rechnung"     ${_bundleAdminState.docType==='Rechnung'?'selected':''}>Rechnung</option>
-            <option value="Bestellung"   ${_bundleAdminState.docType==='Bestellung'?'selected':''}>Bestellung</option>
+            <option value="alle"                ${_bundleAdminState.docType==='alle'?'selected':''}>alle</option>
+            <option value="Angebot"             ${_bundleAdminState.docType==='Angebot'?'selected':''}>Angebot</option>
+            <option value="Auftragsbestätigung" ${_bundleAdminState.docType==='Auftragsbestätigung'?'selected':''}>Auftragsbestätigung</option>
+            <option value="Auftrag"             ${_bundleAdminState.docType==='Auftrag'?'selected':''}>Auftrag</option>
+            <option value="Lieferschein"        ${_bundleAdminState.docType==='Lieferschein'?'selected':''}>Lieferschein</option>
+            <option value="Rechnung"            ${_bundleAdminState.docType==='Rechnung'?'selected':''}>Rechnung</option>
+            <option value="Gutschrift"          ${_bundleAdminState.docType==='Gutschrift'?'selected':''}>Gutschrift</option>
+            <option value="Mahnung"             ${_bundleAdminState.docType==='Mahnung'?'selected':''}>Mahnung</option>
+            <option value="Bestellung"          ${_bundleAdminState.docType==='Bestellung'?'selected':''}>Bestellung</option>
           </select>
+          <div class="relative min-w-[200px]">
+            <i data-lucide="search" class="w-3.5 h-3.5 text-ink-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></i>
+            <input type="search" placeholder="Suchen (Name, Layout…)" value="${escapeHtml(_bundleAdminState.search || '')}"
+              oninput="clearTimeout(window._bundleSearchTimer);window._bundleSearchTimer=setTimeout(()=>{_bundleAdminState.search=this.value;renderAdminQuoteBundles();},250)"
+              class="pl-8 pr-2 py-2 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          </div>
+          ${(_bundleAdminState.docType !== 'alle' || _bundleAdminState.search) ? `
+            <button type="button" onclick="_bundleAdminState.docType='alle';_bundleAdminState.search='';renderAdminQuoteBundles()" class="text-xs text-ink-500 hover:text-ink-900 inline-flex items-center gap-1 px-2 py-1.5">
+              <i data-lucide="x" class="w-3.5 h-3.5"></i> Reset
+            </button>
+          ` : ''}
           <button onclick="openQuoteBundleEdit()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2 shrink-0"><i data-lucide="plus" class="w-4 h-4"></i> Neu</button>
         </div>
       </div>
