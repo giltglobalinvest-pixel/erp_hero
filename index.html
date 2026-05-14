@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.93';
+const APP_VERSION = 'v4.94';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4622,12 +4622,17 @@ async function _aqcResolveBundleContent(bundleId, customer, contact, quoteNo, to
     Object.entries(presetVars).forEach(([k, v]) => { ctx.customFields[k] = v; });
   } catch (_) {}
   const apply = (tpl) => tpl ? substituteVariables(tpl.fields.content || '', 'Angebot', ctx) : '';
+  // Preset-Variable-Werte fuer Quote.custom_values zurueckgeben — werden mit AI-Werten gemerged.
+  let presetVarsObj = {};
+  try { presetVarsObj = JSON.parse(f.variable_values || '{}') || {}; } catch (_) {}
   return {
-    quote_title:         apply(titleTpl).replace(/<[^>]+>/g, '').trim() || (f.name || ''),
-    intro:               apply(introTpl),
-    closing:             apply(closingTpl),
-    layout_variant:      f.layout_variant || '',
-    attachment_ids_json: f.attachment_ids || ''
+    quote_title:           apply(titleTpl).replace(/<[^>]+>/g, '').trim() || (f.name || ''),
+    intro:                 apply(introTpl),
+    closing:               apply(closingTpl),
+    layout_variant:        f.layout_variant || '',
+    attachment_ids_json:   f.attachment_ids || '',
+    force_closing_new_page: !!f.force_closing_new_page,
+    preset_variable_values: presetVarsObj
   };
 }
 
@@ -4660,7 +4665,9 @@ async function _aqcCreateQuote() {
         { name: 'bundle_id',           type: 'singleLineText' },
         { name: 'layout_variant',      type: 'singleLineText' },
         { name: 'attachment_ids',      type: 'multilineText' },
-        { name: 'quote_title',         type: 'singleLineText' }
+        { name: 'quote_title',         type: 'singleLineText' },
+        { name: 'force_closing_new_page', type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
+        { name: 'custom_values',       type: 'multilineText' }
       ]);
     } catch (_) {}
 
@@ -4693,12 +4700,19 @@ async function _aqcCreateQuote() {
       freshdesk_ticket_id: String(ticketId),
       ai_summary: parsed.summary_for_user || ''
     };
-    // Custom-Values + Lieferzeit als custom_values JSON sammeln
+    // Custom-Values JSON: Reihenfolge der Quellen
+    //   1) Bundle-Preset-Variablen (z.B. lieferzeit aus dem gewählten Vorlagenpaket)
+    //   2) KI-Lieferzeit (wenn User explizit nannte → überschreibt Bundle-Preset)
+    //   3) KI Custom-Values (User-Eingaben via Chat → überschreiben alle vorherigen)
     const cfClean = {};
+    if (bundleResolved?.preset_variable_values && typeof bundleResolved.preset_variable_values === 'object') {
+      Object.entries(bundleResolved.preset_variable_values).forEach(([k, v]) => {
+        if (v != null && String(v).trim()) cfClean[k] = String(v).trim();
+      });
+    }
     if (parsed.lieferzeit && String(parsed.lieferzeit).trim()) {
       cfClean.lieferzeit = String(parsed.lieferzeit).trim();
     }
-    // Custom-Fields aus KI-Response uebernehmen (KI hat User abgefragt)
     if (parsed.custom_values && typeof parsed.custom_values === 'object') {
       Object.entries(parsed.custom_values).forEach(([k, v]) => {
         if (v != null && String(v).trim()) cfClean[k] = String(v).trim();
@@ -4708,6 +4722,10 @@ async function _aqcCreateQuote() {
       fields.custom_values = JSON.stringify(cfClean);
     }
     if (parsed.bundle_id) fields.bundle_id = parsed.bundle_id;
+    // Seitenumbruch-Checkbox aus dem Bundle uebernehmen (z.B. "Schlusstext auf neuer Seite")
+    if (bundleResolved && typeof bundleResolved.force_closing_new_page === 'boolean') {
+      fields.force_closing_new_page = bundleResolved.force_closing_new_page;
+    }
     if (bundleResolved?.layout_variant)      fields.layout_variant = bundleResolved.layout_variant;
     if (bundleResolved?.attachment_ids_json) {
       // Sicherstellen dass attachment_ids ein String ist (Bundle speichert JSON-Array als String)
@@ -4725,7 +4743,7 @@ async function _aqcCreateQuote() {
     // Resilientes Write: bei "Value is not an array of record IDs" lokal-Schema-Mismatch —
     // optionale Felder iterativ entfernen + Retry. So bleibt das Angebot trotz krummer Schemas anlegbar.
     console.log('[aqc] Quote-Write fields:', fields);
-    const OPTIONAL_FIELDS_FALLBACK = ['attachment_ids', 'bundle_id', 'layout_variant', 'ai_summary', 'quote_title', 'freshdesk_ticket_id'];
+    const OPTIONAL_FIELDS_FALLBACK = ['attachment_ids', 'force_closing_new_page', 'custom_values', 'bundle_id', 'layout_variant', 'ai_summary', 'quote_title', 'freshdesk_ticket_id'];
     let created = null;
     let lastErr = null;
     let writeFields = { ...fields };
@@ -4788,9 +4806,7 @@ async function _aqcCreateQuote() {
             const title = String(it.name1_override).trim();
             const descBody = (af.description || '').trim();
             const titleHtml = '<p>' + escapeHtml(title) + '</p>';
-            const bodyHtml = descBody
-              ? descBody.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('')
-              : '';
+            const bodyHtml = descBody ? descBody.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('') : '';
             itemFields.description = titleHtml + bodyHtml;
             itemFields.label = 'Pos.' + pos + ' · ' + title.substring(0, 50);
           }
@@ -4853,9 +4869,7 @@ async function _aqcCreateQuote() {
           // Beschreibung NUR übernehmen wenn AI eine geliefert hat (Prompt-Regel)
           const customDesc = (na.description || '').trim();
           const titleHtml = title ? '<p>' + escapeHtml(title + (sku ? ' (' + sku + ')' : '')) + '</p>' : '';
-          const descHtml = customDesc
-            ? customDesc.split(/\n{2,}/).map(p => '<p>' + escapeHtml(p).replace(/\n/g, '<br>') + '</p>').join('')
-            : '';
+          const descHtml = customDesc ? customDesc.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('') : '';
           const safeQty = qty;
           const itemFields = {
             quote_id:       [created.id],
