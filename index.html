@@ -626,7 +626,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.76';
+const APP_VERSION = 'v4.77';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -11512,10 +11512,36 @@ async function renderAdminTextemplates() {
   if (window.lucide) lucide.createIcons();
 }
 
+// HTML in lesbaren Plain-Text wandeln (für Listen-Previews): Tags entfernen, &nbsp;-Entities
+// auflösen, Block-Elemente in Zeilenumbrüche/Leerzeichen umsetzen, Whitespace normalisieren.
+function htmlToPreviewText(html) {
+  if (!html) return '';
+  let s = String(html);
+  // Block-Ends + <br> als Trennzeichen
+  s = s.replace(/<\s*\/?\s*(p|div|h[1-6]|li|tr|br)[^>]*>/gi, ' ');
+  // List-Bullets visuell behalten
+  s = s.replace(/<\s*li[^>]*>/gi, '• ');
+  // Alle anderen Tags raus
+  s = s.replace(/<[^>]+>/g, '');
+  // HTML-Entities auflösen (über temporäres Element)
+  try {
+    const tmp = document.createElement('textarea');
+    tmp.innerHTML = s;
+    s = tmp.value;
+  } catch (_) {
+    s = s.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  }
+  // Whitespace normalisieren
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
 function templateRow(rec) {
   const f = rec.fields || {};
   const archived = f.status === 'archiviert';
-  const preview = (f.content || '').substring(0, 120) + ((f.content || '').length > 120 ? '…' : '');
+  const previewRaw = htmlToPreviewText(f.content || '');
+  const preview = previewRaw.length > 160 ? previewRaw.substring(0, 160) + '…' : previewRaw;
+  const subjectPreview = f.subject ? htmlToPreviewText(f.subject) : '';
   return `
     <div class="flex items-start justify-between p-4 hover:bg-ink-50 transition cursor-pointer" onclick="openTemplateModal('${rec.id}')">
       <div class="min-w-0 flex-1">
@@ -11526,7 +11552,8 @@ function templateRow(rec) {
           ${f.section ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded">${escapeHtml(f.section)}</span>` : ''}
           ${f.is_default ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Standard</span>' : ''}
         </div>
-        ${preview ? `<p class="text-xs text-ink-500 mt-1 whitespace-pre-line line-clamp-2">${escapeHtml(preview)}</p>` : ''}
+        ${subjectPreview ? `<p class="text-[11px] text-ink-600 mt-1 line-clamp-1"><span class="text-ink-400">Betreff:</span> ${escapeHtml(subjectPreview)}</p>` : ''}
+        ${preview ? `<p class="text-xs text-ink-500 mt-1 line-clamp-2 leading-relaxed">${escapeHtml(preview)}</p>` : ''}
       </div>
       <div class="flex gap-1 shrink-0 ml-2" onclick="event.stopPropagation()">
         <button onclick="openTemplateModal('${rec.id}')" class="p-2 text-ink-500 hover:text-ink-900 hover:bg-ink-100 rounded" title="Bearbeiten">
