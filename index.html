@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.98';
+const APP_VERSION = 'v4.99';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -11415,9 +11415,21 @@ function renderWelcome() {
   const role = u.role || '';
   const html = `
     <div class="max-w-3xl mx-auto">
+      <div class="rounded-2xl border border-ink-200 bg-gradient-to-br from-brand-50 to-white p-6 lg:p-8">
+        <div class="flex items-start gap-4">
+          <div class="w-12 h-12 rounded-xl bg-brand-500 text-white grid place-items-center shrink-0">
+            <i data-lucide="hand-platter" class="w-6 h-6"></i>
+          </div>
+          <div class="flex-1">
+            <h2 class="text-xl lg:text-2xl font-bold text-ink-900">Willkommen, ${escapeHtml(name)}!</h2>
+            ${role ? `<p class="text-sm text-ink-500 mt-0.5">${escapeHtml(role)}</p>` : ''}
+          </div>
+        </div>
+      </div>
+
       ${_proxyBase() ? `
-        <!-- KI-Assistent ganz oben — wichtigster Einstiegspunkt -->
-        <button type="button" onclick="openErpAssistant()" class="w-full bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 hover:from-purple-700 hover:to-purple-950 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
+        <!-- KI-Assistent direkt unter dem Willkommen -->
+        <button type="button" onclick="openErpAssistant()" class="mt-6 w-full bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 hover:from-purple-700 hover:to-purple-950 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
           <div class="w-12 h-12 rounded-xl bg-white/15 grid place-items-center shrink-0 group-hover:bg-white/25 transition">
             <i data-lucide="sparkles" class="w-6 h-6"></i>
           </div>
@@ -11433,21 +11445,9 @@ function renderWelcome() {
         <div id="voiceAssistantWrap" class="hidden"></div>
       ` : ''}
 
-      <div class="${_proxyBase() ? 'mt-6' : ''} rounded-2xl border border-ink-200 bg-gradient-to-br from-brand-50 to-white p-6 lg:p-8">
-        <div class="flex items-start gap-4">
-          <div class="w-12 h-12 rounded-xl bg-brand-500 text-white grid place-items-center shrink-0">
-            <i data-lucide="hand-platter" class="w-6 h-6"></i>
-          </div>
-          <div class="flex-1">
-            <h2 class="text-xl lg:text-2xl font-bold text-ink-900">Willkommen, ${escapeHtml(name)}!</h2>
-            ${role ? `<p class="text-sm text-ink-500 mt-0.5">${escapeHtml(role)}</p>` : ''}
-          </div>
-        </div>
-      </div>
-
       <!-- Anfragen-CTA -->
       <button type="button" onclick="dispatchRoute('anfragen')"
-              class="mt-6 w-full bg-gradient-to-r from-brand-500 to-brand-700 hover:from-brand-600 hover:to-brand-800 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
+              class="mt-4 w-full bg-gradient-to-r from-brand-500 to-brand-700 hover:from-brand-600 hover:to-brand-800 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
         <div class="w-12 h-12 rounded-xl bg-white/15 grid place-items-center shrink-0 group-hover:bg-white/25 transition">
           <i data-lucide="inbox" class="w-6 h-6"></i>
         </div>
