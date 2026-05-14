@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.80';
+const APP_VERSION = 'v4.81';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -13229,6 +13229,44 @@ async function renderAdminSettings() {
   const isProxySet = !!proxyUrl;
   const envVars = _valtownEnvVars();
 
+  // Freshdesk-Gruppen vorab laden, damit Sales/Order-Group-IDs als Dropdown auswählbar sind.
+  // Bei Fehler (kein Proxy, kein FD-Key) wird auf Text-Input zurückgefallen.
+  let fdGroups = null;
+  if (isProxySet) {
+    try {
+      const list = await proxyFetch('freshdesk/api/v2/groups', { method: 'GET' });
+      if (Array.isArray(list)) {
+        fdGroups = list
+          .map(g => ({ id: String(g.id), name: g.name || ('Gruppe ' + g.id), description: g.description || '' }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'de'));
+      }
+    } catch (e) {
+      console.warn('[AdminSettings] FD-Gruppen konnten nicht geladen werden:', e.message);
+    }
+  }
+  window._fdGroupsCache = fdGroups;
+
+  // Helper: rendert ein <select> mit allen FD-Gruppen + Default-Option, oder Fallback-Input
+  // wenn die Gruppen nicht geladen werden konnten.
+  const renderGroupSelect = ({ id, value, defaultLabel, extraAttrs = '', sizeClass = '' }) => {
+    if (!fdGroups) {
+      // Fallback: Text-Input wenn FD-Gruppen nicht verfügbar
+      return `<input type="text" ${extraAttrs} ${id ? `id="${id}"` : ''} value="${escapeHtml(value || '')}" placeholder="${escapeHtml(defaultLabel)}" class="px-2 py-1.5 border border-ink-200 rounded text-sm font-mono ${sizeClass}">`;
+    }
+    // Bei unbekannter ID (Wert existiert aber nicht in der Gruppen-Liste) eine Custom-Option hinzufügen
+    const knownIds = new Set(fdGroups.map(g => g.id));
+    const customOption = (value && !knownIds.has(String(value)))
+      ? `<option value="${escapeHtml(value)}" selected>⚠ Unbekannte ID: ${escapeHtml(value)}</option>`
+      : '';
+    return `
+      <select ${extraAttrs} ${id ? `id="${id}"` : ''} class="px-2 py-1.5 border border-ink-200 rounded text-sm bg-white ${sizeClass}">
+        <option value="">${escapeHtml(defaultLabel)}</option>
+        ${customOption}
+        ${fdGroups.map(g => `<option value="${escapeHtml(g.id)}" ${String(value) === g.id ? 'selected' : ''}>${escapeHtml(g.name)}${g.description ? ' · ' + escapeHtml(g.description.slice(0, 40)) : ''} (#${escapeHtml(g.id)})</option>`).join('')}
+      </select>
+    `;
+  };
+
   // Status-Tile-Helper
   const statusBadge = (ok, txt) => ok
     ? `<span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="check-circle-2" class="w-3 h-3"></i> ${escapeHtml(txt)}</span>`
@@ -13377,33 +13415,41 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         const orderGroupId = orderRec?.fields?.key_value || '';
         const companies = (APP_KEYS.companies || []);
         const anyGroupSet = !!(salesGroupId || orderGroupId) || companies.some(c => c.fd_sales_group_id || c.fd_order_group_id);
+        const groupsLoaded = !!fdGroups;
+        const groupsCount = fdGroups ? fdGroups.length : 0;
         return `
         <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
           ${stepHeader(5, 'Freshdesk-Gruppen für Anfragen + Bestellungen', anyGroupSet ? statusBadge(true, 'konfiguriert') : statusBadge(false, 'leer'))}
           <div class="pl-11">
             <p class="text-sm text-ink-700 mb-3">Die Anfragen- und Bestellungen-Listen filtern Tickets nach Freshdesk-Gruppe. Pro Mandant kann eine eigene Gruppe gesetzt werden — die globalen Defaults darunter werden verwendet, wenn der Mandant keinen eigenen Wert hat.</p>
 
-            <button type="button" onclick="loadFreshdeskGroupsList(this)" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-1.5 text-xs font-medium hover:bg-ink-50 flex items-center gap-1.5 mb-3">
-              <i data-lucide="list" class="w-3.5 h-3.5"></i> Verfügbare Freshdesk-Gruppen laden
-            </button>
-            <div id="fdGroupsListHelper" class="mb-3"></div>
+            ${groupsLoaded
+              ? `<div class="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3 text-xs text-emerald-800 flex items-center gap-2">
+                  <i data-lucide="check-circle-2" class="w-4 h-4 shrink-0"></i>
+                  <span><strong>${groupsCount}</strong> Freshdesk-Gruppe${groupsCount===1?'':'n'} geladen — wähle unten per Dropdown aus.</span>
+                  <button type="button" onclick="renderAdminSettings()" class="ml-auto text-[11px] text-emerald-700 hover:text-emerald-900 underline">neu laden</button>
+                </div>`
+              : `<div class="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 text-xs text-amber-900 flex items-center gap-2">
+                  <i data-lucide="alert-circle" class="w-4 h-4 shrink-0"></i>
+                  <span>Freshdesk-Gruppen konnten nicht geladen werden — IDs bitte manuell eintragen. Proxy + FD-Key prüfen.</span>
+                </div>`}
 
             <!-- Globale Defaults -->
             <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-3">
               <p class="text-[11px] uppercase font-bold tracking-wider text-ink-500 mb-2">Globale Defaults (Fallback wenn Mandant keinen Wert hat)</p>
               <div class="grid sm:grid-cols-2 gap-2">
                 <div>
-                  <label class="block text-[11px] text-ink-600 mb-1">Sales-Group-ID (für Anfragen)</label>
+                  <label class="block text-[11px] text-ink-600 mb-1">Sales-Gruppe (für Anfragen)</label>
                   <div class="flex gap-1">
-                    <input type="text" id="settingsSalesGroupId" value="${escapeHtml(salesGroupId)}" placeholder="z.B. 12000123456" class="flex-1 min-w-0 px-2 py-1.5 border border-ink-200 rounded text-sm font-mono">
-                    <button type="button" onclick="saveSalesGroupId()" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 text-xs"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>
+                    ${renderGroupSelect({ id: 'settingsSalesGroupId', value: salesGroupId, defaultLabel: '— keine Default-Sales-Gruppe —', sizeClass: 'flex-1 min-w-0' })}
+                    <button type="button" onclick="saveSalesGroupId()" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 text-xs shrink-0"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>
                   </div>
                 </div>
                 <div>
-                  <label class="block text-[11px] text-ink-600 mb-1">Bestellungen-Group-ID (für Auftragsbearbeitung)</label>
+                  <label class="block text-[11px] text-ink-600 mb-1">Bestellungen-Gruppe (für Auftragsbearbeitung)</label>
                   <div class="flex gap-1">
-                    <input type="text" id="settingsOrderGroupId" value="${escapeHtml(orderGroupId)}" placeholder="z.B. 12000123457" class="flex-1 min-w-0 px-2 py-1.5 border border-ink-200 rounded text-sm font-mono">
-                    <button type="button" onclick="saveOrderGroupId()" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 text-xs"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>
+                    ${renderGroupSelect({ id: 'settingsOrderGroupId', value: orderGroupId, defaultLabel: '— keine Default-Bestellungen-Gruppe —', sizeClass: 'flex-1 min-w-0' })}
+                    <button type="button" onclick="saveOrderGroupId()" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 text-xs shrink-0"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>
                   </div>
                 </div>
               </div>
@@ -13412,22 +13458,27 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
             <!-- Per-Mandant -->
             <p class="text-[11px] uppercase font-bold tracking-wider text-ink-500 mb-2">Pro Mandant — Override (leer lassen = Default oben benutzen)</p>
             <div class="bg-white border border-ink-200 rounded-lg overflow-hidden">
-              <div class="grid grid-cols-[1fr,1fr,1fr,auto] gap-1 px-2 py-1.5 bg-ink-50 border-b border-ink-200 text-[10px] uppercase tracking-wider text-ink-500 font-semibold">
+              <div class="grid grid-cols-[1fr,1.4fr,1.4fr,auto] gap-1 px-2 py-1.5 bg-ink-50 border-b border-ink-200 text-[10px] uppercase tracking-wider text-ink-500 font-semibold">
                 <span>Mandant</span>
-                <span>Sales-Group (Anfragen)</span>
-                <span>Order-Group (Bestellungen)</span>
+                <span>Sales-Gruppe (Anfragen)</span>
+                <span>Order-Gruppe (Bestellungen)</span>
                 <span></span>
               </div>
-              ${companies.length === 0 ? '<p class="text-xs text-ink-500 italic p-3">Keine Mandanten geladen.</p>' : companies.map(c => `
-                <div class="grid grid-cols-[1fr,1fr,1fr,auto] gap-1 px-2 py-1.5 items-center border-b border-ink-100 last:border-b-0" data-fd-row-company="${c.id}">
+              ${companies.length === 0 ? '<p class="text-xs text-ink-500 italic p-3">Keine Mandanten geladen.</p>' : companies.map(c => {
+                // Pro Zeile: zeige Default-Gruppen-Namen als Placeholder/Label
+                const salesDefaultName = fdGroups ? (fdGroups.find(g => g.id === String(salesGroupId))?.name || salesGroupId || 'kein Default') : (salesGroupId || 'kein Default');
+                const orderDefaultName = fdGroups ? (fdGroups.find(g => g.id === String(orderGroupId))?.name || orderGroupId || 'kein Default') : (orderGroupId || 'kein Default');
+                return `
+                <div class="grid grid-cols-[1fr,1.4fr,1.4fr,auto] gap-1 px-2 py-1.5 items-center border-b border-ink-100 last:border-b-0" data-fd-row-company="${c.id}">
                   <span class="text-xs font-medium text-ink-900 truncate" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
-                  <input type="text" data-fd-input="sales" value="${escapeHtml(c.fd_sales_group_id || '')}" placeholder="${escapeHtml(salesGroupId || '— Default —')}" class="px-2 py-1 border border-ink-200 rounded text-xs font-mono w-full min-w-0">
-                  <input type="text" data-fd-input="order" value="${escapeHtml(c.fd_order_group_id || '')}" placeholder="${escapeHtml(orderGroupId || '— Default —')}" class="px-2 py-1 border border-ink-200 rounded text-xs font-mono w-full min-w-0">
-                  <button type="button" onclick="saveCompanyFdGroups('${c.id}', this)" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 py-1 text-xs" title="Speichern">
+                  ${renderGroupSelect({ value: c.fd_sales_group_id || '', defaultLabel: '— Default: ' + salesDefaultName + ' —', extraAttrs: 'data-fd-input="sales"', sizeClass: 'w-full min-w-0 text-xs' })}
+                  ${renderGroupSelect({ value: c.fd_order_group_id || '', defaultLabel: '— Default: ' + orderDefaultName + ' —', extraAttrs: 'data-fd-input="order"', sizeClass: 'w-full min-w-0 text-xs' })}
+                  <button type="button" onclick="saveCompanyFdGroups('${c.id}', this)" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 py-1 text-xs shrink-0" title="Speichern">
                     <i data-lucide="save" class="w-3.5 h-3.5"></i>
                   </button>
                 </div>
-              `).join('')}
+              `;
+              }).join('')}
             </div>
             <p class="text-[11px] text-ink-500 mt-2 italic">Die Felder werden bei Bedarf automatisch auf der Company-Tabelle angelegt (<code>fd_sales_group_id</code>, <code>fd_order_group_id</code>).</p>
           </div>
