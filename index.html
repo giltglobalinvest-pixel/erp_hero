@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.99';
+const APP_VERSION = 'v5.00';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -19414,6 +19414,115 @@ async function nextQuoteNo(companyId) {
   return 'Q-' + (max + 1);
 }
 
+// Liefert die Basis-Nummer eines Angebots ohne Varianten-Suffix.
+// Beispiele: "Q-1024" → "Q-1024", "Q-1024.3" → "Q-1024"
+function _extractQuoteBase(quoteNo) {
+  const m = String(quoteNo || '').match(/^(Q-\d+)(?:\.\d+)?$/);
+  return m ? m[1] : (quoteNo || '');
+}
+
+// Sucht die naechste freie Varianten-Nummer fuer eine gegebene Basis.
+// Beispiel: Basis "Q-1024" mit existierenden Varianten Q-1024.1, Q-1024.2 → "Q-1024.3"
+async function nextQuoteVariantNo(baseQuoteNo, companyId) {
+  const base = _extractQuoteBase(baseQuoteNo);
+  const all = await readData('Quote');
+  const inCo = all.filter(q => (q.fields.company_id || []).includes(companyId));
+  const reg = new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.(\\d+)$');
+  let maxVariant = 0;
+  inCo.forEach(q => {
+    const m = (q.fields.quote_no || '').match(reg);
+    if (m) { const n = parseInt(m[1], 10); if (n > maxVariant) maxVariant = n; }
+  });
+  return base + '.' + (maxVariant + 1);
+}
+
+// Legt eine Variante eines bestehenden Angebots an. Kopiert alle relevanten Felder
+// + QuoteItems, vergibt neue Nummer X.N, setzt Status auf Entwurf, oeffnet danach das Modal.
+async function createQuoteVariant(quoteId) {
+  if (!quoteId) return;
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Mandant fehlt', 'error'); return; }
+  if (!confirm('Variante dieses Angebots anlegen?\n\nDie Variante bekommt die Nummer X.N und kann unabhängig vom Original bearbeitet werden.')) return;
+  try {
+    // ensureFields für parent_quote_no (idempotent)
+    try { await ensureFields('Quote', [{ name: 'parent_quote_no', type: 'singleLineText' }]); } catch (_) {}
+    const all = await readData('Quote');
+    const original = all.find(q => q.id === quoteId);
+    if (!original) throw new Error('Original-Angebot nicht gefunden');
+    const of = original.fields || {};
+    const newQuoteNo = await nextQuoteVariantNo(of.quote_no, cur.id);
+    const today = new Date();
+    const valid = new Date(); valid.setDate(today.getDate() + 30);
+    const iso = d => d.toISOString().slice(0, 10);
+
+    // Whitelist der zu uebernehmenden Felder — keine Formulas/Lookups, keine Versand-Daten
+    const COPY_FIELDS = [
+      'quote_title', 'description', 'notes',
+      'payment_terms', 'delivery_terms',
+      'layout_variant', 'bundle_id', 'layout_offsets', 'force_closing_new_page',
+      'delivery_address_id', 'invoice_address_id',
+      'custom_values', 'attachment_ids', 'ai_summary', 'freshdesk_ticket_id',
+      'intro_template_id', 'closing_template_id', 'title_template_id'
+    ];
+    const newFields = {
+      quote_no:        newQuoteNo,
+      status:          'Entwurf',
+      date:            iso(today),
+      valid_until:     iso(valid),
+      company_id:      [cur.id],
+      parent_quote_no: _extractQuoteBase(of.quote_no || '')
+    };
+    COPY_FIELDS.forEach(k => {
+      if (of[k] !== undefined && of[k] !== null && of[k] !== '') newFields[k] = of[k];
+    });
+    // Linked-Record-Felder
+    if (Array.isArray(of.customer_id) && of.customer_id.length) newFields.customer_id = [...of.customer_id];
+    if (Array.isArray(of.contact_id)  && of.contact_id.length)  newFields.contact_id  = [...of.contact_id];
+
+    // Resilient write — bei Schema-Mismatch optionale Felder iterativ weglassen
+    const OPT_FALLBACK = ['attachment_ids', 'force_closing_new_page', 'custom_values', 'bundle_id', 'layout_variant', 'layout_offsets', 'ai_summary', 'quote_title', 'parent_quote_no', 'freshdesk_ticket_id', 'intro_template_id', 'closing_template_id', 'title_template_id'];
+    let created = null, lastErr = null;
+    const writeFields = { ...newFields };
+    for (let i = 0; i <= OPT_FALLBACK.length; i++) {
+      try { created = await writeData('Quote', writeFields); break; }
+      catch (err) {
+        lastErr = err;
+        if (!/array of record|record id|invalid value|cannot accept/i.test(err.message)) throw err;
+        if (i >= OPT_FALLBACK.length) throw err;
+        delete writeFields[OPT_FALLBACK[i]];
+      }
+    }
+    if (!created) throw lastErr || new Error('Variante konnte nicht angelegt werden');
+
+    // QuoteItems duplizieren
+    let copiedItems = 0;
+    try {
+      const allItems = await readData('QuoteItem');
+      const originalItems = allItems.filter(it => (it.fields.quote_id || []).includes(quoteId))
+        .sort((a, b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+      const ITEM_COPY = ['article_id', 'pos', 'qty', 'unit', 'unit_price_net', 'discount_pct', 'vat_rate', 'description', 'line_total_net', 'label', 'supplier_id', 'purchase_price'];
+      for (const it of originalItems) {
+        const itf = { quote_id: [created.id] };
+        const oif = it.fields || {};
+        ITEM_COPY.forEach(k => {
+          if (oif[k] !== undefined && oif[k] !== null && oif[k] !== '') itf[k] = oif[k];
+        });
+        if (Array.isArray(oif.article_id) && oif.article_id.length) itf.article_id = [...oif.article_id];
+        if (Array.isArray(oif.supplier_id) && oif.supplier_id.length) itf.supplier_id = [...oif.supplier_id];
+        try { await writeData('QuoteItem', itf); copiedItems++; }
+        catch (e) { console.warn('[variant] Item-Copy:', e.message); }
+      }
+    } catch (e) { console.warn('[variant] Items lesen:', e.message); }
+
+    toast('✓ Variante ' + newQuoteNo + ' angelegt' + (copiedItems ? ' · ' + copiedItems + ' Positionen' : ''), 'success', 5000);
+    closeModal();
+    setTimeout(() => { if (typeof openQuoteModal === 'function') openQuoteModal(created.id); }, 250);
+  } catch (e) {
+    console.error('[createQuoteVariant]', e);
+    toast('Variante fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+  }
+}
+
 async function openInquiryWizard() {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
@@ -21451,6 +21560,19 @@ async function openQuoteModal(id) {
         <span class="text-xs text-ink-500">${escapeHtml(cur.name)}</span>
       </div>
 
+      ${(() => {
+        // Varianten-Banner: wenn dieses Quote eine Variante ist (X.N) — zeig die Basis als Hinweis
+        const qn = (f.quote_no || '');
+        const variantMatch = qn.match(/^(Q-\d+)\.(\d+)$/);
+        if (variantMatch) {
+          return `<div class="mb-3 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 text-xs text-purple-900 flex items-center gap-2">
+            <i data-lucide="copy-plus" class="w-4 h-4 shrink-0"></i>
+            <span>Dies ist <strong>Variante .${escapeHtml(variantMatch[2])}</strong> von <strong>${escapeHtml(variantMatch[1])}</strong>${f.parent_quote_no ? '' : ''}</span>
+          </div>`;
+        }
+        return '';
+      })()}
+
       ${(f.freshdesk_ticket_id || f.ai_summary) ? _renderQuoteFreshdeskBox(f) : ''}
 
       ${(window._quoteBundles || []).length > 0 ? `
@@ -21633,6 +21755,7 @@ async function openQuoteModal(id) {
 
       <div class="grid grid-cols-2 sm:flex sm:justify-end gap-2 sm:flex-wrap mt-4">
         <button type="button" onclick="closeModal()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 col-span-2 sm:col-span-1">Abbrechen</button>
+        ${id ? `<button type="button" onclick="createQuoteVariant('${id}')" class="px-3 py-2.5 text-sm rounded-lg border border-purple-300 text-purple-700 hover:bg-purple-50 flex items-center justify-center gap-1.5" title="Variante anlegen (X.N)"><i data-lucide="copy-plus" class="w-4 h-4"></i> Variante</button>` : ''}
         ${id ? `<button type="button" onclick="toggleQuoteArchive('${id}', ${(f.status || 'Entwurf') !== 'archiviert'});closeModal();" class="px-3 py-2.5 text-sm rounded-lg border border-ink-200 hover:bg-ink-50 flex items-center justify-center gap-1.5" title="${(f.status || 'Entwurf') === 'archiviert' ? 'Wiederherstellen' : 'Archivieren'}"><i data-lucide="${(f.status || 'Entwurf') === 'archiviert' ? 'archive-restore' : 'archive'}" class="w-4 h-4"></i> ${(f.status || 'Entwurf') === 'archiviert' ? 'Wiederherstellen' : 'Archivieren'}</button>` : ''}
         <button type="button" onclick="exportQuoteAsPdf()" class="hidden lg:inline-flex px-3 py-2.5 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 items-center justify-center gap-1.5"><i data-lucide="file-down" class="w-4 h-4"></i> PDF</button>
         <button type="button" onclick="emailQuote()" class="px-3 py-2.5 text-sm rounded-lg border border-ink-300 text-ink-700 hover:bg-ink-50 flex items-center justify-center gap-1.5"><i data-lucide="mail" class="w-4 h-4"></i> E-Mail</button>
