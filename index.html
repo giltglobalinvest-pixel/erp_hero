@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.90';
+const APP_VERSION = 'v4.91';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3808,18 +3808,20 @@ async function openAiQuoteCreationModal(ticketId) {
         </div>
       </div>
 
-      <!-- Eingabezeile -->
-      <div id="aqcInputWrap" class="relative">
-        <textarea id="aqcInput" rows="2" placeholder="Antwort oder neue Info… (Enter = Zeilenumbruch, ⌘/Strg+Enter = senden)" class="w-full px-3 py-2 pr-20 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30"
+      <!-- Eingabezeile: Textarea oben, große Buttons unten — mobile-friendly -->
+      <div id="aqcInputWrap">
+        <textarea id="aqcInput" rows="3" placeholder="Tippe oder sprich deine Antwort…" class="w-full px-3 py-2.5 border border-ink-200 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-purple-500/30"
           onkeydown="if(event.key==='Enter' && (event.metaKey||event.ctrlKey)){event.preventDefault();_aqcSendChatMessage();}"></textarea>
-        <div class="absolute top-2 right-2 flex gap-1">
+        <div class="flex gap-2 mt-2">
           ${speechSupported ? `
-            <button type="button" id="aqcMicBtn" onclick="_aqcToggleMic()" title="Sprache" class="p-1.5 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition">
-              <i data-lucide="mic" class="w-4 h-4"></i>
+            <button type="button" id="aqcMicBtn" onclick="_aqcToggleMic()" title="Sprache" class="shrink-0 px-3 py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium">
+              <i data-lucide="mic" class="w-5 h-5"></i>
+              <span class="hidden sm:inline">Sprechen</span>
             </button>
           ` : ''}
-          <button type="button" id="aqcSendBtn" onclick="_aqcSendChatMessage()" title="Senden" class="p-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition">
-            <i data-lucide="send" class="w-4 h-4"></i>
+          <button type="button" id="aqcSendBtn" onclick="_aqcSendChatMessage()" title="Senden (⌘/Strg+Enter)" class="flex-1 px-4 py-3 bg-purple-600 hover:bg-purple-700 active:bg-purple-800 text-white rounded-lg transition inline-flex items-center justify-center gap-2 text-base font-semibold">
+            <i data-lucide="send" class="w-5 h-5"></i>
+            <span>Senden</span>
           </button>
         </div>
       </div>
@@ -3841,6 +3843,53 @@ async function openAiQuoteCreationModal(ticketId) {
   if (window.lucide) lucide.createIcons();
   // Fokus aufs Input setzen
   setTimeout(() => document.getElementById('aqcInput')?.focus(), 80);
+  // Auto-Init: KI macht direkt nach Modal-Öffnung einen ersten Vorschlag (Ticket + Anhänge analysieren)
+  setTimeout(() => { _aqcAutoStart().catch(err => console.warn('[aqc] Auto-Init fehlgeschlagen:', err.message)); }, 150);
+}
+
+// Beim Öffnen automatisch erste KI-Analyse triggern — User muss nicht erst was tippen
+async function _aqcAutoStart() {
+  if (_aqcState.chatHistory.length > 0) return; // schon Chat-Verlauf da
+  // System-Prompt bauen
+  const status = document.getElementById('aqcStatus');
+  if (status) status.textContent = '🤖 Analysiere Ticket + Anhänge …';
+  try {
+    _aqcState.systemPrompt = await _aqcBuildSystemPrompt();
+  } catch (e) {
+    if (status) status.textContent = '';
+    console.warn('[aqc] Auto-Start Kontext-Load fehlgeschlagen:', e.message);
+    return;
+  }
+  // Initiale User-Message: KI soll Ticket analysieren + Vorschlag machen oder fragen
+  const initialMsg = 'Analysiere bitte das Ticket FT-' + _aqcState.ticketId + ' (Betreff, Nachrichten, Anhänge soweit verfügbar) und mach mir einen ersten Vorschlag fürs Angebot. Wenn dir etwas Wichtiges fehlt, frag direkt nach.';
+  _aqcState.chatHistory.push({ role: 'user', content: initialMsg, _hidden: true });
+  _aqcRenderChatLog();
+  // Send via existing chat-send-logik (analog _aqcSendChatMessage aber ohne Input-Lesen)
+  _aqcState.analyzing = true;
+  const sendBtn = document.getElementById('aqcSendBtn');
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i><span>Analysiere…</span>'; if (window.lucide) lucide.createIcons(); }
+  if (status) status.textContent = '🤖 KI denkt über das Ticket nach …';
+  try {
+    const reply = await askAIChat({ system: _aqcState.systemPrompt, messages: _aqcState.chatHistory }, { maxTokens: 2500, purpose: 'ai_quote_chat_init' });
+    const parsed = _aqcExtractCreateQuoteJson(reply);
+    if (parsed && parsed.action === 'create_quote') {
+      _aqcState.finalProposal = parsed;
+      _aqcState.chatHistory.push({ role: 'assistant', content: '✓ Erster Vorschlag basierend auf dem Ticket erstellt. Bitte prüfen oder anpassen.' });
+      _aqcRenderChatLog();
+      _aqcRenderPreview(parsed);
+    } else {
+      _aqcState.chatHistory.push({ role: 'assistant', content: (reply || '').trim() });
+      _aqcRenderChatLog();
+    }
+  } catch (err) {
+    console.error('[aqc] auto-start error:', err);
+    _aqcState.chatHistory.push({ role: 'assistant', content: '⚠ Auto-Analyse fehlgeschlagen — bitte tipp mir kurz wonach das Angebot aussehen soll.' });
+    _aqcRenderChatLog();
+  } finally {
+    _aqcState.analyzing = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = '<i data-lucide="send" class="w-5 h-5"></i><span>Senden</span>'; if (window.lucide) lucide.createIcons(); }
+    if (status) status.textContent = '';
+  }
 }
 
 function _aqcClose() {
@@ -3901,15 +3950,54 @@ function _aqcRenderMicBtn() {
   const btn = document.getElementById('aqcMicBtn');
   if (!btn) return;
   if (_aqcState.recording) {
-    btn.innerHTML = '<i data-lucide="square" class="w-4 h-4"></i>';
-    btn.className = 'absolute top-2 right-2 p-1.5 bg-red-500 hover:bg-red-600 text-white rounded-lg transition animate-pulse';
+    btn.innerHTML = '<i data-lucide="square" class="w-5 h-5"></i><span class="hidden sm:inline">Stop</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-red-500 hover:bg-red-600 text-white border border-red-600 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium animate-pulse';
     btn.title = 'Aufnahme stoppen';
   } else {
-    btn.innerHTML = '<i data-lucide="mic" class="w-4 h-4"></i>';
-    btn.className = 'absolute top-2 right-2 p-1.5 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition';
+    btn.innerHTML = '<i data-lucide="mic" class="w-5 h-5"></i><span class="hidden sm:inline">Sprechen</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium';
     btn.title = 'Spracheingabe starten';
   }
   if (window.lucide) lucide.createIcons();
+}
+
+// Findet ein "action":"create_quote" JSON-Objekt in einer KI-Antwort, auch wenn Prosa oder
+// Code-Fences drumherum sind. Liefert das geparste Objekt oder null.
+function _aqcExtractCreateQuoteJson(reply) {
+  if (!reply) return null;
+  let txt = String(reply).trim();
+  // Code-Fences entfernen (```json ... ``` oder ``` ... ```)
+  txt = txt.replace(/```[a-z]*\s*\n?/gi, '').replace(/```/g, '').trim();
+  // Erst direkt parsen versuchen
+  if (txt.startsWith('{')) {
+    try { const p = JSON.parse(txt); if (p && p.action === 'create_quote') return p; } catch (_) {}
+  }
+  // JSON-Block finden der "action":"create_quote" enthält — brace-matching damit nested objects sauber bleiben
+  const startIdx = txt.search(/\{[\s\S]*?"action"\s*:\s*"create_quote"/);
+  if (startIdx < 0) return null;
+  // Ab startIdx Klammern matchen
+  let depth = 0;
+  let endIdx = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = startIdx; i < txt.length; i++) {
+    const c = txt[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\') { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) { endIdx = i; break; }
+    }
+  }
+  if (endIdx < 0) return null;
+  const candidate = txt.slice(startIdx, endIdx + 1);
+  try { return JSON.parse(candidate); } catch (e) {
+    console.warn('[aqc] JSON-Extraktion fehlgeschlagen:', e.message, candidate.slice(0, 200));
+    return null;
+  }
 }
 
 // Rendert die Chat-Bubbles aus _aqcState.chatHistory
@@ -3925,6 +4013,7 @@ function _aqcRenderChatLog() {
     </div>`
   ];
   for (const m of _aqcState.chatHistory) {
+    if (m._hidden) continue; // versteckte Auto-Init-Message
     if (m.role === 'user') {
       html.push(`<div class="flex justify-end">
         <div class="bg-purple-600 text-white rounded-xl px-3 py-2 text-xs max-w-[85%] whitespace-pre-wrap break-words">${escapeHtml(m.content)}</div>
@@ -3941,7 +4030,7 @@ function _aqcRenderChatLog() {
   log.scrollTop = log.scrollHeight;
 }
 
-// Baut den System-Prompt mit Ticket-Kontext, Bundles, Katalog. Wird beim ersten Chat-Turn gebaut.
+// Baut den System-Prompt mit Ticket-Kontext, Bundles, Katalog, Anhängen. Wird beim ersten Chat-Turn gebaut.
 async function _aqcBuildSystemPrompt() {
   const ticketId = _aqcState.ticketId;
   const cur = getCurrentCompany();
@@ -3953,6 +4042,15 @@ async function _aqcBuildSystemPrompt() {
     const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
     conversations = (Array.isArray(conv) ? conv : []).slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
   } catch (_) {}
+
+  // Anhänge sammeln (Bilder werden später beim ersten Vision-Call mitgeschickt; hier nur Metadaten in den Prompt)
+  let allAttachments = [];
+  try {
+    if (typeof _collectFreshdeskAttachmentsFrom === 'function') {
+      allAttachments = _collectFreshdeskAttachmentsFrom(ticket, conversations) || [];
+    }
+  } catch (_) {}
+  _aqcState.ticketAttachments = allAttachments;
 
   // ERP-Match (Kunde + Kontakt)
   const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
@@ -3988,6 +4086,36 @@ async function _aqcBuildSystemPrompt() {
     return '### ' + dir + ' (' + (c.created_at || '').slice(0, 10) + '):\n' + _fdHtmlToText(c.body || c.body_text || '').slice(0, 800);
   }).join('\n\n');
 
+  // Vergangene KI-Angebot-Chats holen (lernen aus früheren Angeboten gleichen Mandanten)
+  let pastExamples = '';
+  try {
+    if (typeof readData === 'function') {
+      const past = await readData('AiQuoteChatLearning').catch(() => []);
+      const relevant = past
+        .filter(r => (r.fields?.company_id || []).includes(cur?.id))
+        .sort((a, b) => (b.createdTime || '').localeCompare(a.createdTime || ''))
+        .slice(0, 3);
+      if (relevant.length) {
+        pastExamples = '\n═══ FRÜHERE ANGEBOTE (zum Lernen) ═══\n' + relevant.map((r, i) => {
+          const f = r.fields || {};
+          return `Beispiel ${i+1} (${f.customer_name || '?'} · ${f.summary || ''}):\nUser-Brief: ${(f.first_user_message || '').slice(0, 300)}\nKI-Ergebnis: ${(f.final_summary || '').slice(0, 300)}`;
+        }).join('\n\n') + '\n';
+      }
+    }
+  } catch (_) {}
+  _aqcState.pastExamplesUsed = pastExamples ? true : false;
+
+  // Anhang-Info in den Prompt
+  let attHint = '';
+  if (allAttachments.length) {
+    const imgs = allAttachments.filter(a => /^image\//i.test(a.content_type || ''));
+    const others = allAttachments.filter(a => !/^image\//i.test(a.content_type || ''));
+    attHint = '\n═══ ANHÄNGE AM TICKET ═══\n';
+    if (imgs.length)   attHint += imgs.map(a => '🖼 ' + (a.name || '?') + ' (' + (a.content_type || '?') + ')').join('\n') + '\n';
+    if (others.length) attHint += others.map(a => '📎 ' + (a.name || '?') + ' (' + (a.content_type || '?') + ', ' + (a.size ? Math.round(a.size/1024)+' kB' : '?') + ')').join('\n') + '\n';
+    attHint += '(Bilder werden bei Bedarf via Vision analysiert — frag mich gezielt nach was du in den Bildern siehst.)\n';
+  }
+
   return `Du bist freundlicher Vertriebsassistent bei FLP Lift Parts GmbH (B2B-Großhandel für Aufzug-Ersatzteile in Deutschland). Sprich locker auf Deutsch wie ein Kollege.
 
 ═══ ANGEBOTS-KONTEXT ═══
@@ -4000,8 +4128,7 @@ Anrede: ${erpState.contact?.fields?.gender || '?'}
 Erste Nachricht:
 ${ticketBody || '(leer)'}
 
-${convSnippet ? 'Bisheriger Verlauf:\n' + convSnippet + '\n' : ''}
-
+${convSnippet ? 'Bisheriger Verlauf:\n' + convSnippet + '\n' : ''}${attHint}${pastExamples}
 ═══ VERFÜGBARE BUNDLES ═══
 ${bundles.length ? bundles.map(b => {
   const f = b.fields || {};
@@ -4093,13 +4220,7 @@ async function _aqcSendChatMessage() {
 
   try {
     const reply = await askAIChat({ system: _aqcState.systemPrompt, messages: _aqcState.chatHistory }, { maxTokens: 2500, purpose: 'ai_quote_chat' });
-    const cleaned = (reply || '').trim().replace(/^```[a-z]*\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-    // Versuchen als JSON zu parsen — wenn Anfang { ist
-    let parsed = null;
-    if (cleaned.startsWith('{')) {
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      try { parsed = JSON.parse(m ? m[0] : cleaned); } catch (_) { parsed = null; }
-    }
+    const parsed = _aqcExtractCreateQuoteJson(reply);
     if (parsed && parsed.action === 'create_quote') {
       // Final-Vorschlag — Preview rendern
       _aqcState.finalProposal = parsed;
@@ -4109,7 +4230,7 @@ async function _aqcSendChatMessage() {
       _aqcRenderPreview(parsed);
     } else {
       // Normale Antwort — Frage / Kommentar
-      _aqcState.chatHistory.push({ role: 'assistant', content: reply });
+      _aqcState.chatHistory.push({ role: 'assistant', content: (reply || '').trim() });
       _aqcRenderChatLog();
     }
   } catch (err) {
@@ -4390,6 +4511,45 @@ function _aqcResetForRefinement() {
   _aqcState.chatHistory.push({ role: 'assistant', content: '(Vorschlag verworfen — was soll noch angepasst werden?)' });
   _aqcRenderChatLog();
   document.getElementById('aqcInput')?.focus();
+}
+
+// Speichert den abgeschlossenen KI-Angebot-Chat damit zukünftige Sessions daraus lernen.
+// Best-effort, blockiert nichts.
+async function _aqcSaveLearning(companyId, quoteNo, parsed, erpState) {
+  try {
+    if (typeof ensureTable === 'function') {
+      await ensureTable('AiQuoteChatLearning', [
+        { name: 'company_id',         type: 'multipleRecordLinks', options: { linkedTableId: '' } }
+      ]).catch(() => {});
+    }
+    if (typeof ensureFields === 'function') {
+      await ensureFields('AiQuoteChatLearning', [
+        { name: 'quote_no',           type: 'singleLineText' },
+        { name: 'customer_name',      type: 'singleLineText' },
+        { name: 'first_user_message', type: 'multilineText' },
+        { name: 'chat_json',          type: 'multilineText' },
+        { name: 'proposal_json',      type: 'multilineText' },
+        { name: 'summary',            type: 'multilineText' },
+        { name: 'final_summary',      type: 'multilineText' }
+      ]).catch(() => {});
+    }
+    // Erste sichtbare User-Message (nicht die hidden auto-init)
+    const firstUserMsg = (_aqcState.chatHistory || []).find(m => m.role === 'user' && !m._hidden)?.content || '';
+    const fields = {
+      company_id:        [companyId],
+      quote_no:          quoteNo,
+      customer_name:     erpState?.customer?.fields?.name1 || '',
+      first_user_message: firstUserMsg.slice(0, 1500),
+      chat_json:         JSON.stringify(_aqcState.chatHistory || []).slice(0, 8000),
+      proposal_json:     JSON.stringify(parsed || {}).slice(0, 8000),
+      summary:           parsed?.summary_for_user || '',
+      final_summary:     (parsed?.quote_title || '') + ' — ' + ((parsed?.items || []).length) + ' Position(en)' + (parsed?.lieferzeit ? ', Lieferzeit ' + parsed.lieferzeit : '')
+    };
+    await writeData('AiQuoteChatLearning', fields);
+    console.log('[aqc] Learning-Record gespeichert für', quoteNo);
+  } catch (e) {
+    console.warn('[aqc] Learning konnte nicht gespeichert werden:', e.message);
+  }
 }
 
 // Loest die Templates eines Bundles auf (Titel/Einleitung/Schluss) inkl. Variablen-Substitution.
@@ -4694,6 +4854,9 @@ async function _aqcCreateQuote() {
     if (inlineItemsCount > 0)   parts2.push(inlineItemsCount + ' vorgangsbezogen');
     if (itemErrors > 0)         parts2.push(itemErrors + ' Item-Fehler');
     toast(parts2.join(' · '), itemErrors > 0 ? 'warn' : 'success', 6500);
+
+    // Learning: Chat-Verlauf + Ergebnis speichern damit zukünftige KI-Calls daraus lernen
+    try { _aqcSaveLearning(cur.id, quoteNo, parsed, erpState).catch(() => {}); } catch (_) {}
     closeTopModal();
     // Direkt das Quote-Modal öffnen damit User es prüfen + versenden kann
     setTimeout(() => {
