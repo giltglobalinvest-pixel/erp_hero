@@ -462,6 +462,9 @@
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="anfragen">
               <i data-lucide="inbox" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Anfragen</span>
             </button>
+            <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="kundenbestellungen">
+              <i data-lucide="shopping-bag" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Bestellungen</span>
+            </button>
             <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/95 hover:bg-brand-600/30 transition" data-route="angebote">
               <i data-lucide="file-text" class="w-4 h-4"></i><span class="text-sm flex-1 text-left">Angebote</span>
             </button>
@@ -626,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.79';
+const APP_VERSION = 'v4.80';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -686,6 +689,9 @@ const APP_KEYS = {
   freshdeskProxyUrl: null,
   freshdeskProxyToken: null,
   freshdeskSalesGroupId: null,
+  // Group-ID für die "Bestellungen / Auftragsbearbeitung"-Tickets (analog zu Sales).
+  // Wird per Mandant überschrieben via Company.fd_order_group_id.
+  freshdeskOrderGroupId: null,
   // Komma-getrennte Ticket-Typen-Liste, leer = alle Typen
   freshdeskTicketTypes: null,
   // Subdomain (z.B. "flpliftparts") für Direktlinks zum Ticket in Freshdesk-UI
@@ -928,6 +934,7 @@ async function loadProjectKeys() {
         if (f.key_name === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl      = f.key_value;
         if (f.key_name === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken    = f.key_value;
         if (f.key_name === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId  = f.key_value;
+        if (f.key_name === 'freshdeskOrderGroupId')  APP_KEYS.freshdeskOrderGroupId  = f.key_value;
         if (f.key_name === 'freshdeskTicketTypes')   APP_KEYS.freshdeskTicketTypes   = f.key_value;
         if (f.key_name === 'freshdeskDomain')        APP_KEYS.freshdeskDomain        = f.key_value;
         if (f.key_name === 'valtownKey')             APP_KEYS.valtownKey             = f.key_value;
@@ -1107,7 +1114,12 @@ async function loadCompanies() {
   const res = await fetch(url, { headers });
   if (!res.ok) { APP_KEYS.companies = []; APP_KEYS.currentCompanyId = null; return; }
   const data = await res.json();
-  const all = (data.records || []).map(r => ({ id: r.id, name: r.fields.name || '–' }))
+  const all = (data.records || []).map(r => ({
+    id: r.id,
+    name: r.fields.name || '–',
+    fd_sales_group_id: String(r.fields.fd_sales_group_id || '').trim(),
+    fd_order_group_id: String(r.fields.fd_order_group_id || '').trim()
+  }))
     .sort((a, b) => a.name.localeCompare(b.name, 'de'));
 
   if (APP_KEYS.user?.is_admin) {
@@ -1132,6 +1144,17 @@ function getCurrentCompany() {
   return APP_KEYS.companies.find(c => c.id === APP_KEYS.currentCompanyId) || null;
 }
 
+// Liefert die Freshdesk-Group-ID für die "Anfragen"-Liste — Mandant-spezifisch, sonst globaler Default.
+function getCurrentSalesGroupId() {
+  const cur = getCurrentCompany();
+  return (cur?.fd_sales_group_id || APP_KEYS.freshdeskSalesGroupId || '').trim();
+}
+// Liefert die Freshdesk-Group-ID für die "Bestellungen / Auftragsbearbeitung"-Liste — Mandant-spezifisch, sonst globaler Default.
+function getCurrentOrderGroupId() {
+  const cur = getCurrentCompany();
+  return (cur?.fd_order_group_id || APP_KEYS.freshdeskOrderGroupId || '').trim();
+}
+
 function setCurrentCompany(companyId) {
   if (!APP_KEYS.companies.find(c => c.id === companyId)) return;
   APP_KEYS.currentCompanyId = companyId;
@@ -1145,6 +1168,7 @@ function setCurrentCompany(companyId) {
   if (_currentRoute === 'artikel')     renderArticles();
   if (_currentRoute === 'kontakte')    renderContactsList();
   if (_currentRoute === 'anfragen')    renderInquiries();
+  if (_currentRoute === 'kundenbestellungen') renderOrderInquiries();
   if (_currentRoute === 'angebote')    renderQuotes();
   if (_currentRoute === 'auftraege')   renderOrders();
   if (_currentRoute === 'lieferscheine') renderDeliveryNotes();
@@ -3330,26 +3354,31 @@ async function loadFreshdeskTicketsPreview() {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  if (!APP_KEYS.freshdeskSalesGroupId) {
+  const inqMode = window._currentInquiriesMode || 'sales';
+  const modeGroupId = inqMode === 'order' ? getCurrentOrderGroupId() : getCurrentSalesGroupId();
+  if (!modeGroupId) {
+    const modeLabel = inqMode === 'order' ? 'Bestellungen / Auftragsbearbeitung' : 'Sales';
+    const fieldLabel = inqMode === 'order' ? 'Bestellungen-Gruppe' : 'Sales-Gruppe';
     wrap.innerHTML = `
       <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
-        <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> Sales-Group-ID fehlt</p>
-        <p>Damit nur Sales-Tickets geladen werden, brauche ich die Group-ID. Eintragen unter Admin → <strong>Einstellungen</strong> (Step 5).</p>
+        <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> ${escapeHtml(fieldLabel)}-Group-ID fehlt</p>
+        <p>Damit nur ${escapeHtml(modeLabel)}-Tickets geladen werden, brauche ich die Freshdesk-Group-ID. Eintragen unter Admin → <strong>Einstellungen</strong> → Freshdesk-Gruppen pro Mandant.</p>
         <p class="mt-2">ID herausfinden via Curl:</p>
         <code class="block mt-1 bg-amber-100 p-2 rounded text-[10px] break-all">curl -H "Authorization: Bearer DEIN_USER_KEY" ${escapeHtml(_proxyBase() || '')}/freshdesk/api/v2/groups</code>
       </div>`;
     if (window.lucide) lucide.createIcons();
     return;
   }
-  // Großer zentrierter Loading-State: drehender Kreis + "Lade Anfragen…"
+  // Großer zentrierter Loading-State: drehender Kreis + "Lade …"
+  const loadLabel = inqMode === 'order' ? 'Lade Bestellungen…' : 'Lade Anfragen…';
   wrap.innerHTML = `
     <div class="flex flex-col items-center justify-center py-16 px-4 gap-4">
       <div class="w-14 h-14 rounded-full border-[3px] border-ink-200 border-t-brand-500 animate-spin"></div>
-      <p class="text-sm text-ink-600 font-medium">Lade Anfragen…</p>
+      <p class="text-sm text-ink-600 font-medium">${escapeHtml(loadLabel)}</p>
     </div>
   `;
   try {
-    const groupId = APP_KEYS.freshdeskSalesGroupId;
+    const groupId = modeGroupId;
     // Status-Filter (siehe _inquiriesStatusFilterQuery) + optional Typ-Filter.
     // Search-API beschränkt auf 30 Ergebnisse pro Seite.
     const types = String(APP_KEYS.freshdeskTicketTypes || '')
@@ -10791,6 +10820,7 @@ function dispatchRoute(route) {
     case 'artikel':         renderArticles(); break;
     case 'kontakte':        renderContactsList(); break;
     case 'anfragen':        renderInquiries(); break;
+    case 'kundenbestellungen': renderOrderInquiries(); break;
     case 'angebote':        renderQuotes(); break;
     case 'auftraege':       renderOrders(); break;
     case 'lieferscheine':   renderDeliveryNotes(); break;
@@ -13341,21 +13371,69 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
-      <!-- ============ STEP 5 ============ -->
-      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-        ${stepHeader(5, 'Freshdesk Sales-Group-ID setzen', salesGroupId ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
-        <div class="pl-11">
-          <p class="text-sm text-ink-700 mb-2">Damit das Anfragen-Modul nur Tickets der Sales-Gruppe lädt, brauchen wir deren ID. <em>Sobald der Proxy steht</em>, kann man sie via:</p>
-          <code class="block bg-ink-900 text-emerald-200 text-[11px] font-mono p-3 rounded-lg mb-2 break-all">curl -H "Authorization: Bearer DEIN_USER_KEY" ${escapeHtml(proxyUrl || 'PROXY_URL')}/freshdesk/api/v2/groups</code>
-          <p class="text-sm text-ink-700 mb-2">…in der Antwort die ID der Gruppe „Sales" suchen und hier eintragen:</p>
-          <div class="flex gap-2 flex-wrap">
-            <input type="text" id="settingsSalesGroupId" value="${escapeHtml(salesGroupId)}" placeholder="z.B. 12000123456" class="flex-1 min-w-[200px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
-            <button type="button" onclick="saveSalesGroupId()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-              <i data-lucide="save" class="w-4 h-4"></i> Speichern
+      <!-- ============ STEP 5 — Freshdesk-Gruppen (Anfragen + Bestellungen, pro Mandant) ============ -->
+      ${(() => {
+        const orderRec = byName['freshdeskOrderGroupId'];
+        const orderGroupId = orderRec?.fields?.key_value || '';
+        const companies = (APP_KEYS.companies || []);
+        const anyGroupSet = !!(salesGroupId || orderGroupId) || companies.some(c => c.fd_sales_group_id || c.fd_order_group_id);
+        return `
+        <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+          ${stepHeader(5, 'Freshdesk-Gruppen für Anfragen + Bestellungen', anyGroupSet ? statusBadge(true, 'konfiguriert') : statusBadge(false, 'leer'))}
+          <div class="pl-11">
+            <p class="text-sm text-ink-700 mb-3">Die Anfragen- und Bestellungen-Listen filtern Tickets nach Freshdesk-Gruppe. Pro Mandant kann eine eigene Gruppe gesetzt werden — die globalen Defaults darunter werden verwendet, wenn der Mandant keinen eigenen Wert hat.</p>
+
+            <button type="button" onclick="loadFreshdeskGroupsList(this)" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-1.5 text-xs font-medium hover:bg-ink-50 flex items-center gap-1.5 mb-3">
+              <i data-lucide="list" class="w-3.5 h-3.5"></i> Verfügbare Freshdesk-Gruppen laden
             </button>
+            <div id="fdGroupsListHelper" class="mb-3"></div>
+
+            <!-- Globale Defaults -->
+            <div class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-3">
+              <p class="text-[11px] uppercase font-bold tracking-wider text-ink-500 mb-2">Globale Defaults (Fallback wenn Mandant keinen Wert hat)</p>
+              <div class="grid sm:grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-[11px] text-ink-600 mb-1">Sales-Group-ID (für Anfragen)</label>
+                  <div class="flex gap-1">
+                    <input type="text" id="settingsSalesGroupId" value="${escapeHtml(salesGroupId)}" placeholder="z.B. 12000123456" class="flex-1 min-w-0 px-2 py-1.5 border border-ink-200 rounded text-sm font-mono">
+                    <button type="button" onclick="saveSalesGroupId()" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 text-xs"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-[11px] text-ink-600 mb-1">Bestellungen-Group-ID (für Auftragsbearbeitung)</label>
+                  <div class="flex gap-1">
+                    <input type="text" id="settingsOrderGroupId" value="${escapeHtml(orderGroupId)}" placeholder="z.B. 12000123457" class="flex-1 min-w-0 px-2 py-1.5 border border-ink-200 rounded text-sm font-mono">
+                    <button type="button" onclick="saveOrderGroupId()" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 text-xs"><i data-lucide="save" class="w-3.5 h-3.5"></i></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Per-Mandant -->
+            <p class="text-[11px] uppercase font-bold tracking-wider text-ink-500 mb-2">Pro Mandant — Override (leer lassen = Default oben benutzen)</p>
+            <div class="bg-white border border-ink-200 rounded-lg overflow-hidden">
+              <div class="grid grid-cols-[1fr,1fr,1fr,auto] gap-1 px-2 py-1.5 bg-ink-50 border-b border-ink-200 text-[10px] uppercase tracking-wider text-ink-500 font-semibold">
+                <span>Mandant</span>
+                <span>Sales-Group (Anfragen)</span>
+                <span>Order-Group (Bestellungen)</span>
+                <span></span>
+              </div>
+              ${companies.length === 0 ? '<p class="text-xs text-ink-500 italic p-3">Keine Mandanten geladen.</p>' : companies.map(c => `
+                <div class="grid grid-cols-[1fr,1fr,1fr,auto] gap-1 px-2 py-1.5 items-center border-b border-ink-100 last:border-b-0" data-fd-row-company="${c.id}">
+                  <span class="text-xs font-medium text-ink-900 truncate" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
+                  <input type="text" data-fd-input="sales" value="${escapeHtml(c.fd_sales_group_id || '')}" placeholder="${escapeHtml(salesGroupId || '— Default —')}" class="px-2 py-1 border border-ink-200 rounded text-xs font-mono w-full min-w-0">
+                  <input type="text" data-fd-input="order" value="${escapeHtml(c.fd_order_group_id || '')}" placeholder="${escapeHtml(orderGroupId || '— Default —')}" class="px-2 py-1 border border-ink-200 rounded text-xs font-mono w-full min-w-0">
+                  <button type="button" onclick="saveCompanyFdGroups('${c.id}', this)" class="bg-brand-500 hover:bg-brand-600 text-white rounded px-2 py-1 text-xs" title="Speichern">
+                    <i data-lucide="save" class="w-3.5 h-3.5"></i>
+                  </button>
+                </div>
+              `).join('')}
+            </div>
+            <p class="text-[11px] text-ink-500 mt-2 italic">Die Felder werden bei Bedarf automatisch auf der Company-Tabelle angelegt (<code>fd_sales_group_id</code>, <code>fd_order_group_id</code>).</p>
           </div>
         </div>
-      </div>
+        `;
+      })()}
 
       <!-- ============ STEP 6 ============ -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
@@ -13650,16 +13728,119 @@ async function saveSalesGroupId() {
   const inp = document.getElementById('settingsSalesGroupId');
   if (!inp) return;
   const val = (inp.value || '').trim();
-  if (!val) return toast('ID ist leer', 'warn');
   try {
     const keys = await _fetchMasterBaseKeys();
     const existing = keys.find(r => r.fields.key_name === 'freshdeskSalesGroupId');
-    await _writeMasterBaseKey('freshdeskSalesGroupId', val, existing?.id || null);
-    APP_KEYS.freshdeskSalesGroupId = val;
-    toast('Sales-Group-ID gespeichert', 'success');
+    if (val) {
+      await _writeMasterBaseKey('freshdeskSalesGroupId', val, existing?.id || null);
+      APP_KEYS.freshdeskSalesGroupId = val;
+      toast('Sales-Group-ID gespeichert', 'success');
+    } else if (existing) {
+      await _deleteMasterBaseKey(existing.id);
+      APP_KEYS.freshdeskSalesGroupId = null;
+      toast('Sales-Group-ID entfernt', 'success');
+    }
     renderAdminSettings();
   } catch (e) {
     toast(e.message, 'error', 7000);
+  }
+}
+
+// Analog zu saveSalesGroupId — globaler Default für Bestellungen/Auftragsbearbeitung
+async function saveOrderGroupId() {
+  const inp = document.getElementById('settingsOrderGroupId');
+  if (!inp) return;
+  const val = (inp.value || '').trim();
+  try {
+    const keys = await _fetchMasterBaseKeys();
+    const existing = keys.find(r => r.fields.key_name === 'freshdeskOrderGroupId');
+    if (val) {
+      await _writeMasterBaseKey('freshdeskOrderGroupId', val, existing?.id || null);
+      APP_KEYS.freshdeskOrderGroupId = val;
+      toast('Bestellungen-Group-ID gespeichert', 'success');
+    } else if (existing) {
+      await _deleteMasterBaseKey(existing.id);
+      APP_KEYS.freshdeskOrderGroupId = null;
+      toast('Bestellungen-Group-ID entfernt', 'success');
+    }
+    renderAdminSettings();
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+  }
+}
+
+// Schreibt die per-Mandant FD-Group-IDs auf den Company-Record. Stellt vorher
+// sicher dass die beiden Felder auf der Tabelle existieren (idempotent).
+async function saveCompanyFdGroups(companyId, btnEl) {
+  if (!companyId) return;
+  const row = document.querySelector('[data-fd-row-company="' + companyId + '"]');
+  if (!row) return;
+  const salesVal = (row.querySelector('[data-fd-input="sales"]')?.value || '').trim();
+  const orderVal = (row.querySelector('[data-fd-input="order"]')?.value || '').trim();
+  // Validierung — nur Ziffern (oder leer)
+  if (salesVal && !/^\d+$/.test(salesVal)) { toast('Sales-Group-ID muss numerisch sein', 'warn'); return; }
+  if (orderVal && !/^\d+$/.test(orderVal)) { toast('Order-Group-ID muss numerisch sein', 'warn'); return; }
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>'; if (window.lucide) lucide.createIcons(); }
+  try {
+    // Felder bei Bedarf anlegen (idempotent)
+    await ensureFields('Company', [
+      { name: 'fd_sales_group_id', type: 'singleLineText' },
+      { name: 'fd_order_group_id', type: 'singleLineText' }
+    ]).catch(e => console.warn('[FdGroups] ensureFields:', e.message));
+    await updateData('Company', companyId, {
+      fd_sales_group_id: salesVal,
+      fd_order_group_id: orderVal
+    });
+    // Lokalen Cache aktualisieren, damit getCurrentSalesGroupId/getCurrentOrderGroupId
+    // sofort die neuen Werte zurückliefern
+    const c = APP_KEYS.companies.find(c => c.id === companyId);
+    if (c) {
+      c.fd_sales_group_id = salesVal;
+      c.fd_order_group_id = orderVal;
+    }
+    toast('Gespeichert', 'success', 2000);
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = origHtml || '<i data-lucide="save" class="w-3.5 h-3.5"></i>';
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+// Helper: holt alle Gruppen aus Freshdesk und listet sie zur Auswahl auf.
+async function loadFreshdeskGroupsList(btnEl) {
+  const wrap = document.getElementById('fdGroupsListHelper');
+  if (!wrap) return;
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade…'; if (window.lucide) lucide.createIcons(); }
+  wrap.innerHTML = '';
+  try {
+    const groups = await proxyFetch('freshdesk/api/v2/groups', { method: 'GET' });
+    if (!Array.isArray(groups) || !groups.length) {
+      wrap.innerHTML = '<p class="text-xs text-amber-700">Keine Gruppen zurückbekommen.</p>';
+      return;
+    }
+    wrap.innerHTML = `
+      <div class="bg-ink-50 border border-ink-200 rounded-lg p-2 space-y-1">
+        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-1">${groups.length} Gruppe${groups.length===1?'':'n'} in Freshdesk</p>
+        ${groups.map(g => `
+          <div class="flex items-center justify-between gap-2 bg-white border border-ink-200 rounded px-2 py-1">
+            <div class="flex-1 min-w-0">
+              <div class="text-xs font-medium text-ink-900 truncate">${escapeHtml(g.name || '')}</div>
+              <div class="text-[10px] text-ink-500 truncate">ID: <code class="font-mono">${g.id}</code>${g.description ? ' · ' + escapeHtml(g.description) : ''}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } catch (e) {
+    wrap.innerHTML = '<p class="text-xs text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="list" class="w-3.5 h-3.5"></i> Verfügbare Freshdesk-Gruppen laden'; if (window.lucide) lucide.createIcons(); }
   }
 }
 
@@ -16244,7 +16425,9 @@ function setInquiriesStatusFilter(value) {
   localStorage.setItem('inquiriesStatusFilter', value);
   // Header-Titel sofort updaten, Liste neu laden
   const titleEl = document.getElementById('inqHeaderTitle');
-  if (titleEl) titleEl.textContent = 'Freshdesk · Sales · ' + _inquiriesStatusFilterLabel();
+  const mode = window._currentInquiriesMode || 'sales';
+  const groupLabel = mode === 'order' ? 'Auftragsbearbeitung' : 'Sales';
+  if (titleEl) titleEl.textContent = 'Freshdesk · ' + groupLabel + ' · ' + _inquiriesStatusFilterLabel();
   loadFreshdeskTicketsPreview();
 }
 
@@ -16293,8 +16476,17 @@ function _renderInquiriesFreshness() {
   el.textContent = txt;
 }
 
-async function renderInquiries() {
-  setPageTitle('Anfragen');
+// Wrapper für die zweite "Bestellungen / Auftragsbearbeitung"-Liste (gleiche Logik, andere Group-ID)
+async function renderOrderInquiries() {
+  return renderInquiries('order');
+}
+
+async function renderInquiries(mode) {
+  mode = mode === 'order' ? 'order' : 'sales';
+  window._currentInquiriesMode = mode;
+  const titleLabel = mode === 'order' ? 'Bestellungen' : 'Anfragen';
+  const groupLabel = mode === 'order' ? 'Auftragsbearbeitung' : 'Sales';
+  setPageTitle(titleLabel);
   // Falls vorher schon ein Auto-Refresh lief, stoppen (z.B. bei Mandantenwechsel)
   _stopInquiriesAutoRefresh();
   _inquiriesLastLoadedAt = 0;
@@ -16306,18 +16498,21 @@ async function renderInquiries() {
     return;
   }
   // Wieviele alte lokale Anfragen liegen noch in der Inquiry-Tabelle? (für Cleanup-Hinweis)
+  // Nur im Sales-Modus zeigen (alte Tabelle war nur Anfragen-Migration)
   let legacyCount = 0;
-  try {
-    const all = await readData('Inquiry');
-    legacyCount = all.filter(i => (i.fields.company_id || []).includes(cur.id)).length;
-  } catch (e) {}
+  if (mode === 'sales') {
+    try {
+      const all = await readData('Inquiry');
+      legacyCount = all.filter(i => (i.fields.company_id || []).includes(cur.id)).length;
+    } catch (e) {}
+  }
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-5xl mx-auto">
       <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
-          <h2 class="text-xl font-bold text-ink-900">Anfragen</h2>
-          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (Sales · ${escapeHtml(_inquiriesStatusFilterLabel().toLowerCase())}${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
+          <h2 class="text-xl font-bold text-ink-900">${escapeHtml(titleLabel)}</h2>
+          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (${escapeHtml(groupLabel)} · ${escapeHtml(_inquiriesStatusFilterLabel().toLowerCase())}${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <span id="inqFreshness" class="text-[11px] text-ink-500 italic"></span>
@@ -16350,8 +16545,8 @@ async function renderInquiries() {
       <div class="bg-white rounded-2xl border border-ink-200 overflow-hidden">
         <div class="px-4 py-3 border-b border-ink-100 flex items-center justify-between gap-3 flex-wrap">
           <div class="flex items-center gap-2 min-w-0">
-            <i data-lucide="inbox" class="w-4 h-4 text-brand-600 shrink-0"></i>
-            <h3 id="inqHeaderTitle" class="font-semibold text-ink-900 text-sm truncate">Freshdesk · Sales · ${escapeHtml(_inquiriesStatusFilterLabel())}</h3>
+            <i data-lucide="${mode === 'order' ? 'shopping-bag' : 'inbox'}" class="w-4 h-4 text-brand-600 shrink-0"></i>
+            <h3 id="inqHeaderTitle" class="font-semibold text-ink-900 text-sm truncate">Freshdesk · ${escapeHtml(groupLabel)} · ${escapeHtml(_inquiriesStatusFilterLabel())}</h3>
           </div>
           <div class="flex items-center gap-2 flex-wrap">
             <select onchange="setInquiriesStatusFilter(this.value)" class="text-xs border border-ink-200 rounded-lg px-2 py-1 bg-white" title="Status-Filter">
