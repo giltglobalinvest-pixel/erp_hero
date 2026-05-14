@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.88';
+const APP_VERSION = 'v4.89';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3515,7 +3515,20 @@ async function showTicketErpStatusModal(ticketId) {
 
 // Voice/Text → KI → Quote-Anlage. Sendet NICHT automatisch — User klickt am Ende
 // im Quote-Modal selbst auf "Per Email versenden".
-const _aqcState = { ticketId: null, recording: false, recognition: null, analyzing: false, creating: false };
+const _aqcState = {
+  ticketId: null,
+  recording: false,
+  recognition: null,
+  analyzing: false,
+  creating: false,
+  // Chat-Modus: history sammelt {role:user|assistant, content:string}
+  chatHistory: [],
+  systemPrompt: '',
+  finalProposal: null,        // wenn AI JSON liefert: das geparste Quote-Objekt
+  ticketContext: null,        // {ticket, conversations, articlesInMandant, bundles, erpState, fdContact}
+  // Pro new_article Item: User-Checkbox "auch in Artikelstamm" (Array indices match parsed.items)
+  catalogInclusionChoice: {}
+};
 
 async function aiAutoQuoteFromTicket(ticketId) {
   const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]');
@@ -3733,6 +3746,11 @@ async function openAiQuoteCreationModal(ticketId) {
   _aqcState.recognition = null;
   _aqcState.analyzing = false;
   _aqcState.creating = false;
+  _aqcState.chatHistory = [];
+  _aqcState.systemPrompt = '';
+  _aqcState.finalProposal = null;
+  _aqcState.ticketContext = null;
+  _aqcState.catalogInclusionChoice = {};
 
   // ERP-Match aus Cache lesen (wurde beim Listen-Render schon befüllt)
   const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
@@ -3763,57 +3781,60 @@ async function openAiQuoteCreationModal(ticketId) {
     <div class="p-5">
       <h3 class="text-base font-bold text-ink-900 mb-1 flex items-center gap-2">
         <i data-lucide="sparkles" class="w-5 h-5 text-purple-600"></i>
-        KI-Angebot erstellen
+        KI-Angebot — Chat
       </h3>
       <p class="text-xs text-ink-500 mb-3">FT-${ticketId} · <strong>${escapeHtml(customerName)}</strong> · ${escapeHtml(contactDisplay)}</p>
 
-      <div class="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-3 text-xs text-purple-900 flex items-start gap-2">
-        <i data-lucide="info" class="w-4 h-4 shrink-0 mt-0.5"></i>
-        <div>
-          <p class="font-semibold mb-0.5">So funktioniert's:</p>
-          <ol class="list-decimal ml-4 space-y-0.5">
-            <li>Optional: Vorlagen-Paket wählen (sonst entscheidet KI bzw. erkennt im Text)</li>
-            <li>Beschreib per Sprache oder Text was im Angebot stehen soll</li>
-            <li>KI analysiert deinen Input + den Ticketverlauf</li>
-            <li>Angebot wird als <strong>Entwurf</strong> angelegt — du kannst es prüfen und mit einem Klick versenden</li>
-          </ol>
-        </div>
-      </div>
-
       ${bundles.length > 0 ? `
       <div class="mb-3">
-        <label class="block text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1 flex items-center gap-1.5">
-          <i data-lucide="package" class="w-3.5 h-3.5 text-purple-600"></i> Vorlagen-Paket
+        <label class="block text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-1 flex items-center gap-1.5">
+          <i data-lucide="package" class="w-3 h-3 text-purple-600"></i> Vorlagen-Paket (optional)
         </label>
-        <select id="aqcBundle" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-purple-500/30">
+        <select id="aqcBundle" class="w-full px-2.5 py-1.5 border border-ink-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-purple-500/30">
           <option value="">— kein Paket / KI entscheidet —</option>
           ${bundles.map(b => `<option value="${b.id}" ${defaultBundle && defaultBundle.id === b.id ? 'selected' : ''}>${b.fields.is_default ? '★ ' : ''}${escapeHtml(b.fields.name || '–')}</option>`).join('')}
         </select>
-        <p class="text-[10px] text-ink-500 mt-0.5 italic">Wenn ausgewählt: Titel/Einleitung/Schluss + Anhänge kommen aus dem Paket. Du kannst Bundle-Namen auch einfach im Text nennen — KI erkennt's.</p>
       </div>
       ` : ''}
 
-      <label class="block text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1">Was soll im Angebot stehen?</label>
-      <div class="relative">
-        <textarea id="aqcInput" rows="5" placeholder="Beispiel: „Wir bieten 2x Antrieb V3F25L zum Preis von 4500 €, Lieferzeit 4 Wochen, Zahlung 30 Tage netto" oder einfach freier Text — die KI versteht's." class="w-full px-3 py-2 pr-10 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30"></textarea>
-        ${speechSupported ? `
-          <button type="button" id="aqcMicBtn" onclick="_aqcToggleMic()" title="Spracheingabe starten/stoppen" class="absolute top-2 right-2 p-1.5 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition">
-            <i data-lucide="mic" class="w-4 h-4"></i>
+      <!-- Chat-Verlauf -->
+      <div id="aqcChatLog" class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-2 min-h-[160px] max-h-[42vh] overflow-y-auto space-y-2" style="overscroll-behavior:contain;-webkit-overflow-scrolling:touch;">
+        <div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+          <span class="text-base">🤖</span>
+          <div>
+            <p>Hi! Beschreib mir was im Angebot stehen soll — gerne per Sprache oder Text. Ich frage nach wenn was unklar ist, sonst lege ich das Angebot direkt an.</p>
+            <p class="text-[10px] text-ink-500 mt-1 italic">Beispiele: <em>„2x V3F25L zu 4500 €, Lieferzeit 3-5 Tage"</em> · <em>„nimm das Standard-Bundle und füge eine Wartung 2× jährlich hinzu"</em></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Eingabezeile -->
+      <div id="aqcInputWrap" class="relative">
+        <textarea id="aqcInput" rows="2" placeholder="Antwort oder neue Info…" class="w-full px-3 py-2 pr-20 border border-ink-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30"
+          onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();_aqcSendChatMessage();}"></textarea>
+        <div class="absolute top-2 right-2 flex gap-1">
+          ${speechSupported ? `
+            <button type="button" id="aqcMicBtn" onclick="_aqcToggleMic()" title="Sprache" class="p-1.5 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition">
+              <i data-lucide="mic" class="w-4 h-4"></i>
+            </button>
+          ` : ''}
+          <button type="button" id="aqcSendBtn" onclick="_aqcSendChatMessage()" title="Senden" class="p-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition">
+            <i data-lucide="send" class="w-4 h-4"></i>
           </button>
-        ` : ''}
+        </div>
       </div>
       <p id="aqcStatus" class="text-[11px] text-ink-500 mt-1 italic min-h-[14px]"></p>
 
+      <!-- Preview (erscheint wenn KI fertig ist) -->
       <div id="aqcResult" class="mt-3 hidden">
-        <p class="text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1.5">KI-Vorschlag — bitte prüfen</p>
-        <div id="aqcResultBody" class="bg-white border border-ink-200 rounded-lg p-3 max-h-[40vh] overflow-y-auto text-sm"></div>
+        <p class="text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1.5 flex items-center gap-1.5">
+          <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-emerald-600"></i> KI-Vorschlag — prüfen + Anlage starten
+        </p>
+        <div id="aqcResultBody" class="bg-white border border-ink-200 rounded-lg p-3 max-h-[50vh] overflow-y-auto text-sm" style="overscroll-behavior:contain;"></div>
       </div>
 
-      <div class="flex gap-2 mt-4 flex-wrap justify-end">
+      <div class="flex gap-2 mt-3 flex-wrap justify-end">
         <button type="button" onclick="_aqcClose()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Abbrechen</button>
-        <button type="button" id="aqcAnalyzeBtn" onclick="_aqcRunAnalysis()" class="px-4 py-2 text-sm bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
-          <i data-lucide="sparkles" class="w-4 h-4"></i> KI analysieren + Angebot anlegen
-        </button>
       </div>
     </div>
   `, { maxWidth: 'max-w-xl' });
@@ -3891,7 +3912,223 @@ function _aqcRenderMicBtn() {
   if (window.lucide) lucide.createIcons();
 }
 
+// Rendert die Chat-Bubbles aus _aqcState.chatHistory
+function _aqcRenderChatLog() {
+  const log = document.getElementById('aqcChatLog');
+  if (!log) return;
+  const html = [
+    `<div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+      <span class="text-base">🤖</span>
+      <div>
+        <p>Hi! Beschreib mir was im Angebot stehen soll. Ich frage nach wenn was unklar ist, sonst lege ich das Angebot direkt an.</p>
+      </div>
+    </div>`
+  ];
+  for (const m of _aqcState.chatHistory) {
+    if (m.role === 'user') {
+      html.push(`<div class="flex justify-end">
+        <div class="bg-purple-600 text-white rounded-xl px-3 py-2 text-xs max-w-[85%] whitespace-pre-wrap break-words">${escapeHtml(m.content)}</div>
+      </div>`);
+    } else {
+      // Assistant message
+      html.push(`<div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-800 flex items-start gap-2 max-w-[95%]">
+        <span class="text-base shrink-0">🤖</span>
+        <div class="whitespace-pre-wrap break-words flex-1">${escapeHtml(m.content)}</div>
+      </div>`);
+    }
+  }
+  log.innerHTML = html.join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+// Baut den System-Prompt mit Ticket-Kontext, Bundles, Katalog. Wird beim ersten Chat-Turn gebaut.
+async function _aqcBuildSystemPrompt() {
+  const ticketId = _aqcState.ticketId;
+  const cur = getCurrentCompany();
+
+  // Ticket-Daten frisch laden
+  let ticket = null, conversations = [];
+  try { ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester'); } catch (_) {}
+  try {
+    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    conversations = (Array.isArray(conv) ? conv : []).slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  } catch (_) {}
+
+  // ERP-Match (Kunde + Kontakt)
+  const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
+  const fdContact = ticket?.requester || (ticket?.requester_id ? _fdContactCache.get(ticket.requester_id) : null);
+  const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+
+  // Artikel-Katalog
+  let articles = [];
+  try { articles = await readData('Article'); } catch (_) {}
+  const articlesInMandant = articles.filter(a =>
+    (a.fields.company_id || []).includes(cur?.id) &&
+    (a.fields.status || 'aktiv') !== 'archiviert'
+  );
+  const catalog = articlesInMandant.slice(0, 250).map(a => ({
+    id: a.id,
+    sku: a.fields.article_no || '',
+    name: a.fields.name1 || '',
+    name2: a.fields.name2 || '',
+    price: a.fields.sales_price || 0
+  }));
+
+  // Bundles
+  const bundles = window._aqcBundles || [];
+  const preselectedBundleId = (document.getElementById('aqcBundle')?.value || '').trim();
+
+  // Kontext für späteres Auflösen merken
+  _aqcState.ticketContext = { ticket, conversations, articlesInMandant, bundles, erpState, fdContact };
+
+  const ticketSubject = ticket?.subject || '';
+  const ticketBody = _fdHtmlToText(ticket?.description_html || ticket?.description || '').slice(0, 2000);
+  const convSnippet = conversations.slice(0, 5).map(c => {
+    const dir = c.incoming ? 'Kunde' : 'Wir';
+    return '### ' + dir + ' (' + (c.created_at || '').slice(0, 10) + '):\n' + _fdHtmlToText(c.body || c.body_text || '').slice(0, 800);
+  }).join('\n\n');
+
+  return `Du bist freundlicher Vertriebsassistent bei FLP Lift Parts GmbH (B2B-Großhandel für Aufzug-Ersatzteile in Deutschland). Sprich locker auf Deutsch wie ein Kollege.
+
+═══ ANGEBOTS-KONTEXT ═══
+Ticket: FT-${ticketId}
+Betreff: ${ticketSubject}
+Kunde: ${erpState.customer?.fields?.name1 || ''}
+Kontakt: ${(erpState.contact?.fields?.first_name || '') + ' ' + (erpState.contact?.fields?.last_name || '')}
+Anrede: ${erpState.contact?.fields?.gender || '?'}
+
+Erste Nachricht:
+${ticketBody || '(leer)'}
+
+${convSnippet ? 'Bisheriger Verlauf:\n' + convSnippet + '\n' : ''}
+
+═══ VERFÜGBARE BUNDLES ═══
+${bundles.length ? bundles.map(b => {
+  const f = b.fields || {};
+  const desc = (f.description || '').slice(0, 100);
+  return `[${b.id}] "${f.name || '–'}"${f.is_default ? ' ★Standard' : ''}${desc ? ' · ' + desc : ''}`;
+}).join('\n') : '(keine Bundles)'}
+User-Vorausgewählt: ${preselectedBundleId ? `[${preselectedBundleId}]` : '(nichts)'}
+
+═══ ARTIKEL-KATALOG (Auszug, max 250) ═══
+${catalog.length ? catalog.map(c => `[${c.id}] ArtNr=${c.sku} · ${c.name}${c.name2 ? ' / ' + c.name2 : ''} · ${c.price}€`).join('\n') : '(kein Katalog)'}
+
+═══ DEIN VORGEHEN ═══
+Du erstellst zusammen mit dem User ein Angebot.
+
+Wann fragst du nach (KURZ, max 1-2 Fragen pro Turn):
+- Welche Artikel + Mengen sind unklar
+- Lieferzeit fehlt
+- Bedingungen / besondere Wünsche unklar
+- Nur fragen wenn wirklich Info fehlt — wenn der User klare Angaben macht, direkt das Angebot bauen
+
+REGELN FÜR ARTIKEL:
+1. BESTEHENDE Katalog-Artikel (article_id aus Katalog oben):
+   - Standardmäßig WIRD NICHTS überschrieben. Die im Katalog hinterlegte Bezeichnung + Beschreibung gelten.
+   - NUR wenn der User explizit eine andere Bezeichnung nennt → name1_override setzen.
+   - description NIE setzen — die Katalog-Beschreibung wird automatisch verwendet.
+2. NEUE Artikel (nicht im Katalog):
+   - Setze new_article.name1 + article_no + sales_price (wenn vom User genannt sonst 0).
+   - description NUR setzen wenn der User EXPLIZIT eine Beschreibung diktiert hat. Sonst leer lassen!
+3. LIEFERZEIT:
+   - Wenn der User "Lieferzeit X" sagt (z.B. "3-5 Tage", "KW 24") → in das ROOT-Feld "lieferzeit" eintragen, NICHT in items, NICHT in description.
+4. BUNDLE:
+   - Wenn User vorausgewählt hat (siehe User-Vorausgewählt oben): nimm exakt diese bundle_id.
+   - Wenn User Bundle-Namen im Text nennt: identifiziere ID aus der Liste.
+   - Wenn Bundle gesetzt: intro="" und closing="" (kommen aus Bundle).
+   - Wenn KEIN Bundle: generiere intro + closing selbst.
+
+═══ ANTWORT-FORMAT ═══
+ENTWEDER (wenn noch Infos fehlen): kurze Frage als normaler Deutsch-Text, KEIN JSON.
+
+ODER (wenn du alle Infos hast): NUR JSON, keine Code-Fences, kein Text drumherum:
+{
+  "action": "create_quote",
+  "bundle_id": "rec... oder null",
+  "quote_title": "Kurzer Titel (max 80 Z.)",
+  "intro": "<p>...</p>" oder "",
+  "closing": "<p>...</p>" oder "",
+  "lieferzeit": "3-5 Tage" oder "",
+  "items": [
+    { "article_id": "recXXX", "qty": 2, "name1_override": null, "note": "" },
+    { "qty": 1, "new_article": { "name1": "...", "article_no": "...", "sales_price": 4500 }, "note": "" }
+  ],
+  "summary_for_user": "1 Satz was du gemacht hast"
+}`;
+}
+
+// Schickt User-Input + History an die KI. Antwort entweder Frage (text) oder JSON (finales Angebot).
+async function _aqcSendChatMessage() {
+  if (_aqcState.analyzing || _aqcState.creating) return;
+  const inputEl = document.getElementById('aqcInput');
+  const userText = (inputEl?.value || '').trim();
+  if (!userText) {
+    toast('Bitte schreib oder sprich was', 'warn');
+    inputEl?.focus();
+    return;
+  }
+  if (_aqcState.recording) _aqcStopRecording();
+
+  // Build system prompt beim allerersten Turn
+  if (!_aqcState.systemPrompt) {
+    try {
+      _aqcState.systemPrompt = await _aqcBuildSystemPrompt();
+    } catch (e) {
+      toast('Kontext laden fehlgeschlagen: ' + e.message, 'error', 6000);
+      return;
+    }
+  }
+
+  // User-Message in History + UI
+  _aqcState.chatHistory.push({ role: 'user', content: userText });
+  inputEl.value = '';
+  _aqcRenderChatLog();
+
+  // UI-Lock + Status
+  _aqcState.analyzing = true;
+  const sendBtn = document.getElementById('aqcSendBtn');
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>'; if (window.lucide) lucide.createIcons(); }
+  const status = document.getElementById('aqcStatus');
+  if (status) status.textContent = 'KI denkt nach …';
+
+  try {
+    const reply = await askAIChat({ system: _aqcState.systemPrompt, messages: _aqcState.chatHistory }, { maxTokens: 2500, purpose: 'ai_quote_chat' });
+    const cleaned = (reply || '').trim().replace(/^```[a-z]*\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+    // Versuchen als JSON zu parsen — wenn Anfang { ist
+    let parsed = null;
+    if (cleaned.startsWith('{')) {
+      const m = cleaned.match(/\{[\s\S]*\}/);
+      try { parsed = JSON.parse(m ? m[0] : cleaned); } catch (_) { parsed = null; }
+    }
+    if (parsed && parsed.action === 'create_quote') {
+      // Final-Vorschlag — Preview rendern
+      _aqcState.finalProposal = parsed;
+      // Assistant-Bubble in History damit Chat-Verlauf logisch bleibt
+      _aqcState.chatHistory.push({ role: 'assistant', content: '✓ Alle Infos da — ich habe einen Vorschlag erstellt. Bitte prüfen.' });
+      _aqcRenderChatLog();
+      _aqcRenderPreview(parsed);
+    } else {
+      // Normale Antwort — Frage / Kommentar
+      _aqcState.chatHistory.push({ role: 'assistant', content: reply });
+      _aqcRenderChatLog();
+    }
+  } catch (err) {
+    console.error('[aqc] chat fehler:', err);
+    toast('KI-Anfrage fehlgeschlagen: ' + (err.message || err), 'error', 7000);
+  } finally {
+    _aqcState.analyzing = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = '<i data-lucide="send" class="w-4 h-4"></i>'; if (window.lucide) lucide.createIcons(); }
+    if (status) status.textContent = '';
+    inputEl?.focus();
+  }
+}
+
 async function _aqcRunAnalysis() {
+  // Kompatibilitäts-Wrapper: alter "Analysieren"-Button leitet zum Chat um
+  return _aqcSendChatMessage();
+}
+
+async function _aqcRunAnalysisOLD() {
   if (_aqcState.analyzing || _aqcState.creating) return;
   const briefRaw = (document.getElementById('aqcInput')?.value || '').trim();
   if (!briefRaw) { toast('Bitte beschreib zuerst was im Angebot stehen soll (Text oder Sprache)', 'warn'); document.getElementById('aqcInput')?.focus(); return; }
@@ -4041,36 +4278,56 @@ REGELN:
   }
 }
 
-function _aqcRenderPreview(parsed, articlesInMandant, erpState) {
+function _aqcRenderPreview(parsed) {
   const resultBox = document.getElementById('aqcResult');
   const body = document.getElementById('aqcResultBody');
   if (!body || !resultBox) return;
   resultBox.classList.remove('hidden');
 
+  const articlesInMandant = _aqcState.ticketContext?.articlesInMandant || [];
   const articleById = new Map(articlesInMandant.map(a => [a.id, a]));
-  const itemRows = (parsed.items || []).map(it => {
-    // Fall 1: neuer Artikel — wird automatisch angelegt
+  _aqcState.catalogInclusionChoice = {}; // reset
+
+  const itemRows = (parsed.items || []).map((it, idx) => {
+    // Fall 1: neuer Artikel — Checkbox entscheidet ob in Artikelstamm uebernommen wird
     if (it.new_article && (it.new_article.name1 || it.new_article.name || '').trim()) {
       const na = it.new_article;
       const name = na.name1 || na.name || '';
       const sku = na.article_no || na.sku || '–';
       const price = (typeof na.sales_price === 'number' && na.sales_price > 0) ? na.sales_price.toFixed(2) + '€' : '';
-      return `<li class="text-ink-700">
-        <strong>${escapeHtml(String(it.qty || 1))}×</strong>
-        <span class="font-mono text-[10px] text-ink-500">${escapeHtml(sku)}</span>
-        · ${escapeHtml(name)}
-        ${price ? '<span class="text-ink-500"> · ' + escapeHtml(price) + '</span>' : ''}
-        <span class="ml-1 text-[9px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1 py-0.5 rounded">NEU — wird angelegt</span>
-        ${it.note ? ' · <em class="text-ink-500">' + escapeHtml(it.note) + '</em>' : ''}
-      </li>`;
+      const descHint = na.description ? ' · <em class="text-purple-700">Beschr.: ' + escapeHtml(na.description.slice(0, 60)) + (na.description.length > 60 ? '…' : '') + '</em>' : '';
+      return `<div class="border border-amber-200 bg-amber-50/60 rounded-lg p-2 text-ink-700 text-xs space-y-1">
+        <div class="flex items-baseline gap-1.5 flex-wrap">
+          <strong>${escapeHtml(String(it.qty || 1))}×</strong>
+          <span class="font-mono text-[10px] text-ink-500">${escapeHtml(sku)}</span>
+          <span class="font-medium">${escapeHtml(name)}</span>
+          ${price ? '<span class="text-ink-500">' + escapeHtml(price) + '</span>' : ''}
+          <span class="text-[9px] uppercase font-bold tracking-wider bg-amber-200 text-amber-800 px-1 py-0.5 rounded">NEU</span>
+          ${it.note ? '<em class="text-ink-500 text-[11px]">· ' + escapeHtml(it.note) + '</em>' : ''}
+        </div>
+        ${descHint}
+        <label class="flex items-center gap-1.5 text-[11px] text-ink-700 cursor-pointer pt-1 border-t border-amber-200/60 mt-1">
+          <input type="checkbox" data-aqc-catalog-idx="${idx}" class="w-3.5 h-3.5 rounded border-ink-300 text-emerald-600 focus:ring-emerald-500/30">
+          <span>Auch in den Artikelstamm aufnehmen <span class="text-ink-500">(sonst nur in diesem Angebot)</span></span>
+        </label>
+      </div>`;
     }
     // Fall 2: bestehender Artikel aus Katalog
     const a = articleById.get(it.article_id);
     if (!a) {
-      return `<li class="text-amber-700">⚠ Artikel-ID ${escapeHtml(it.article_id || '?')} nicht im Katalog — wird übersprungen</li>`;
+      return `<div class="text-amber-700 text-xs">⚠ Artikel-ID ${escapeHtml(it.article_id || '?')} nicht im Katalog — wird übersprungen</div>`;
     }
     const f = a.fields;
-    return `<li class="text-ink-700"><strong>${escapeHtml(String(it.qty || 1))}×</strong> <span class="font-mono text-[10px] text-ink-500">${escapeHtml(f.article_no || '')}</span> · ${escapeHtml(f.name1 || '')}${it.note ? ' · <em class="text-ink-500">' + escapeHtml(it.note) + '</em>' : ''}</li>`;
+    const overrideHint = it.name1_override
+      ? ' <span class="text-purple-700">→ "' + escapeHtml(it.name1_override) + '"</span>'
+      : '';
+    return `<div class="border border-ink-200 rounded-lg px-2 py-1.5 text-ink-700 text-xs flex items-baseline gap-1.5 flex-wrap">
+      <strong>${escapeHtml(String(it.qty || 1))}×</strong>
+      <span class="font-mono text-[10px] text-ink-500">${escapeHtml(f.article_no || '')}</span>
+      <span>${escapeHtml(f.name1 || '')}</span>${overrideHint}
+      ${it.note ? '<em class="text-ink-500">· ' + escapeHtml(it.note) + '</em>' : ''}
+      <span class="text-[9px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1 py-0.5 rounded ml-auto">Katalog</span>
+    </div>`;
   }).join('');
 
   // Bundle-Info: was die KI ausgesucht hat (entweder vorausgewählt vom User oder aus Text erkannt)
@@ -4091,23 +4348,29 @@ function _aqcRenderPreview(parsed, articlesInMandant, erpState) {
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Angebotstitel</p>
         <p class="text-sm font-semibold text-ink-900">${escapeHtml(parsed.quote_title || (chosenBundle ? '(aus Bundle)' : '–'))}</p>
       </div>
+      ${parsed.lieferzeit ? `
+      <div>
+        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Lieferzeit</p>
+        <p class="text-sm text-ink-900"><span class="font-mono bg-blue-100 text-blue-800 px-2 py-0.5 rounded">${escapeHtml(parsed.lieferzeit)}</span></p>
+      </div>
+      ` : ''}
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Einleitung</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.intro || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '')}</div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.intro || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '<em class="text-ink-400">leer</em>')}</div>
       </div>
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Positionen (${(parsed.items || []).length})</p>
-        ${itemRows ? '<ul class="text-xs text-ink-700 space-y-1 ml-4 list-disc">' + itemRows + '</ul>' : '<p class="text-xs text-ink-500 italic">— keine Positionen — wirst du im Angebot manuell hinzufügen können</p>'}
+        ${itemRows ? '<div class="space-y-1.5">' + itemRows + '</div>' : '<p class="text-xs text-ink-500 italic">— keine Positionen —</p>'}
       </div>
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Schlusstext</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.closing || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '')}</div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.closing || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '<em class="text-ink-400">leer</em>')}</div>
       </div>
       ${parsed.summary_for_user ? `<p class="text-[11px] text-purple-700 italic bg-purple-50 border border-purple-200 rounded px-2 py-1.5"><i data-lucide="info" class="inline w-3 h-3"></i> ${escapeHtml(parsed.summary_for_user)}</p>` : ''}
     </div>
     <div class="flex gap-2 mt-3 flex-wrap justify-end pt-2 border-t border-ink-200">
-      <button type="button" onclick="_aqcRunAnalysis()" class="text-xs px-3 py-1.5 border border-ink-200 rounded-lg hover:bg-ink-50 inline-flex items-center gap-1">
-        <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Neu generieren
+      <button type="button" onclick="_aqcResetForRefinement()" class="text-xs px-3 py-1.5 border border-ink-200 rounded-lg hover:bg-ink-50 inline-flex items-center gap-1">
+        <i data-lucide="message-circle" class="w-3.5 h-3.5"></i> Noch was anpassen
       </button>
       <button type="button" id="aqcCreateBtn" onclick="_aqcCreateQuote()" class="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
         <i data-lucide="check" class="w-4 h-4"></i> Angebot anlegen
@@ -4115,12 +4378,18 @@ function _aqcRenderPreview(parsed, articlesInMandant, erpState) {
     </div>
   `;
   if (window.lucide) lucide.createIcons();
-  // Vorschlag merken für die Anlage
-  window._aqcLastProposal = { parsed, erpState };
-  // Den Analyse-Button verstecken (wir haben jetzt einen "Angebot anlegen"-Button im Result)
-  const btn = document.getElementById('aqcAnalyzeBtn');
-  if (btn) btn.classList.add('hidden');
   resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// User möchte noch eine Sache nachjustieren — Preview ausblenden, Chat reaktivieren
+function _aqcResetForRefinement() {
+  const r = document.getElementById('aqcResult');
+  if (r) r.classList.add('hidden');
+  _aqcState.finalProposal = null;
+  // Hinweis-Bubble dass User jetzt nachfeilen kann
+  _aqcState.chatHistory.push({ role: 'assistant', content: '(Vorschlag verworfen — was soll noch angepasst werden?)' });
+  _aqcRenderChatLog();
+  document.getElementById('aqcInput')?.focus();
 }
 
 // Loest die Templates eines Bundles auf (Titel/Einleitung/Schluss) inkl. Variablen-Substitution.
@@ -4169,13 +4438,19 @@ async function _aqcResolveBundleContent(bundleId, customer, contact, quoteNo, to
 
 async function _aqcCreateQuote() {
   if (_aqcState.creating) return;
-  const proposal = window._aqcLastProposal;
-  if (!proposal) { toast('Kein Vorschlag vorhanden — bitte erst KI-Analyse starten', 'warn'); return; }
-  const { parsed, erpState } = proposal;
+  const parsed = _aqcState.finalProposal;
+  if (!parsed) { toast('Kein Vorschlag vorhanden — bitte erst Chat führen', 'warn'); return; }
+  const erpState = _aqcState.ticketContext?.erpState;
   const ticketId = _aqcState.ticketId;
   const cur = getCurrentCompany();
   if (!cur) { toast('Mandant fehlt', 'error'); return; }
-  if (!erpState.customer?.id) { toast('Kunde fehlt im ERP', 'error'); return; }
+  if (!erpState?.customer?.id) { toast('Kunde fehlt im ERP', 'error'); return; }
+
+  // Catalog-Inclusion-Choice aus Checkboxen einsammeln
+  document.querySelectorAll('[data-aqc-catalog-idx]').forEach(cb => {
+    const idx = parseInt(cb.dataset.aqcCatalogIdx, 10);
+    if (!isNaN(idx)) _aqcState.catalogInclusionChoice[idx] = !!cb.checked;
+  });
 
   const btn = document.getElementById('aqcCreateBtn');
   _aqcState.creating = true;
@@ -4223,6 +4498,11 @@ async function _aqcCreateQuote() {
       freshdesk_ticket_id: String(ticketId),
       ai_summary: parsed.summary_for_user || ''
     };
+    // Lieferzeit (aus KI extrahiert) als custom_values JSON
+    if (parsed.lieferzeit && String(parsed.lieferzeit).trim()) {
+      const cfClean = { lieferzeit: String(parsed.lieferzeit).trim() };
+      fields.custom_values = JSON.stringify(cfClean);
+    }
     if (parsed.bundle_id) fields.bundle_id = parsed.bundle_id;
     if (bundleResolved?.layout_variant)      fields.layout_variant = bundleResolved.layout_variant;
     if (bundleResolved?.attachment_ids_json) {
@@ -4278,30 +4558,54 @@ async function _aqcCreateQuote() {
       });
     } catch (_) {}
 
-    // Items anlegen — bei new_article erst Artikel im Katalog anlegen, dann verknüpfen
+    // Items anlegen — drei Pfade:
+    //  (a) Matched Katalog-Artikel → QuoteItem mit article_id, optional name1_override im description
+    //  (b) new_article + Checkbox aktiviert → neuen Artikel im Katalog anlegen + verknüpfen
+    //  (c) new_article + Checkbox nicht aktiviert → vorgangsbezogen: QuoteItem OHNE article_id
     let pos = 1;
     let itemErrors = 0;
     let newArticlesCreated = 0;
-    for (const it of (parsed.items || [])) {
+    let inlineItemsCount = 0;
+    const items = parsed.items || [];
+    for (let idx = 0; idx < items.length; idx++) {
+      const it = items[idx];
       try {
         const qty = Math.max(1, parseInt(it.qty || 1, 10) || 1);
-        let articleToUse = articleById.get(it.article_id) || null;
+        const isNewArticle = it.new_article && (it.new_article.name1 || it.new_article.name || '').trim();
+        const wantsCatalog = !!_aqcState.catalogInclusionChoice[idx];
 
-        // Auto-Anlage wenn AI einen new_article-Block geliefert hat
-        if (!articleToUse && it.new_article && (it.new_article.name1 || it.new_article.name || '').trim()) {
+        // (a) Bekannter Katalog-Artikel
+        if (it.article_id && articleById.get(it.article_id)) {
+          const article = articleById.get(it.article_id);
+          const itemFields = _aiBuildQuoteItemFields(article, qty, pos, created.id);
+          // name1_override greift nur für das QuoteItem (nicht für den Article-Record selbst)
+          if (it.name1_override && String(it.name1_override).trim()) {
+            const af = article.fields || {};
+            const title = String(it.name1_override).trim();
+            const descBody = (af.description || '').trim();
+            const titleHtml = '<p>' + escapeHtml(title) + '</p>';
+            const bodyHtml = descBody ? descBody.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('') : '';
+            itemFields.description = titleHtml + bodyHtml;
+            itemFields.label = 'Pos.' + pos + ' · ' + title.substring(0, 50);
+          }
+          await writeData('QuoteItem', itemFields);
+          pos++;
+          continue;
+        }
+
+        // (b) Neuer Artikel mit Checkbox → in Artikelstamm anlegen
+        if (isNewArticle && wantsCatalog) {
           const na = it.new_article;
           const proposedName1 = (na.name1 || na.name || '').trim();
           const proposedSku   = (na.article_no || na.sku || '').trim();
-          // Duplikat-Schutz: wenn SKU schon existiert, bestehenden Artikel verwenden
           const existingBySku = proposedSku ? articleBySku.get(proposedSku.toLowerCase()) : null;
-          if (existingBySku) {
-            articleToUse = existingBySku;
-          } else {
-            // Neuen Artikel im Katalog anlegen
+          let articleToUse = existingBySku;
+          if (!articleToUse) {
             const artFields = {
               name1:           proposedName1,
               name2:           (na.name2 || '').trim(),
               article_no:      proposedSku || ('NEU-' + Date.now() + '-' + pos),
+              // Beschreibung NUR setzen wenn AI explizit eine geliefert hat (siehe Prompt-Regel)
               description:     (na.description || '').trim(),
               manufacturer_no: (na.manufacturer_no || '').trim(),
               unit:            (na.unit || 'Stück').trim(),
@@ -4309,45 +4613,64 @@ async function _aqcCreateQuote() {
               vat_rate:        19,
               status:          'aktiv',
               company_id:      [cur.id],
-              notes:           '🤖 Auto-angelegt von KI-Angebot · ' + new Date().toLocaleString('de-DE') + ' · Quote ' + quoteNo
+              notes:           '🤖 Aus KI-Angebot übernommen · ' + new Date().toLocaleString('de-DE') + ' · Quote ' + quoteNo
             };
-            // Article_no Konflikt-Resilienz: falls Airtable die SKU als unique flagged ist,
-            // fall back zu einer eindeutigen Variante mit Timestamp-Suffix
             let newArt = null;
-            try {
-              newArt = await writeData('Article', artFields);
-            } catch (e1) {
+            try { newArt = await writeData('Article', artFields); }
+            catch (e1) {
               if (/unique|duplicate|conflict/i.test(e1.message)) {
                 artFields.article_no = artFields.article_no + '-' + Date.now().toString().slice(-5);
                 newArt = await writeData('Article', artFields).catch(() => null);
-              } else {
-                throw e1;
-              }
+              } else throw e1;
             }
             if (newArt && newArt.id) {
-              // In den Cache aufnehmen damit folgende Items die SKU wiederfinden falls duplikat
               const newArtObj = { id: newArt.id, fields: artFields };
               articleById.set(newArt.id, newArtObj);
               articleBySku.set(artFields.article_no.toLowerCase(), newArtObj);
               articleToUse = newArtObj;
               newArticlesCreated++;
-              console.log('[aqc] Artikel auto-angelegt:', proposedName1, '→', newArt.id);
             }
+          }
+          if (articleToUse) {
+            await writeData('QuoteItem', _aiBuildQuoteItemFields(articleToUse, qty, pos, created.id));
+            pos++;
+            continue;
           }
         }
 
-        if (articleToUse) {
-          await writeData('QuoteItem', _aiBuildQuoteItemFields(articleToUse, qty, pos, created.id));
-        } else if (it.article_id) {
-          // Letzte Notlösung: link versuchen — kann scheitern wenn ID ungültig
-          await writeData('QuoteItem', { quote_id: [created.id], article_id: [it.article_id], qty, pos });
-        } else {
-          console.warn('[aqc] Item ohne Artikel + ohne new_article-Block — uebersprungen:', it);
+        // (c) Neuer Artikel OHNE Checkbox → vorgangsbezogen, QuoteItem ohne article_id
+        if (isNewArticle) {
+          const na = it.new_article;
+          const title = (na.name1 || na.name || '').trim();
+          const unitPrice = (typeof na.sales_price === 'number' && na.sales_price >= 0) ? na.sales_price : 0;
+          const sku = (na.article_no || na.sku || '').trim();
+          // Beschreibung NUR übernehmen wenn AI eine geliefert hat (Prompt-Regel)
+          const customDesc = (na.description || '').trim();
+          const titleHtml = title ? '<p>' + escapeHtml(title + (sku ? ' (' + sku + ')' : '')) + '</p>' : '';
+          const descHtml = customDesc ? customDesc.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('') : '';
+          const safeQty = qty;
+          const itemFields = {
+            quote_id:       [created.id],
+            article_id:     [],  // bewusst leer — vorgangsbezogen
+            pos:            pos,
+            qty:            safeQty,
+            unit:           (na.unit || 'Stück').trim(),
+            unit_price_net: unitPrice,
+            discount_pct:   0,
+            vat_rate:       19,
+            description:    titleHtml + descHtml,
+            line_total_net: typeof calcLineNet === 'function' ? calcLineNet(safeQty, unitPrice, 0) : (safeQty * unitPrice),
+            label:          'Pos.' + pos + ' · ' + (title.substring(0, 50) || '–')
+          };
+          await writeData('QuoteItem', itemFields);
+          inlineItemsCount++;
+          pos++;
           continue;
         }
-        pos++;
+
+        console.warn('[aqc] Item übersprungen — weder Katalog-ID noch new_article:', it);
       } catch (e) {
-        console.warn('[aqc] QuoteItem fehlgeschlagen:', e.message);
+        console.warn('[aqc] QuoteItem ' + idx + ' fehlgeschlagen:', e.message);
         itemErrors++;
       }
     }
@@ -4367,8 +4690,9 @@ async function _aqcCreateQuote() {
 
     // Toast mit "Öffnen"-Button — User klickt drauf und sendet dann per Email
     const parts2 = ['✓ Angebot ' + quoteNo + ' angelegt'];
-    if (newArticlesCreated > 0) parts2.push(newArticlesCreated + ' neue Artikel im Katalog');
-    if (itemErrors > 0) parts2.push(itemErrors + ' Item-Fehler');
+    if (newArticlesCreated > 0) parts2.push(newArticlesCreated + ' Artikel in Katalog übernommen');
+    if (inlineItemsCount > 0)   parts2.push(inlineItemsCount + ' vorgangsbezogen');
+    if (itemErrors > 0)         parts2.push(itemErrors + ' Item-Fehler');
     toast(parts2.join(' · '), itemErrors > 0 ? 'warn' : 'success', 6500);
     closeTopModal();
     // Direkt das Quote-Modal öffnen damit User es prüfen + versenden kann
@@ -10239,6 +10563,29 @@ async function _logAiUsage(data, opts) {
     // Bewusst still: Logging darf den Hauptflow nicht stören.
     console.warn('[AI Usage Log]', e?.message || e);
   }
+}
+
+// Multi-Turn-Chat mit Claude inkl. system-Prompt. Verwendet die gleiche Proxy-Route
+// wie askAI aber mit voller Konversationshistorie + optionalem System-Prompt.
+async function askAIChat({ system, messages }, opts = {}) {
+  if (!_proxyBase()) throw new Error('KI nicht verfügbar — API-Proxy nicht konfiguriert');
+  if (!Array.isArray(messages) || !messages.length) throw new Error('askAIChat: messages leer');
+  const body = {
+    model: opts.model || 'claude-sonnet-4-5-20250929',
+    max_tokens: opts.maxTokens || 2048,
+    messages: messages.map(m => ({ role: m.role, content: m.content }))
+  };
+  if (system) body.system = system;
+  let data;
+  try {
+    data = await proxyFetch('anthropic/v1/messages', { method: 'POST', body });
+  } catch (e) { throw new Error('AI-Chat-Anfrage fehlgeschlagen: ' + e.message); }
+  try { _logAiUsage(data, { purpose: opts.purpose || 'askAIChat', model: opts.model }); } catch (_) {}
+  if (data?.content?.length) {
+    const texts = data.content.filter(c => c.type === 'text' && c.text).map(c => c.text);
+    if (texts.length) return texts.join('\n');
+  }
+  return '';
 }
 
 async function askAI(prompt, opts = {}) {
