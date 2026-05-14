@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v4.95';
+const APP_VERSION = 'v4.96';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3742,6 +3742,470 @@ async function _newTicketSubmit(mode, formEl) {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="plus-circle" class="w-4 h-4"></i> ' + (mode === 'order' ? 'Bestellung' : 'Anfrage') + ' anlegen'; if (window.lucide) lucide.createIcons(); }
   }
 }
+
+/* ============================================================
+   ERP-ASSISTENT — Chat-Bot fuer die Startseite
+   Kann Angebote/Auftraege/Rechnungen/Lieferscheine anlegen, navigieren, suchen.
+   Multi-Turn-Chat mit Action-JSON-Responses (analog _aqc, aber generisch).
+   ============================================================ */
+const _eaState = {
+  chatHistory: [],
+  systemPrompt: '',
+  analyzing: false,
+  executing: false,
+  recording: false,
+  recognition: null,
+  context: null,            // {customers, contacts, articles, bundles}
+  pendingAction: null       // letztes von KI gelieferte Action-JSON
+};
+
+async function openErpAssistant() {
+  if (!_proxyBase()) { toast('KI-Proxy nicht konfiguriert', 'error', 6000); return; }
+  _eaState.chatHistory = [];
+  _eaState.systemPrompt = '';
+  _eaState.analyzing = false;
+  _eaState.executing = false;
+  _eaState.recording = false;
+  _eaState.pendingAction = null;
+  _eaState.context = null;
+
+  const cur = getCurrentCompany();
+  const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const userName = APP_KEYS.user?.name || 'du';
+
+  openModal2(`
+    <div class="p-5">
+      <h3 class="text-base font-bold text-ink-900 mb-1 flex items-center gap-2">
+        <i data-lucide="sparkles" class="w-5 h-5 text-purple-600"></i>
+        ERP-Assistent
+      </h3>
+      <p class="text-xs text-ink-500 mb-3">${escapeHtml(cur?.name || '')} · Hallo ${escapeHtml(userName)}! Sag mir was du brauchst.</p>
+
+      <div id="eaChatLog" class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-2 min-h-[200px] max-h-[48vh] overflow-y-auto space-y-2" style="overscroll-behavior:contain;-webkit-overflow-scrolling:touch;">
+        <div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+          <span class="text-base">🤖</span>
+          <div>
+            <p class="font-semibold mb-1">Ich kann unter anderem:</p>
+            <ul class="space-y-0.5 ml-3 list-disc text-[11px]">
+              <li><strong>Angebot</strong> für einen Kunden anlegen</li>
+              <li><strong>Auftrag</strong>, <strong>Lieferschein</strong>, <strong>Rechnung</strong> erstellen</li>
+              <li>Kunden / Artikel <strong>finden</strong></li>
+              <li>Zu <strong>Ansichten navigieren</strong> (Anfragen, Kunden, Artikel…)</li>
+            </ul>
+            <p class="text-[11px] mt-1.5 italic text-ink-500">Beispiel: <em>„Mach ein Angebot für Aufzugshandwerk: 2x V3F25L, Lieferzeit 5 Tage"</em> · <em>„Zeig mir alle offenen Rechnungen"</em></p>
+          </div>
+        </div>
+      </div>
+
+      <div id="eaInputWrap">
+        <textarea id="eaInput" rows="3" placeholder="Tippe oder sprich… (Enter = Zeilenumbruch, ⌘/Strg+Enter = senden)" class="w-full px-3 py-2.5 border border-ink-200 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-purple-500/30"
+          onkeydown="if(event.key==='Enter' && (event.metaKey||event.ctrlKey)){event.preventDefault();_eaSendMessage();}"></textarea>
+        <div class="flex gap-2 mt-2">
+          ${speechSupported ? `
+            <button type="button" id="eaMicBtn" onclick="_eaToggleMic()" class="shrink-0 px-3 py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium">
+              <i data-lucide="mic" class="w-5 h-5"></i>
+              <span class="hidden sm:inline">Sprechen</span>
+            </button>
+          ` : ''}
+          <button type="button" id="eaSendBtn" onclick="_eaSendMessage()" class="flex-1 px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition inline-flex items-center justify-center gap-2 text-base font-semibold">
+            <i data-lucide="send" class="w-5 h-5"></i>
+            <span>Senden</span>
+          </button>
+        </div>
+      </div>
+      <p id="eaStatus" class="text-[11px] text-ink-500 mt-1 italic min-h-[14px]"></p>
+
+      <div id="eaResult" class="mt-3 hidden">
+        <div id="eaResultBody"></div>
+      </div>
+
+      <div class="flex gap-2 mt-3 justify-end">
+        <button type="button" onclick="closeModal2()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Schließen</button>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-xl' });
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById('eaInput')?.focus(), 80);
+}
+
+// Chat-Bubbles rendern
+function _eaRenderChatLog() {
+  const log = document.getElementById('eaChatLog');
+  if (!log) return;
+  const intro = `<div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+    <span class="text-base">🤖</span>
+    <div>
+      <p class="font-semibold mb-1">Was soll ich tun?</p>
+      <p class="text-[11px] italic text-ink-500">Angebot/Auftrag/Rechnung anlegen · Kunde finden · navigieren — frag einfach.</p>
+    </div>
+  </div>`;
+  const items = [intro];
+  for (const m of _eaState.chatHistory) {
+    if (m._hidden) continue;
+    if (m.role === 'user') {
+      items.push(`<div class="flex justify-end">
+        <div class="bg-purple-600 text-white rounded-xl px-3 py-2 text-xs max-w-[85%] break-words" style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(m.content)}</div>
+      </div>`);
+    } else {
+      items.push(`<div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-800 flex items-start gap-2 max-w-[95%]">
+        <span class="text-base shrink-0">🤖</span>
+        <div class="break-words flex-1" style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(m.content)}</div>
+      </div>`);
+    }
+  }
+  log.innerHTML = items.join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+// System-Prompt mit verfuegbaren Actions + ERP-Kontext
+async function _eaBuildSystemPrompt() {
+  const cur = getCurrentCompany();
+  if (!cur) return '';
+  // Top-Daten laden (begrenzt)
+  let customers = [], contacts = [], articles = [], bundles = [];
+  try { customers = await readData('Customer').catch(() => []); } catch (_) {}
+  try { contacts  = await readData('Contact').catch(() => []);  } catch (_) {}
+  try { articles  = await readData('Article').catch(() => []);  } catch (_) {}
+  try { bundles   = await readData('QuoteBundle').catch(() => []); } catch (_) {}
+  const customersInMandant = customers.filter(c => (c.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'))
+    .slice(0, 100);
+  const articlesInMandant = articles.filter(a => (a.fields.company_id || []).includes(cur.id) && (a.fields.status || 'aktiv') !== 'archiviert')
+    .slice(0, 200);
+  const bundlesInMandant = bundles.filter(b => b.fields.company_id === cur.id && (b.fields.status || 'aktiv') !== 'archiviert');
+
+  _eaState.context = { customers: customersInMandant, contacts, articles: articlesInMandant, bundles: bundlesInMandant };
+
+  return `Du bist der ERP-Assistent von FLP Lift Parts GmbH (B2B-Großhandel für Aufzug-Ersatzteile). Du hilfst Mitarbeitern bei Routineaufgaben im ERP-System per Chat. Sprich locker auf Deutsch wie ein Kollege.
+
+═══ AKTUELLER MANDANT ═══
+${cur.name}
+User: ${APP_KEYS.user?.name || '?'}${APP_KEYS.user?.role ? ' (' + APP_KEYS.user.role + ')' : ''}
+
+═══ KUNDEN (Top 100) ═══
+${customersInMandant.map(c => `[${c.id}] ${c.fields.name1 || '–'}${c.fields.customer_no ? ' · ' + c.fields.customer_no : ''}${c.fields.city ? ' · ' + c.fields.city : ''}`).join('\n')}
+
+═══ ARTIKEL-KATALOG (Top 200, aktiv) ═══
+${articlesInMandant.map(a => `[${a.id}] ArtNr=${a.fields.article_no || ''} · ${a.fields.name1 || ''}${a.fields.name2 ? ' / ' + a.fields.name2 : ''} · ${a.fields.sales_price || 0}€`).join('\n')}
+
+═══ VERFÜGBARE BUNDLES (Angebot) ═══
+${bundlesInMandant.filter(b => (b.fields.doc_type || 'Angebot') === 'Angebot').map(b => `[${b.id}] "${b.fields.name || '–'}"${b.fields.is_default ? ' ★Standard' : ''}`).join('\n') || '(keine)'}
+
+═══ DEINE AUFGABEN + ACTIONS ═══
+Du kannst entweder eine RÜCKFRAGE in normalem Deutsch stellen ODER eine ACTION als reines JSON zurückliefern (keine Code-Fences, kein Text drumherum).
+
+VERFÜGBARE ACTIONS:
+
+1) Angebot anlegen:
+{
+  "action": "create_quote",
+  "customer_id": "rec...",
+  "contact_id": "rec... oder null",
+  "bundle_id": "rec... oder null",
+  "quote_title": "...",
+  "intro": "<p>...</p>" oder "",
+  "closing": "<p>...</p>" oder "",
+  "lieferzeit": "3-5 Tage" oder "",
+  "custom_values": { "feldname": "wert" },
+  "items": [
+    { "article_id": "rec...", "qty": 2, "note": "" },
+    { "qty": 1, "new_article": { "name1": "...", "article_no": "...", "sales_price": 4500 }, "note": "" }
+  ],
+  "summary_for_user": "1 Satz Bestätigung"
+}
+
+2) Zu Seite navigieren:
+{
+  "action": "navigate",
+  "route": "anfragen|angebote|auftraege|lieferscheine|rechnungen|bestellungen|kundenbestellungen|kunden|kontakte|lieferanten|artikel|statistik-sales|statistik-angebote|statistik-umsatz",
+  "summary_for_user": "Was du gerade öffnest"
+}
+
+3) Kunden / Artikel suchen / Datenfrage beantworten:
+- Wenn du die Antwort aus dem Kontext oben weisst → antworte als NORMALER Deutsch-Text.
+
+REGELN:
+- Bei "create_quote": kunden_id MUSS aus der Liste oben kommen. Wenn unklar → User nach dem Kunden fragen (Name nennen lassen).
+- Bei article_id: nur IDs aus dem Katalog oben. Sonst new_article-Block.
+- Wenn der User vage ist (z.B. "Angebot machen") → frage zurück.
+- Action-JSON IMMER nur dann, wenn alle Pflicht-Infos da sind.
+- Wenn der User nur eine Info-Frage hat (z.B. "Wie viele Kunden haben wir?") → normaler Text-Antwort.
+
+WICHTIG: Action-JSON IMMER STAND-ALONE, keine Erklärung davor/danach.`;
+}
+
+// Hauptlogik: User-Message senden, KI-Antwort verarbeiten
+async function _eaSendMessage() {
+  if (_eaState.analyzing || _eaState.executing) return;
+  const inputEl = document.getElementById('eaInput');
+  const text = (inputEl?.value || '').trim();
+  if (!text) { toast('Bitte schreib oder sprich was', 'warn'); inputEl?.focus(); return; }
+  if (_eaState.recording) _eaStopRecording();
+
+  if (!_eaState.systemPrompt) {
+    try { _eaState.systemPrompt = await _eaBuildSystemPrompt(); }
+    catch (e) { toast('Kontext laden fehlgeschlagen: ' + e.message, 'error', 6000); return; }
+  }
+
+  _eaState.chatHistory.push({ role: 'user', content: text });
+  inputEl.value = '';
+  _eaRenderChatLog();
+
+  _eaState.analyzing = true;
+  const sendBtn = document.getElementById('eaSendBtn');
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i><span>Denkt…</span>'; if (window.lucide) lucide.createIcons(); }
+
+  try {
+    const reply = await askAIChat({ system: _eaState.systemPrompt, messages: _eaState.chatHistory }, { maxTokens: 2500, purpose: 'erp_assistant_chat' });
+    const action = _eaExtractActionJson(reply);
+    if (action && action.action) {
+      _eaState.chatHistory.push({ role: 'assistant', content: action.summary_for_user || ('Action erkannt: ' + action.action) });
+      _eaRenderChatLog();
+      await _eaRunAction(action);
+    } else {
+      _eaState.chatHistory.push({ role: 'assistant', content: (reply || '').trim() });
+      _eaRenderChatLog();
+    }
+  } catch (err) {
+    console.error('[ea] chat fehler:', err);
+    _eaState.chatHistory.push({ role: 'assistant', content: '⚠ Fehler: ' + (err.message || err) });
+    _eaRenderChatLog();
+  } finally {
+    _eaState.analyzing = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = '<i data-lucide="send" class="w-5 h-5"></i><span>Senden</span>'; if (window.lucide) lucide.createIcons(); }
+    inputEl?.focus();
+  }
+}
+
+// Action-JSON aus AI-Reply extrahieren (string-aware brace matching)
+function _eaExtractActionJson(reply) {
+  if (!reply) return null;
+  let txt = String(reply).trim().replace(/```[a-z]*\s*\n?/gi, '').replace(/```/g, '').trim();
+  if (txt.startsWith('{')) {
+    try { const p = JSON.parse(txt); if (p && p.action) return p; } catch (_) {}
+  }
+  const start = txt.search(/\{[\s\S]*?"action"\s*:\s*"/);
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false, end = -1;
+  for (let i = start; i < txt.length; i++) {
+    const c = txt[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return null;
+  try { return JSON.parse(txt.slice(start, end + 1)); } catch (e) { return null; }
+}
+
+// Action ausfuehren
+async function _eaRunAction(action) {
+  _eaState.pendingAction = action;
+  switch (action.action) {
+    case 'navigate':
+      if (action.route && typeof dispatchRoute === 'function') {
+        toast('Öffne: ' + action.route, 'info', 2000);
+        closeModal2();
+        setTimeout(() => dispatchRoute(action.route), 200);
+      }
+      break;
+    case 'create_quote':
+      await _eaCreateQuote(action);
+      break;
+    default:
+      console.warn('[ea] Unbekannte Action:', action.action);
+      _eaState.chatHistory.push({ role: 'assistant', content: '⚠ Action "' + action.action + '" ist noch nicht implementiert. Folgt im nächsten Update.' });
+      _eaRenderChatLog();
+  }
+}
+
+// Angebot anlegen — analog _aqcCreateQuote aber ohne FD-Ticket-Kontext
+async function _eaCreateQuote(action) {
+  if (_eaState.executing) return;
+  _eaState.executing = true;
+  const status = document.getElementById('eaStatus');
+  if (status) status.textContent = 'Lege Angebot an …';
+  try {
+    const cur = getCurrentCompany();
+    if (!cur) throw new Error('Kein Mandant');
+    if (!action.customer_id) throw new Error('Kunde fehlt');
+    const customer = _eaState.context.customers.find(c => c.id === action.customer_id) ||
+                     (await readData('Customer')).find(c => c.id === action.customer_id);
+    if (!customer) throw new Error('Kunde-ID ungültig: ' + action.customer_id);
+    const contact = action.contact_id
+      ? (await readData('Contact')).find(c => c.id === action.contact_id) || null
+      : null;
+    const erpState = { customer, contact };
+
+    // Schema sichern
+    try {
+      await ensureFields('Quote', [
+        { name: 'ai_summary',          type: 'multilineText' },
+        { name: 'bundle_id',           type: 'singleLineText' },
+        { name: 'layout_variant',      type: 'singleLineText' },
+        { name: 'attachment_ids',      type: 'multilineText' },
+        { name: 'quote_title',         type: 'singleLineText' },
+        { name: 'force_closing_new_page', type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
+        { name: 'custom_values',       type: 'multilineText' }
+      ]);
+    } catch (_) {}
+
+    const quoteNo = await nextQuoteNo(cur.id);
+    const today = new Date();
+    const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
+    const iso = d => d.toISOString().slice(0, 10);
+
+    // Bundle aufloesen
+    let bundleResolved = null;
+    if (action.bundle_id) {
+      try { bundleResolved = await _aqcResolveBundleContent(action.bundle_id, customer, contact, quoteNo, today, validUntil); }
+      catch (e) { console.warn('[ea] Bundle-Resolve:', e.message); }
+    }
+
+    const fields = {
+      quote_no: quoteNo,
+      company_id: [cur.id],
+      customer_id: [customer.id],
+      date: iso(today),
+      valid_until: iso(validUntil),
+      status: 'Entwurf',
+      quote_title: (bundleResolved?.quote_title || action.quote_title || '').trim(),
+      description: (bundleResolved?.intro       || action.intro       || '').trim(),
+      notes:       (bundleResolved?.closing     || action.closing     || '').trim(),
+      ai_summary:  action.summary_for_user || ''
+    };
+    // custom_values: Bundle-Preset → lieferzeit → AI-custom_values
+    const cfClean = {};
+    if (bundleResolved?.preset_variable_values && typeof bundleResolved.preset_variable_values === 'object') {
+      Object.entries(bundleResolved.preset_variable_values).forEach(([k, v]) => { if (v != null && String(v).trim()) cfClean[k] = String(v).trim(); });
+    }
+    if (action.lieferzeit && String(action.lieferzeit).trim()) cfClean.lieferzeit = String(action.lieferzeit).trim();
+    if (action.custom_values && typeof action.custom_values === 'object') {
+      Object.entries(action.custom_values).forEach(([k, v]) => { if (v != null && String(v).trim()) cfClean[k] = String(v).trim(); });
+    }
+    if (Object.keys(cfClean).length) fields.custom_values = JSON.stringify(cfClean);
+    if (action.bundle_id) fields.bundle_id = action.bundle_id;
+    if (bundleResolved && typeof bundleResolved.force_closing_new_page === 'boolean') fields.force_closing_new_page = bundleResolved.force_closing_new_page;
+    if (bundleResolved?.layout_variant) fields.layout_variant = bundleResolved.layout_variant;
+    if (bundleResolved?.attachment_ids_json) {
+      const v = bundleResolved.attachment_ids_json;
+      fields.attachment_ids = typeof v === 'string' ? v : JSON.stringify(v);
+    }
+    if (contact?.id) fields.contact_id = [contact.id];
+    try {
+      const terms = await getCustomerTerms(customer.id);
+      if (typeof terms.payment_terms  === 'string' && terms.payment_terms.trim())  fields.payment_terms  = terms.payment_terms;
+      if (typeof terms.delivery_terms === 'string' && terms.delivery_terms.trim()) fields.delivery_terms = terms.delivery_terms;
+    } catch (_) {}
+
+    // Resilient write
+    const OPT = ['attachment_ids', 'force_closing_new_page', 'custom_values', 'bundle_id', 'layout_variant', 'ai_summary', 'quote_title'];
+    let created = null, lastErr = null;
+    const writeFields = { ...fields };
+    for (let i = 0; i <= OPT.length; i++) {
+      try { created = await writeData('Quote', writeFields); break; }
+      catch (err) {
+        lastErr = err;
+        if (!/array of record|record id|invalid value|cannot accept/i.test(err.message)) throw err;
+        if (i >= OPT.length) throw err;
+        delete writeFields[OPT[i]];
+      }
+    }
+    if (!created) throw lastErr || new Error('Quote-Anlage fehlgeschlagen');
+
+    // Items anlegen (matched + new_article inline ohne Katalog-Anlage by default)
+    const articleById = new Map((_eaState.context.articles || []).map(a => [a.id, a]));
+    let pos = 1, itemErrors = 0;
+    for (const it of (action.items || [])) {
+      try {
+        const qty = Math.max(1, parseInt(it.qty || 1, 10) || 1);
+        if (it.article_id && articleById.get(it.article_id)) {
+          await writeData('QuoteItem', _aiBuildQuoteItemFields(articleById.get(it.article_id), qty, pos, created.id));
+        } else if (it.new_article && (it.new_article.name1 || it.new_article.name || '').trim()) {
+          const na = it.new_article;
+          const title = (na.name1 || na.name || '').trim();
+          const unitPrice = (typeof na.sales_price === 'number' && na.sales_price >= 0) ? na.sales_price : 0;
+          const sku = (na.article_no || '').trim();
+          const descRaw = (na.description || '').trim();
+          const titleHtml = '<p>' + escapeHtml(title + (sku ? ' (' + sku + ')' : '')) + '</p>';
+          const descHtml = descRaw ? descRaw.split('\n').map(l => '<p>' + (escapeHtml(l) || '<br>') + '</p>').join('') : '';
+          await writeData('QuoteItem', {
+            quote_id: [created.id], article_id: [], pos, qty,
+            unit: (na.unit || 'Stück').trim(),
+            unit_price_net: unitPrice, discount_pct: 0, vat_rate: 19,
+            description: titleHtml + descHtml,
+            line_total_net: typeof calcLineNet === 'function' ? calcLineNet(qty, unitPrice, 0) : (qty * unitPrice),
+            label: 'Pos.' + pos + ' · ' + (title.substring(0, 50) || '–')
+          });
+        }
+        pos++;
+      } catch (e) { console.warn('[ea] QuoteItem fail:', e.message); itemErrors++; }
+    }
+
+    toast('✓ Angebot ' + quoteNo + ' angelegt' + (itemErrors ? ' (' + itemErrors + ' Fehler)' : ''), itemErrors ? 'warn' : 'success', 5000);
+    _eaState.chatHistory.push({ role: 'assistant', content: '✓ Angebot ' + quoteNo + ' für ' + (customer.fields.name1 || '?') + ' angelegt. Öffne den Editor zum Versenden.' });
+    _eaRenderChatLog();
+    closeModal2();
+    setTimeout(() => { if (typeof openQuoteModal === 'function') openQuoteModal(created.id); }, 300);
+  } catch (err) {
+    console.error('[ea] create_quote:', err);
+    _eaState.chatHistory.push({ role: 'assistant', content: '⚠ Konnte das Angebot nicht anlegen: ' + (err.message || err) });
+    _eaRenderChatLog();
+  } finally {
+    _eaState.executing = false;
+    if (status) status.textContent = '';
+  }
+}
+
+// Speech-Recognition (mit denselben Helper-Pattern wie _aqc)
+function _eaToggleMic() {
+  if (_eaState.recording) _eaStopRecording(); else _eaStartRecording();
+}
+function _eaStartRecording() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { toast('Spracheingabe nicht verfügbar', 'warn'); return; }
+  const rec = new SR(); rec.lang = 'de-DE'; rec.interimResults = true; rec.continuous = true;
+  let acc = '';
+  rec.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) acc += r[0].transcript + ' ';
+      else interim += r[0].transcript;
+    }
+    const st = document.getElementById('eaStatus');
+    if (st) st.textContent = '🎤 ' + (acc + interim).trim();
+  };
+  rec.onerror = (e) => { if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Mikro-Fehler: ' + e.error, 'error'); };
+  rec.onend = () => {
+    _eaState.recording = false; _eaState.recognition = null;
+    const ta = document.getElementById('eaInput');
+    if (ta && acc.trim()) ta.value = ((ta.value || '').trim() ? (ta.value.trim() + ' ') : '') + acc.trim();
+    const st = document.getElementById('eaStatus'); if (st) st.textContent = '';
+    _eaRenderMicBtn();
+  };
+  _eaState.recognition = rec; _eaState.recording = true;
+  try { rec.start(); } catch (e) { toast('Mikro-Start: ' + e.message, 'error'); _eaState.recording = false; }
+  _eaRenderMicBtn();
+}
+function _eaStopRecording() {
+  if (_eaState.recognition) { try { _eaState.recognition.stop(); } catch (_) {} }
+}
+function _eaRenderMicBtn() {
+  const btn = document.getElementById('eaMicBtn');
+  if (!btn) return;
+  if (_eaState.recording) {
+    btn.innerHTML = '<i data-lucide="square" class="w-5 h-5"></i><span class="hidden sm:inline">Stop</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-red-500 hover:bg-red-600 text-white border border-red-600 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium animate-pulse';
+  } else {
+    btn.innerHTML = '<i data-lucide="mic" class="w-5 h-5"></i><span class="hidden sm:inline">Sprechen</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
 
 async function openAiQuoteCreationModal(ticketId) {
   _aqcState.ticketId = ticketId;
@@ -10976,14 +11440,20 @@ function renderWelcome() {
       </div>
 
       ${_proxyBase() ? `
-        <div class="mt-6 bg-white border border-purple-200 rounded-2xl overflow-hidden shadow-sm">
-          <div class="bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 text-white px-4 sm:px-5 py-3 flex items-center gap-3">
-            <i data-lucide="sparkles" class="w-5 h-5 shrink-0"></i>
-            <h3 class="font-bold flex-1 text-base">KI-Assistent · Angebote vorbereiten</h3>
-            <span class="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded font-semibold">Beta</span>
+        <button type="button" onclick="openErpAssistant()" class="mt-6 w-full bg-gradient-to-br from-purple-600 via-purple-700 to-purple-900 hover:from-purple-700 hover:to-purple-950 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
+          <div class="w-12 h-12 rounded-xl bg-white/15 grid place-items-center shrink-0 group-hover:bg-white/25 transition">
+            <i data-lucide="sparkles" class="w-6 h-6"></i>
           </div>
-          <div id="voiceAssistantWrap" class="p-4 sm:p-5"></div>
-        </div>
+          <div class="flex-1 text-left">
+            <p class="text-lg font-bold leading-tight flex items-center gap-2">
+              KI-Assistent · Chat
+              <span class="text-[10px] uppercase tracking-wider bg-white/20 px-1.5 py-0.5 rounded font-semibold">Beta</span>
+            </p>
+            <p class="text-xs text-white/85 mt-0.5">Angebote / Aufträge / Rechnungen / Lieferscheine per Chat anlegen. Frag einfach.</p>
+          </div>
+          <i data-lucide="arrow-right" class="w-5 h-5 shrink-0 group-hover:translate-x-1 transition"></i>
+        </button>
+        <div id="voiceAssistantWrap" class="hidden"></div>
       ` : ''}
 
       <h3 class="mt-8 mb-3 text-sm font-semibold text-ink-500 uppercase tracking-wider">Roadmap</h3>
