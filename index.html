@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.01';
+const APP_VERSION = 'v5.02';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -4374,6 +4374,18 @@ async function _aqcAutoStart() {
     console.warn('[aqc] Auto-Start Kontext-Load fehlgeschlagen:', e.message);
     return;
   }
+
+  // Wenn Quotes fuer dieses Ticket existieren, dem User Bescheid sagen dass Variante entsteht
+  const existing = _aqcState.existingQuotesForTicket || [];
+  if (existing.length > 0) {
+    const baseNo = existing[0].fields.quote_no || '';
+    const variantPreview = await nextQuoteVariantNo(baseNo, getCurrentCompany()?.id).catch(() => null);
+    const hintMsg = '📋 Hinweis: Es gibt schon ' + existing.length + ' Angebot' + (existing.length === 1 ? '' : 'e') + ' für dieses Ticket (' +
+      existing.slice(0, 3).map(q => q.fields.quote_no).join(', ') + (existing.length > 3 ? ', …' : '') +
+      '). Das neue Angebot wird automatisch als Variante' + (variantPreview ? ' ' + variantPreview : '') + ' angelegt.';
+    _aqcState.chatHistory.push({ role: 'assistant', content: hintMsg, _aqcInfo: true });
+    _aqcRenderChatLog();
+  }
   // Initiale User-Message: KI soll Ticket analysieren + Vorschlag machen oder fragen
   const initialMsg = 'Analysiere bitte das Ticket FT-' + _aqcState.ticketId + ' (Betreff, Nachrichten, Anhänge soweit verfügbar) und mach mir einen ersten Vorschlag fürs Angebot. Wenn dir etwas Wichtiges fehlt, frag direkt nach.';
   _aqcState.chatHistory.push({ role: 'user', content: initialMsg, _hidden: true });
@@ -4566,6 +4578,27 @@ async function _aqcBuildSystemPrompt() {
   } catch (_) {}
   _aqcState.ticketAttachments = allAttachments;
 
+  // Existierende Quotes fuer dieses Ticket pruefen — wenn da, wird automatisch eine Variante angelegt.
+  let existingQuotesForTicket = [];
+  try {
+    const allQuotes = await readData('Quote').catch(() => []);
+    existingQuotesForTicket = allQuotes
+      .filter(q =>
+        String(q.fields.freshdesk_ticket_id || '') === String(ticketId) &&
+        (q.fields.company_id || []).includes(cur?.id) &&
+        (q.fields.status || 'Entwurf') !== 'archiviert')
+      .sort((a, b) => (b.fields.quote_no || '').localeCompare(a.fields.quote_no || '', 'de'));
+  } catch (_) {}
+  _aqcState.existingQuotesForTicket = existingQuotesForTicket;
+  const existingQuotesHint = existingQuotesForTicket.length
+    ? '\n═══ EXISTIERENDE ANGEBOTE FÜR DIESES TICKET ═══\n' +
+      existingQuotesForTicket.slice(0, 10).map(q => {
+        const f = q.fields || {};
+        return `- ${f.quote_no || '–'}${f.date ? ' vom ' + f.date : ''} (Status: ${f.status || 'Entwurf'})${f.quote_title ? ' — ' + (f.quote_title.length > 60 ? f.quote_title.slice(0, 60) + '…' : f.quote_title) : ''}`;
+      }).join('\n') +
+      '\n\nHINWEIS: Da bereits ein Angebot existiert, wird das neue Angebot automatisch als Variante mit X.N-Nummer angelegt (z.B. ' + (existingQuotesForTicket[0].fields.quote_no || 'Q-XXXX') + '.N). Du musst den User NICHT fragen ob er eine Variante will — das macht die App selbst. Beziehe dich im intro/summary aber gerne darauf falls relevant ("hier eine alternative Variante...").\n'
+    : '';
+
   // ERP-Match (Kunde + Kontakt)
   const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
   const fdContact = ticket?.requester || (ticket?.requester_id ? _fdContactCache.get(ticket.requester_id) : null);
@@ -4663,7 +4696,7 @@ Anrede: ${erpState.contact?.fields?.gender || '?'}
 Erste Nachricht:
 ${ticketBody || '(leer)'}
 
-${convSnippet ? 'Bisheriger Verlauf:\n' + convSnippet + '\n' : ''}${attHint}${customFieldsHint}${pastExamples}
+${convSnippet ? 'Bisheriger Verlauf:\n' + convSnippet + '\n' : ''}${attHint}${existingQuotesHint}${customFieldsHint}${pastExamples}
 ═══ VERFÜGBARE BUNDLES ═══
 ${bundles.length ? bundles.map(b => {
   const f = b.fields || {};
@@ -5178,11 +5211,24 @@ async function _aqcCreateQuote() {
         { name: 'attachment_ids',      type: 'multilineText' },
         { name: 'quote_title',         type: 'singleLineText' },
         { name: 'force_closing_new_page', type: 'checkbox', options: { color: 'blueBright', icon: 'check' } },
-        { name: 'custom_values',       type: 'multilineText' }
+        { name: 'custom_values',       type: 'multilineText' },
+        { name: 'parent_quote_no',     type: 'singleLineText' }
       ]);
     } catch (_) {}
 
-    const quoteNo = await nextQuoteNo(cur.id);
+    // Auto-Varianten-Logik: wenn schon Quotes fuer dieses Ticket existieren, neue als X.N anlegen
+    const existingForTicket = _aqcState.existingQuotesForTicket || [];
+    let quoteNo, parentQuoteNoForVariant = '';
+    if (existingForTicket.length > 0) {
+      // hoechste vorhandene Nummer als Basis nehmen (sortiert war absteigend)
+      const baseQuote = existingForTicket[0];
+      const baseNo = baseQuote.fields.quote_no || '';
+      quoteNo = await nextQuoteVariantNo(baseNo, cur.id);
+      parentQuoteNoForVariant = _extractQuoteBase(baseNo);
+      console.log('[aqc] Existierendes Angebot fuer Ticket gefunden — lege Variante an:', quoteNo, '(Basis:', baseNo + ')');
+    } else {
+      quoteNo = await nextQuoteNo(cur.id);
+    }
     const today = new Date();
     const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
     const iso = (d) => d.toISOString().slice(0, 10);
@@ -5233,6 +5279,8 @@ async function _aqcCreateQuote() {
       fields.custom_values = JSON.stringify(cfClean);
     }
     if (parsed.bundle_id) fields.bundle_id = parsed.bundle_id;
+    // Wenn als Variante angelegt: Basis-Nummer als parent referenzieren
+    if (parentQuoteNoForVariant) fields.parent_quote_no = parentQuoteNoForVariant;
     // Seitenumbruch-Checkbox aus dem Bundle uebernehmen (z.B. "Schlusstext auf neuer Seite")
     if (bundleResolved && typeof bundleResolved.force_closing_new_page === 'boolean') {
       fields.force_closing_new_page = bundleResolved.force_closing_new_page;
@@ -5254,7 +5302,7 @@ async function _aqcCreateQuote() {
     // Resilientes Write: bei "Value is not an array of record IDs" lokal-Schema-Mismatch —
     // optionale Felder iterativ entfernen + Retry. So bleibt das Angebot trotz krummer Schemas anlegbar.
     console.log('[aqc] Quote-Write fields:', fields);
-    const OPTIONAL_FIELDS_FALLBACK = ['attachment_ids', 'force_closing_new_page', 'custom_values', 'bundle_id', 'layout_variant', 'ai_summary', 'quote_title', 'freshdesk_ticket_id'];
+    const OPTIONAL_FIELDS_FALLBACK = ['attachment_ids', 'force_closing_new_page', 'custom_values', 'parent_quote_no', 'bundle_id', 'layout_variant', 'ai_summary', 'quote_title', 'freshdesk_ticket_id'];
     let created = null;
     let lastErr = null;
     let writeFields = { ...fields };
@@ -5422,7 +5470,9 @@ async function _aqcCreateQuote() {
     } catch (_) {}
 
     // Toast mit "Öffnen"-Button — User klickt drauf und sendet dann per Email
-    const parts2 = ['✓ Angebot ' + quoteNo + ' angelegt'];
+    const isVariant = !!parentQuoteNoForVariant;
+    const parts2 = [(isVariant ? '✓ Variante ' : '✓ Angebot ') + quoteNo + ' angelegt'];
+    if (isVariant) parts2.push('Basis: ' + parentQuoteNoForVariant);
     if (newArticlesCreated > 0) parts2.push(newArticlesCreated + ' Artikel in Katalog übernommen');
     if (inlineItemsCount > 0)   parts2.push(inlineItemsCount + ' vorgangsbezogen');
     if (itemErrors > 0)         parts2.push(itemErrors + ' Item-Fehler');
