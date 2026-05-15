@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.00';
+const APP_VERSION = 'v5.01';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3914,14 +3914,24 @@ VERFÜGBARE ACTIONS:
   "summary_for_user": "1 Satz Bestätigung"
 }
 
-2) Zu Seite navigieren:
+2) Variante eines bestehenden Angebots anlegen:
+   Angebote koennen Varianten mit X.N-Nummerierung haben (z.B. Q-1024 → Q-1024.1, Q-1024.2).
+   Wenn der User sowas sagt wie "Variante von Q-1024", "Q-1024 nochmal mit anderem Preis", "kopier mir Q-1024" → diese Action.
+   Die App dupliziert alle Felder + Positionen + Bundle + Templates, vergibt automatisch die naechste freie .N-Nummer und oeffnet das Editor-Modal damit der User anpassen kann.
+{
+  "action": "create_quote_variant",
+  "quote_no": "Q-1024",
+  "summary_for_user": "1 Satz Bestaetigung"
+}
+
+3) Zu Seite navigieren:
 {
   "action": "navigate",
   "route": "anfragen|angebote|auftraege|lieferscheine|rechnungen|bestellungen|kundenbestellungen|kunden|kontakte|lieferanten|artikel|statistik-sales|statistik-angebote|statistik-umsatz",
   "summary_for_user": "Was du gerade öffnest"
 }
 
-3) Kunden / Artikel suchen / Datenfrage beantworten:
+4) Kunden / Artikel suchen / Datenfrage beantworten:
 - Wenn du die Antwort aus dem Kontext oben weisst → antworte als NORMALER Deutsch-Text.
 
 REGELN:
@@ -4014,10 +4024,47 @@ async function _eaRunAction(action) {
     case 'create_quote':
       await _eaCreateQuote(action);
       break;
+    case 'create_quote_variant':
+      await _eaCreateQuoteVariant(action);
+      break;
     default:
       console.warn('[ea] Unbekannte Action:', action.action);
       _eaState.chatHistory.push({ role: 'assistant', content: '⚠ Action "' + action.action + '" ist noch nicht implementiert. Folgt im nächsten Update.' });
       _eaRenderChatLog();
+  }
+}
+
+// Variante eines bestehenden Angebots via Chat-Action anlegen
+async function _eaCreateQuoteVariant(action) {
+  if (_eaState.executing) return;
+  _eaState.executing = true;
+  const status = document.getElementById('eaStatus');
+  if (status) status.textContent = 'Lege Variante an …';
+  try {
+    const cur = getCurrentCompany();
+    if (!cur) throw new Error('Kein Mandant');
+    let quoteId = action.quote_id || null;
+    if (!quoteId && action.quote_no) {
+      const all = await readData('Quote').catch(() => []);
+      const q = all.find(x => x.fields.quote_no === action.quote_no && (x.fields.company_id || []).includes(cur.id));
+      if (q) quoteId = q.id;
+    }
+    if (!quoteId) throw new Error('Original-Angebot nicht gefunden (quote_no=' + (action.quote_no || '?') + ')');
+
+    const res = await createQuoteVariant(quoteId, { silent: true, skipModalActions: true });
+    if (!res) throw new Error('Variante konnte nicht angelegt werden');
+
+    _eaState.chatHistory.push({ role: 'assistant', content: '✓ Variante ' + res.quote_no + ' angelegt. Ich öffne sie zum Anpassen.' });
+    _eaRenderChatLog();
+    closeModal2();
+    setTimeout(() => { if (typeof openQuoteModal === 'function') openQuoteModal(res.id); }, 300);
+  } catch (err) {
+    console.error('[ea] create_quote_variant:', err);
+    _eaState.chatHistory.push({ role: 'assistant', content: '⚠ Variante fehlgeschlagen: ' + (err.message || err) });
+    _eaRenderChatLog();
+  } finally {
+    _eaState.executing = false;
+    if (status) status.textContent = '';
   }
 }
 
@@ -19438,11 +19485,11 @@ async function nextQuoteVariantNo(baseQuoteNo, companyId) {
 
 // Legt eine Variante eines bestehenden Angebots an. Kopiert alle relevanten Felder
 // + QuoteItems, vergibt neue Nummer X.N, setzt Status auf Entwurf, oeffnet danach das Modal.
-async function createQuoteVariant(quoteId) {
-  if (!quoteId) return;
+async function createQuoteVariant(quoteId, opts = {}) {
+  if (!quoteId) return null;
   const cur = getCurrentCompany();
-  if (!cur) { toast('Mandant fehlt', 'error'); return; }
-  if (!confirm('Variante dieses Angebots anlegen?\n\nDie Variante bekommt die Nummer X.N und kann unabhängig vom Original bearbeitet werden.')) return;
+  if (!cur) { toast('Mandant fehlt', 'error'); return null; }
+  if (!opts.silent && !confirm('Variante dieses Angebots anlegen?\n\nDie Variante bekommt die Nummer X.N und kann unabhängig vom Original bearbeitet werden.')) return null;
   try {
     // ensureFields für parent_quote_no (idempotent)
     try { await ensureFields('Quote', [{ name: 'parent_quote_no', type: 'singleLineText' }]); } catch (_) {}
@@ -19515,11 +19562,13 @@ async function createQuoteVariant(quoteId) {
     } catch (e) { console.warn('[variant] Items lesen:', e.message); }
 
     toast('✓ Variante ' + newQuoteNo + ' angelegt' + (copiedItems ? ' · ' + copiedItems + ' Positionen' : ''), 'success', 5000);
-    closeModal();
-    setTimeout(() => { if (typeof openQuoteModal === 'function') openQuoteModal(created.id); }, 250);
+    if (!opts.skipModalActions) closeModal();
+    if (!opts.skipModalActions) setTimeout(() => { if (typeof openQuoteModal === 'function') openQuoteModal(created.id); }, 250);
+    return { id: created.id, quote_no: newQuoteNo, copiedItems };
   } catch (e) {
     console.error('[createQuoteVariant]', e);
     toast('Variante fehlgeschlagen: ' + (e.message || e), 'error', 8000);
+    return null;
   }
 }
 
