@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.02';
+const APP_VERSION = 'v5.03';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -20300,11 +20300,31 @@ async function renderQuotes() {
         .some(v => (v || '').toString().toLowerCase().includes(q));
     });
   }
-  // Neueste zuerst nach Quote-Nummer
+  // Varianten-Map: Basis-Nr → Array aller verbundenen Quotes (inkl. Basis selbst).
+  // Wird unten an quoteRow weitergereicht, damit Basis-Quotes 'N Varianten' anzeigen
+  // und Varianten ihre Basis verlinken koennen.
+  const variantsByBase = {};
+  list.forEach(rec => {
+    const base = _extractQuoteBase(rec.fields.quote_no || '');
+    if (!base) return;
+    if (!variantsByBase[base]) variantsByBase[base] = [];
+    variantsByBase[base].push(rec);
+  });
+
+  // Sortierung: erst nach Basis-Nummer absteigend, dann innerhalb Basis: Basis zuerst, dann Varianten aufsteigend.
+  // Damit gruppieren sich Variante-Geschwister sichtbar zusammen.
   list.sort((a, b) => {
-    const an = parseInt((a.fields.quote_no || '').replace(/\D/g, ''), 10) || 0;
-    const bn = parseInt((b.fields.quote_no || '').replace(/\D/g, ''), 10) || 0;
-    return bn - an;
+    const aBase = _extractQuoteBase(a.fields.quote_no || '');
+    const bBase = _extractQuoteBase(b.fields.quote_no || '');
+    const aBaseNum = parseInt(aBase.replace(/\D/g, ''), 10) || 0;
+    const bBaseNum = parseInt(bBase.replace(/\D/g, ''), 10) || 0;
+    if (aBaseNum !== bBaseNum) return bBaseNum - aBaseNum; // neuere Basis oben
+    // gleiche Basis: Basis-Quote zuerst, dann Varianten aufsteigend
+    const aVm = (a.fields.quote_no || '').match(/\.(\d+)$/);
+    const bVm = (b.fields.quote_no || '').match(/\.(\d+)$/);
+    const aV = aVm ? parseInt(aVm[1], 10) : 0;
+    const bV = bVm ? parseInt(bVm[1], 10) : 0;
+    return aV - bV;
   });
 
   document.getElementById('pageContent').innerHTML = `
@@ -20370,7 +20390,7 @@ async function renderQuotes() {
           if (vm === 'kompakt') {
             return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRowKompakt(rec, custMap, orderCountByQuote[rec.id] || 0)).join('') + '</div>';
           }
-          return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRow(rec, custMap, orderCountByQuote[rec.id] || 0)).join('') + '</div>';
+          return '<div class="divide-y divide-ink-100">' + list.map(rec => quoteRow(rec, custMap, orderCountByQuote[rec.id] || 0, variantsByBase)).join('') + '</div>';
         })()}
       </div>
     </div>
@@ -20440,13 +20460,25 @@ function quoteRowTabelle(rec, custMap, orderCount = 0) {
   `;
 }
 
-function quoteRow(rec, custMap, orderCount = 0) {
+function quoteRow(rec, custMap, orderCount = 0, variantsByBase = null) {
   const f = rec.fields || {};
   const cid = (f.customer_id || [])[0];
   const cust = custMap?.[cid];
   const total = f.total_gross !== undefined && f.total_gross !== null && f.total_gross !== ''
     ? formatPrice(f.total_gross) + ' €'
     : '';
+  // Varianten-Badge: ist diese Quote eine Variante (X.N)? Hat sie Schwester-Varianten?
+  const quoteNo = f.quote_no || '';
+  const variantMatch = quoteNo.match(/^(Q-\d+)\.(\d+)$/);
+  const isVariant = !!variantMatch;
+  const baseNo = isVariant ? variantMatch[1] : quoteNo;
+  const sisters = (variantsByBase && variantsByBase[baseNo]) || [];
+  const otherCount = sisters.filter(s => s.id !== rec.id).length;
+  const variantBadge = isVariant
+    ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded inline-flex items-center gap-1" title="Variante von ${escapeHtml(baseNo)}"><i data-lucide="copy-plus" class="w-3 h-3"></i> .${escapeHtml(variantMatch[2])}</span>`
+    : (otherCount > 0
+        ? `<span class="text-[10px] uppercase tracking-wider bg-purple-50 text-purple-700 border border-purple-200 px-1.5 py-0.5 rounded font-medium inline-flex items-center gap-1" title="${otherCount} Variante${otherCount===1?'':'n'} vorhanden"><i data-lucide="git-branch" class="w-3 h-3"></i> +${otherCount}</span>`
+        : '');
   const lockedByOther = isLockedByOther(rec);
   const lockInfo = getLockInfo(rec);
   const lockedBadge = lockedByOther
@@ -20468,6 +20500,7 @@ function quoteRow(rec, custMap, orderCount = 0) {
         <div class="flex items-baseline gap-2 flex-wrap">
           <span class="text-xs font-mono text-ink-500">${escapeHtml(f.quote_no || '–')}</span>
           ${quoteStatusBadge(f.status || 'Entwurf')}
+          ${variantBadge}
           ${orderBadge}
           ${fdBadge}
           ${lockedBadge}
@@ -21643,6 +21676,21 @@ async function openQuoteModal(id) {
   // Globaler Customer-Daten-Cache für Defaults bei Wechsel (payment_terms / delivery_terms / contacts / addresses)
   window._quoteCustomerCache = { byId: {}, contacts: allContacts, addresses: allAddresses };
   customersInCompany.forEach(c => { window._quoteCustomerCache.byId[c.id] = c.fields; });
+  // Variant-Siblings-Cache: alle Quotes mit derselben Basis-Nummer fuer Geschwister-Navigation
+  // (wird vom Variant-Banner gelesen)
+  if (id && f.quote_no) {
+    const baseNo = _extractQuoteBase(f.quote_no);
+    if (baseNo) {
+      try {
+        const allQ = await readData('Quote').catch(() => []);
+        window._quoteSiblingsCache = allQ.filter(q => {
+          const qn = q.fields?.quote_no || '';
+          if (!(q.fields.company_id || []).includes(cur.id)) return false;
+          return qn === baseNo || qn.startsWith(baseNo + '.');
+        });
+      } catch (_) { window._quoteSiblingsCache = []; }
+    } else { window._quoteSiblingsCache = []; }
+  } else { window._quoteSiblingsCache = []; }
   // Initiale Adress-Auswahl: bei Neuanlage Hauptadressen vorbelegen, sonst gespeicherte IDs
   let currentDeliveryAddressId = (f.delivery_address_id || '').trim();
   let currentInvoiceAddressId  = (f.invoice_address_id  || '').trim();
@@ -21660,16 +21708,43 @@ async function openQuoteModal(id) {
       </div>
 
       ${(() => {
-        // Varianten-Banner: wenn dieses Quote eine Variante ist (X.N) — zeig die Basis als Hinweis
+        // Varianten-Banner: wenn dieses Quote eine Variante ist ODER andere Varianten zu derselben Basis hat
         const qn = (f.quote_no || '');
         const variantMatch = qn.match(/^(Q-\d+)\.(\d+)$/);
-        if (variantMatch) {
-          return `<div class="mb-3 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 text-xs text-purple-900 flex items-center gap-2">
-            <i data-lucide="copy-plus" class="w-4 h-4 shrink-0"></i>
-            <span>Dies ist <strong>Variante .${escapeHtml(variantMatch[2])}</strong> von <strong>${escapeHtml(variantMatch[1])}</strong>${f.parent_quote_no ? '' : ''}</span>
-          </div>`;
-        }
-        return '';
+        const baseNo = variantMatch ? variantMatch[1] : qn;
+        // Alle Geschwister-Quotes finden (Basis + alle X.N)
+        const sisters = (window._quoteSiblingsCache || []).filter(s => {
+          const sn = s.fields?.quote_no || '';
+          return sn === baseNo || sn.startsWith(baseNo + '.');
+        }).sort((a, b) => {
+          const av = (a.fields.quote_no || '').match(/\.(\d+)$/);
+          const bv = (b.fields.quote_no || '').match(/\.(\d+)$/);
+          return (av ? parseInt(av[1], 10) : 0) - (bv ? parseInt(bv[1], 10) : 0);
+        });
+        const others = sisters.filter(s => s.id !== id);
+        if (!variantMatch && others.length === 0) return '';
+
+        const headLine = variantMatch
+          ? `Dies ist <strong>Variante .${escapeHtml(variantMatch[2])}</strong> von <strong>${escapeHtml(baseNo)}</strong>`
+          : `Dies ist die <strong>Basis ${escapeHtml(baseNo)}</strong> mit ${others.length} Variante${others.length===1?'':'n'}`;
+        const sisterBtns = others.map(s => {
+          const sn = s.fields?.quote_no || '';
+          const lbl = sn === baseNo ? 'Basis' : (sn.match(/\.(\d+)$/) ? '.' + sn.match(/\.(\d+)$/)[1] : sn);
+          const status = s.fields?.status || 'Entwurf';
+          const sCls = status === 'Versendet' ? 'bg-blue-100 text-blue-700 border-blue-200'
+                     : status === 'Angenommen' ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                     : status === 'Abgelehnt' ? 'bg-red-100 text-red-700 border-red-200'
+                     : status === 'archiviert' ? 'bg-ink-100 text-ink-500 border-ink-200'
+                     : 'bg-white text-ink-700 border-ink-200';
+          return `<button type="button" onclick="closeModal();setTimeout(()=>openQuoteModal('${s.id}'),120)" class="text-[11px] px-2 py-0.5 rounded border ${sCls} hover:opacity-80 transition inline-flex items-center gap-1" title="${escapeHtml(sn)} (${escapeHtml(status)})">${escapeHtml(lbl)}</button>`;
+        }).join('');
+        return `<div class="mb-3 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 text-xs text-purple-900">
+          <div class="flex items-center gap-2 mb-1">
+            <i data-lucide="${variantMatch ? 'copy-plus' : 'git-branch'}" class="w-4 h-4 shrink-0"></i>
+            <span class="flex-1">${headLine}</span>
+          </div>
+          ${others.length ? `<div class="flex flex-wrap gap-1 ml-6">${sisterBtns}</div>` : ''}
+        </div>`;
       })()}
 
       ${(f.freshdesk_ticket_id || f.ai_summary) ? _renderQuoteFreshdeskBox(f) : ''}
