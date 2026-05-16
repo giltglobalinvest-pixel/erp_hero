@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.10';
+const APP_VERSION = 'v5.11';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6794,6 +6794,94 @@ function _resolveFdMatchFromIds() {
   _fdTicketState.match = { customer, contact };
 }
 
+// Erkennt ob eine Email eine bekannte Shop-/Relay-Adresse ist
+// (Tickets davon enthalten den echten Absender im Body, nicht als requester).
+function _isShopRelayEmail(email) {
+  if (!email) return false;
+  const e = String(email).toLowerCase().trim();
+  // Konfigurierbar via APP_KEYS oder localStorage — Defaults decken Standard-Fälle ab
+  const customList = (localStorage.getItem('shop_relay_emails') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const defaults = ['wordpress@flp-shop.com', 'info@flp-shop.com', 'noreply@flp-shop.com'];
+  const all = customList.length ? customList : defaults;
+  return all.includes(e);
+}
+
+// Parst aus dem Ticket-Body ein "e-mail: ..." + optional Name (Mfg / Gruss-Zeile).
+// Returns {email, name} oder null.
+function _extractSenderFromShopBody(text) {
+  if (!text) return null;
+  const txt = String(text);
+  // Email-Pattern: "e-mail:" / "E-Mail:" / "email:" — gefolgt von optional newline + Email
+  const emailMatch = txt.match(/e[-\s]?mail\s*:?\s*\n?\s*([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
+  const realEmail = emailMatch ? emailMatch[1].trim() : null;
+  // Name aus Gruss-Zeile: "Mfg D.Bytyqi" / "MfG Max Müller" / "Mit freundlichen Grüßen, Max Mustermann"
+  let realName = null;
+  const mfgMatch = txt.match(/\b(?:MfG|Mfg|MFG)\s*[,\.\s]\s*([A-ZÄÖÜ][\w\.\-]*(?:\s+[A-ZÄÖÜ][\w\.\-]*)*)/);
+  if (mfgMatch) realName = mfgMatch[1].trim();
+  if (!realName) {
+    const grussMatch = txt.match(/Mit\s+freundlichen\s+Gr[üu][sß]en[,\s\n]+([A-ZÄÖÜ][\w\.\-]*(?:\s+[A-ZÄÖÜ][\w\.\-]*)*)/i);
+    if (grussMatch) realName = grussMatch[1].trim();
+  }
+  if (!realEmail) return null;
+  return { email: realEmail, name: realName };
+}
+
+// Aktualisiert das aktuelle FD-Ticket: legt FD-Contact mit echter Email an (bzw. findet
+// einen bestehenden) und setzt ihn als requester_id. Danach Reload.
+async function _fdFixRequesterFromBody(realEmail, realName) {
+  const t = _fdTicketState?.ticket;
+  if (!t?.id) return;
+  if (!APP_KEYS.proxyV2) { toast('Benötigt Val.town-Proxy v2', 'error', 6000); return; }
+  if (!realEmail) return;
+  const btn = document.getElementById('fdFixRequesterBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Aktualisiere …'; if (window.lucide) lucide.createIcons(); }
+  try {
+    let newContactId = null;
+    // 1) Bestehenden FD-Contact mit dieser Email suchen
+    try {
+      const search = await proxyFetch('freshdesk/api/v2/contacts?email=' + encodeURIComponent(realEmail));
+      const list = Array.isArray(search) ? search : (Array.isArray(search?.results) ? search.results : []);
+      if (list.length && list[0]?.id) newContactId = list[0].id;
+    } catch (_) {}
+    // 2) Wenn keiner: neuen anlegen
+    if (!newContactId) {
+      const body = { email: realEmail };
+      if (realName) body.name = realName;
+      else body.name = realEmail.split('@')[0]; // Fallback aus Email-Local-Part
+      try {
+        const created = await proxyFetch('freshdesk/api/v2/contacts', { method: 'POST', body });
+        newContactId = created?.id;
+      } catch (e) {
+        // 409 duplicate — ID aus Error extrahieren
+        const m = String(e?.message || '');
+        const idMatch = m.match(/(?:contact|user)[\s_]?id\s*[:=]?\s*(\d+)/i);
+        if (/409|duplicate/i.test(m) && idMatch) newContactId = Number(idMatch[1]);
+        else throw e;
+      }
+    }
+    if (!newContactId) throw new Error('Keine Contact-ID erhalten');
+    // 3) Ticket-Requester updaten
+    await proxyFetch('freshdesk/api/v2/tickets/' + t.id, { method: 'PUT', body: { requester_id: newContactId } });
+    toast('✓ Anfragender geändert auf ' + realEmail, 'success', 4500);
+    // Ticket frisch laden + Modal neu rendern
+    try {
+      const fresh = await freshdeskFetch('tickets/' + t.id + '?include=requester');
+      if (fresh) {
+        _fdTicketState.ticket = fresh;
+        _fdTicketState.requester = fresh.requester || null;
+        _fdContactCache.delete(t.requester_id);
+        if (newContactId) _fdContactCache.delete(newContactId);
+      }
+    } catch (_) {}
+    _renderFreshdeskTicket();
+    setTimeout(() => { if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview(); }, 700);
+  } catch (err) {
+    console.error('[fdFixRequester]', err);
+    toast('Update fehlgeschlagen: ' + (err.message || err), 'error', 8000);
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="user-cog" class="w-3.5 h-3.5"></i> Anfragenden korrigieren'; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
 function _renderFreshdeskTicket() {
   const body = document.getElementById('fdTicketBody');
   if (!body) return;
@@ -6830,6 +6918,31 @@ function _renderFreshdeskTicket() {
           ${tags.map(tag => `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-700 px-1.5 py-0.5 rounded">#${escapeHtml(tag)}</span>`).join('')}
         </div>
       </div>
+
+      ${(() => {
+        // Shop-Relay-Detektion: wenn requester eine Pseudo-Email ist + Body enthält die echte Email
+        const reqEmail = r?.email || '';
+        if (!_isShopRelayEmail(reqEmail)) return '';
+        const bodyText = _fdHtmlToText(t.description_html || t.description || '');
+        const real = _extractSenderFromShopBody(bodyText);
+        if (!real || !real.email) return '';
+        // Schon korrigiert? (real.email == requester email)
+        if (real.email.toLowerCase() === reqEmail.toLowerCase()) return '';
+        return `<div class="bg-amber-50 border border-amber-300 rounded-xl p-3 flex items-start gap-2">
+          <i data-lucide="user-cog" class="w-5 h-5 text-amber-700 shrink-0 mt-0.5"></i>
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-semibold text-amber-900">Shop-Ticket — echter Absender im Body gefunden</p>
+            <p class="text-xs text-amber-800 mt-0.5">
+              Aktueller Anfragender ist die Shop-Relay-Email <code>${escapeHtml(reqEmail)}</code>.
+              Echter Absender: <strong>${escapeHtml(real.email)}</strong>${real.name ? ' · ' + escapeHtml(real.name) : ''}
+            </p>
+            <button type="button" id="fdFixRequesterBtn" onclick="_fdFixRequesterFromBody('${escapeHtml(real.email)}', ${real.name ? `'${escapeHtml(real.name)}'` : 'null'})"
+              class="mt-2 inline-flex items-center gap-1.5 text-xs px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold transition">
+              <i data-lucide="user-cog" class="w-3.5 h-3.5"></i> Anfragenden auf ${escapeHtml(real.email)} korrigieren
+            </button>
+          </div>
+        </div>`;
+      })()}
 
       <!-- Meta-Grid -->
       <div class="grid sm:grid-cols-2 gap-3 text-xs bg-ink-50 rounded-xl p-3">
