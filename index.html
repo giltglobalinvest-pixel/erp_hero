@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.03';
+const APP_VERSION = 'v5.04';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3364,33 +3364,83 @@ function _erpContactCompletenessIssues(contact) {
 
 // Helper: Liefert ein State-Objekt fuer ein FD-Ticket.
 // state: 'green' = alles ok, KI-Angebot moeglich
-//        'yellow' = Kunde + Kontakt da, aber unvollstaendig
-//        'red' = Kunde oder Kontakt fehlt im ERP
-//        'unknown' = Requester noch nicht geladen
-function _getTicketErpState(fdContact, customersInMandant, contactsByEmail) {
-  const state = { state: 'red', customer: null, contact: null, issues: [], email: '' };
+//        'yellow' = Kunde da, Kontakt unvollstaendig oder Anfragende:r != ERP-Contact
+//        'red'    = Kunde fehlt im ERP
+//        'unknown'= Requester noch nicht geladen
+// erp = {customers, contactsByEmail, contactsByCustomer}
+function _getTicketErpState(fdContact, customersInMandant, contactsByEmail, contactsByCustomer) {
+  const state = { state: 'red', customer: null, contact: null, issues: [], hints: [], email: '', requesterIsContact: false };
   if (!fdContact) { state.state = 'unknown'; state.issues.push('Anfragender noch nicht geladen'); return state; }
   const email = String(fdContact.email || '').toLowerCase().trim();
   state.email = email;
-  if (!email) { state.issues.push('Keine Email beim Anfragenden hinterlegt'); return state; }
-  const contact = contactsByEmail.get(email) || null;
-  // Customer via Contact.customer_id, sonst via Customer.email direkt
+
   let customer = null;
-  if (contact) {
-    const custId = (contact.fields.customer_id || [])[0];
-    if (custId) customer = customersInMandant.find(c => c.id === custId) || null;
+  let contact = null;
+
+  // Strategie A: Email matched einen ERP-Contact direkt — bester Treffer (Anfragende:r IST der Contact)
+  if (email) {
+    contact = contactsByEmail.get(email) || null;
+    if (contact) {
+      const custId = (contact.fields.customer_id || [])[0];
+      if (custId) customer = customersInMandant.find(c => c.id === custId) || null;
+      if (customer) state.requesterIsContact = true;
+    }
   }
-  if (!customer) {
+  // Strategie B: Customer.email matched direkt
+  if (!customer && email) {
     customer = customersInMandant.find(c => String(c.fields.email || '').toLowerCase().trim() === email) || null;
   }
+  // Strategie C: FD-Company-Name matched ERP-Customer.name1 (case-insensitive)
+  if (!customer && fdContact.company_name) {
+    const fdCo = String(fdContact.company_name).trim().toLowerCase();
+    if (fdCo.length > 2) {
+      customer = customersInMandant.find(c => String(c.fields.name1 || '').trim().toLowerCase() === fdCo) || null;
+    }
+  }
+  // Strategie D: Email-Domain matched Customer.email-Domain oder Customer.web
+  if (!customer && email) {
+    const domain = (email.split('@')[1] || '').toLowerCase();
+    const GENERIC = new Set(['gmail.com','gmx.de','gmx.net','web.de','outlook.com','hotmail.com','yahoo.com','t-online.de','icloud.com','me.com','aol.com','live.com']);
+    if (domain && !GENERIC.has(domain)) {
+      customer = customersInMandant.find(c => {
+        const cEmail = String(c.fields.email || '').toLowerCase();
+        const cWeb = String(c.fields.web || '').toLowerCase()
+          .replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
+        return cEmail.endsWith('@' + domain) || cWeb === domain || cWeb.endsWith('.' + domain) || domain.endsWith('.' + cWeb);
+      }) || null;
+    }
+  }
+
+  // Customer steht jetzt fest (oder ist null). Falls Customer da, aber kein Contact via Email-Match,
+  // fall back auf einen beliebigen Contact am gleichen Customer (primary → erster).
+  if (customer && !contact && contactsByCustomer) {
+    const customerContacts = contactsByCustomer.get(customer.id) || [];
+    contact = customerContacts.find(c => c.fields.is_primary) || customerContacts[0] || null;
+  }
+
   state.customer = customer;
   state.contact  = contact;
-  if (!customer) state.issues.push('Kunde nicht im ERP angelegt');
-  if (!contact) state.issues.push('Kontakt nicht im ERP angelegt');
-  else state.issues.push(..._erpContactCompletenessIssues(contact));
-  if (state.issues.length === 0) state.state = 'green';
-  else if (customer && contact) state.state = 'yellow';
-  else state.state = 'red';
+
+  // Status bestimmen
+  if (!customer) {
+    state.issues.push('Kunde nicht im ERP angelegt');
+    state.state = 'red';
+    return state;
+  }
+  if (!contact) {
+    state.issues.push('Kein Kontakt für diesen Kunden im ERP');
+    state.state = 'yellow';
+    return state;
+  }
+  // Contact-Vollstaendigkeit pruefen — nur ECHTE Mängel kommen in issues (gehen ins Yellow)
+  const completenessIssues = _erpContactCompletenessIssues(contact);
+  state.issues.push(...completenessIssues);
+  // Hinweis (kein Blocker!) wenn Anfragende:r ein anderer ist als der gefundene ERP-Contact
+  if (!state.requesterIsContact && email && fdContact.name) {
+    const cName = ((contact.fields.first_name || '') + ' ' + (contact.fields.last_name || '')).trim() || contact.fields.name || '(unbekannt)';
+    state.hints.push('Anfragende:r „' + fdContact.name + '" ist nicht als ERP-Kontakt eingetragen — verwende vorhandenen: ' + cName);
+  }
+  state.state = completenessIssues.length === 0 ? 'green' : 'yellow';
   return state;
 }
 
@@ -3406,14 +3456,21 @@ async function _prepareErpStateCache() {
   const customersInMandant = customers.filter(c => (c.fields.company_id || []).includes(cur.id));
   const inMandantIds = new Set(customersInMandant.map(c => c.id));
   const contactsByEmail = new Map();
+  const contactsByCustomer = new Map();
   contacts.forEach(c => {
     const em = String(c.fields.email || '').toLowerCase().trim();
+    const custIds = c.fields.customer_id || [];
+    // Index: customerId → Liste aller Contacts (auch ohne Email)
+    custIds.forEach(cid => {
+      if (!inMandantIds.has(cid)) return;
+      if (!contactsByCustomer.has(cid)) contactsByCustomer.set(cid, []);
+      contactsByCustomer.get(cid).push(c);
+    });
     if (!em) return;
-    const custId = (c.fields.customer_id || [])[0];
-    if (custId && !inMandantIds.has(custId)) return; // anderer Mandant
+    if (custIds.length && !custIds.some(cid => inMandantIds.has(cid))) return; // anderer Mandant
     contactsByEmail.set(em, c);
   });
-  window._inquiriesErpCache = { customers: customersInMandant, contactsByEmail, tsKey: String(Date.now()) };
+  window._inquiriesErpCache = { customers: customersInMandant, contactsByEmail, contactsByCustomer, tsKey: String(Date.now()) };
   return window._inquiriesErpCache;
 }
 
@@ -3426,7 +3483,7 @@ function _renderTicketErpBadge(ticketId, fdContact) {
   const btnSlot = row.querySelector('.ticket-aiquote-slot');
   if (!slot && !btnSlot) return;
   const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
-  const st = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+  const st = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail, erp.contactsByCustomer);
   row.dataset.erpState = st.state;
   // Badge
   if (slot) {
@@ -3462,7 +3519,7 @@ async function showTicketErpStatusModal(ticketId) {
   // Map-Key kann Number sein (so wird er beim FD-Load gesetzt) → beide Varianten probieren
   const fdContact = reqId != null ? (_fdContactCache.get(reqId) || _fdContactCache.get(reqIdRaw)) : null;
   const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
-  const st = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+  const st = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail, erp.contactsByCustomer);
   const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
   const stateBadge = st.state === 'green'
     ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">OK</span>'
@@ -3501,6 +3558,16 @@ async function showTicketErpStatusModal(ticketId) {
             </p>
           </div>
         `}
+        ${(st.hints || []).length ? `
+          <div class="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-2">
+            <p class="text-xs font-semibold text-blue-900 mb-1.5 flex items-center gap-1.5">
+              <i data-lucide="info" class="w-3.5 h-3.5"></i> Hinweise (kein Blocker):
+            </p>
+            <ul class="text-xs text-blue-900 space-y-0.5 ml-4 list-disc">
+              ${st.hints.map(i => '<li>' + escapeHtml(i) + '</li>').join('')}
+            </ul>
+          </div>
+        ` : ''}
       </div>
       <div class="flex gap-2 mt-4 flex-wrap justify-end">
         <button type="button" onclick="closeTopModal()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Schliessen</button>
@@ -4271,7 +4338,7 @@ async function openAiQuoteCreationModal(ticketId) {
   const reqIdRaw = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]')?.dataset.requesterId || null;
   const reqId = reqIdRaw ? Number(reqIdRaw) : null;
   const fdContact = reqId != null ? (_fdContactCache.get(reqId) || _fdContactCache.get(reqIdRaw)) : null;
-  const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+  const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail, erp.contactsByCustomer);
   const customerName = erpState.customer?.fields?.name1 || fdContact?.company_name || '–';
   const contactDisplay = erpState.contact
     ? (((erpState.contact.fields.first_name || '') + ' ' + (erpState.contact.fields.last_name || '')).trim() || erpState.contact.fields.name || fdContact?.name || '–')
@@ -4602,7 +4669,7 @@ async function _aqcBuildSystemPrompt() {
   // ERP-Match (Kunde + Kontakt)
   const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
   const fdContact = ticket?.requester || (ticket?.requester_id ? _fdContactCache.get(ticket.requester_id) : null);
-  const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+  const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail, erp.contactsByCustomer);
 
   // Artikel-Katalog
   let articles = [];
@@ -4844,7 +4911,7 @@ async function _aqcRunAnalysisOLD() {
     // 2. ERP-Match
     const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
     const fdContact = ticket?.requester || (ticket?.requester_id ? _fdContactCache.get(ticket.requester_id) : null);
-    const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail);
+    const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail, erp.contactsByCustomer);
     if (!erpState.customer) throw new Error('Kunde nicht im ERP gefunden — bitte erst anlegen');
 
     // 3. Artikel-Katalog (komprimiert) für SKU-Matching
