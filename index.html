@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.05';
+const APP_VERSION = 'v5.06';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5565,17 +5565,25 @@ async function _aqcCreateQuote() {
 async function loadFreshdeskTicketsPreview() {
   const wrap = document.getElementById('freshdeskTicketsWrap');
   if (!wrap) return;
-  // Reload-Icon dreht sich solange geladen wird
-  const refreshIcon = document.getElementById('inqRefreshIcon');
-  const refreshBtn  = document.getElementById('inqRefreshBtn');
-  if (refreshIcon) refreshIcon.classList.add('animate-spin');
-  if (refreshBtn)  refreshBtn.disabled = true;
-  const stopSpin = () => {
-    if (refreshIcon) refreshIcon.classList.remove('animate-spin');
-    if (refreshBtn)  refreshBtn.disabled = false;
+  // Reload-Icon dreht sich solange geladen wird — DOM jedes Mal frisch abfragen
+  // (alte Referenzen koennten stale sein wenn re-rendered wurde)
+  const startSpin = () => {
+    const ico = document.getElementById('inqRefreshIcon');
+    const btn = document.getElementById('inqRefreshBtn');
+    if (ico) ico.classList.add('animate-spin');
+    if (btn) btn.disabled = true;
   };
+  const stopSpin = () => {
+    const ico = document.getElementById('inqRefreshIcon');
+    const btn = document.getElementById('inqRefreshBtn');
+    if (ico) ico.classList.remove('animate-spin');
+    if (btn) btn.disabled = false;
+  };
+  startSpin();
+  // Safety: nach 30s den Spin auf jeden Fall stoppen — Netzwerk-Hang oder Race-Condition
+  const safetyStop = setTimeout(stopSpin, 30000);
   if (!_proxyBase()) {
-    stopSpin();
+    clearTimeout(safetyStop); stopSpin();
     wrap.innerHTML = `
       <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
         <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> API-Proxy nicht konfiguriert</p>
@@ -5587,7 +5595,7 @@ async function loadFreshdeskTicketsPreview() {
   const inqMode = window._currentInquiriesMode || 'sales';
   const modeGroupId = inqMode === 'order' ? getCurrentOrderGroupId() : getCurrentSalesGroupId();
   if (!modeGroupId) {
-    stopSpin();
+    clearTimeout(safetyStop); stopSpin();
     const modeLabel = inqMode === 'order' ? 'Bestellungen / Auftragsbearbeitung' : 'Sales';
     const fieldLabel = inqMode === 'order' ? 'Bestellungen-Gruppe' : 'Sales-Gruppe';
     wrap.innerHTML = `
@@ -5878,6 +5886,7 @@ async function loadFreshdeskTicketsPreview() {
     if (window.lucide) lucide.createIcons();
   } finally {
     // Reload-Icon stop spinnen — egal ob success oder Error
+    clearTimeout(safetyStop);
     stopSpin();
   }
 }
@@ -11636,15 +11645,15 @@ function renderWelcome() {
         <i data-lucide="arrow-right" class="w-5 h-5 shrink-0 group-hover:translate-x-1 transition"></i>
       </button>
 
-      <!-- Aufträge-CTA -->
-      <button type="button" onclick="dispatchRoute('auftraege')"
+      <!-- Bestellungen-CTA -->
+      <button type="button" onclick="dispatchRoute('kundenbestellungen')"
               class="mt-4 w-full bg-gradient-to-r from-emerald-500 to-emerald-700 hover:from-emerald-600 hover:to-emerald-800 text-white rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-4 p-5 group">
         <div class="w-12 h-12 rounded-xl bg-white/15 grid place-items-center shrink-0 group-hover:bg-white/25 transition">
-          <i data-lucide="file-check-2" class="w-6 h-6"></i>
+          <i data-lucide="shopping-bag" class="w-6 h-6"></i>
         </div>
         <div class="flex-1 text-left">
-          <p class="text-lg font-bold leading-tight">Zu den Aufträgen</p>
-          <p class="text-xs text-white/85 mt-0.5">Aufträge anlegen, bearbeiten, in Lieferschein oder Rechnung überführen</p>
+          <p class="text-lg font-bold leading-tight">Zu den Bestellungen</p>
+          <p class="text-xs text-white/85 mt-0.5">Freshdesk-Tickets aus der Auftragsbearbeitungs-Gruppe — Kundenbestellungen</p>
         </div>
         <i data-lucide="arrow-right" class="w-5 h-5 shrink-0 group-hover:translate-x-1 transition"></i>
       </button>
@@ -18884,17 +18893,17 @@ async function renderInquiries(mode) {
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-5xl mx-auto">
-      <div class="flex items-start justify-between mb-4 flex-wrap gap-3">
-        <div class="flex items-center gap-3 min-w-0 flex-1">
-          <!-- Prominenter Reload-Button neben dem Titel — gleich erkennbar, gut taubar auf Mobile -->
+      <div class="mb-4">
+        <!-- Zeile 1: Reload-Button + Titel (immer auf einer Zeile, gut sichtbar) -->
+        <div class="flex items-center gap-3 mb-1">
           <button type="button" id="inqRefreshBtn" onclick="loadFreshdeskTicketsPreview()" class="shrink-0 bg-brand-500 hover:bg-brand-600 active:bg-brand-700 text-white rounded-xl p-3 shadow-sm hover:shadow transition" title="Tickets jetzt neu laden">
             <i data-lucide="refresh-cw" class="w-5 h-5" id="inqRefreshIcon"></i>
           </button>
-          <div class="min-w-0">
-            <h2 class="text-xl font-bold text-ink-900 truncate">${escapeHtml(titleLabel)}</h2>
-            <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (${escapeHtml(groupLabel)} · ${escapeHtml(_inquiriesStatusFilterLabel().toLowerCase())}${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
-          </div>
+          <h2 class="flex-1 min-w-0 text-xl font-bold text-ink-900 truncate">${escapeHtml(titleLabel)}</h2>
         </div>
+        <!-- Zeile 2: Subtitle -->
+        <p class="text-xs text-ink-500 mb-3 ml-1">${escapeHtml(cur.name)} · Tickets aus Freshdesk (${escapeHtml(groupLabel)} · ${escapeHtml(_inquiriesStatusFilterLabel().toLowerCase())}${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
+        <!-- Zeile 3: Toolbar (Freshness + Auto-Refresh + Neu) -->
         <div class="flex items-center gap-2 flex-wrap">
           <span id="inqFreshness" class="text-[11px] text-ink-500 italic"></span>
           <select id="inqRefreshSelect" onchange="setInquiriesRefreshInterval(this.value)" class="text-xs border border-ink-200 rounded-lg px-2 py-2 bg-white" title="Auto-Refresh-Intervall">
@@ -18904,8 +18913,8 @@ async function renderInquiries(mode) {
             <option value="120">alle 2 Min.</option>
             <option value="300">alle 5 Min.</option>
           </select>
-          <button type="button" onclick="openNewTicketModal('${mode}')" class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-emerald-700 flex items-center gap-2">
-            <i data-lucide="plus" class="w-4 h-4"></i> <span class="hidden sm:inline">Neue ${mode === 'order' ? 'Bestellung' : 'Anfrage'}</span><span class="sm:hidden">Neu</span>
+          <button type="button" onclick="openNewTicketModal('${mode}')" class="ml-auto bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-emerald-700 flex items-center gap-2">
+            <i data-lucide="plus" class="w-4 h-4"></i> <span>Neue ${mode === 'order' ? 'Bestellung' : 'Anfrage'}</span>
           </button>
         </div>
       </div>
