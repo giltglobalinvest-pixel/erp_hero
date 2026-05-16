@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.09';
+const APP_VERSION = 'v5.10';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3517,13 +3517,20 @@ function _renderTicketErpBadge(ticketId, fdContact) {
     }
     slot.innerHTML = badgeHtml;
   }
-  // KI-Angebot-Button
+  // KI-Aktion-Button — mode-abhaengig: KI-Angebot bei Anfragen, KI-Auftrag bei Bestellungen
   if (btnSlot) {
+    const mode = window._currentInquiriesMode || 'sales';
     const disabled = st.state !== 'green';
+    const isOrder = mode === 'order';
     const cls = disabled
       ? 'opacity-50 cursor-not-allowed bg-ink-100 text-ink-500'
-      : 'bg-purple-100 hover:bg-purple-200 text-purple-800';
-    btnSlot.innerHTML = `<button type="button" onclick="event.stopPropagation();aiAutoQuoteFromTicket(${ticketId})" class="text-[10px] uppercase tracking-wider ${cls} px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="${disabled ? 'Erst ERP-Daten vervollstaendigen' : 'KI erzeugt + versendet Angebot automatisch'}"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> KI-Angebot</button>`;
+      : (isOrder ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800' : 'bg-purple-100 hover:bg-purple-200 text-purple-800');
+    const fn = isOrder ? 'aiAutoOrderFromTicket' : 'aiAutoQuoteFromTicket';
+    const label = isOrder ? 'KI-Auftrag' : 'KI-Angebot';
+    const tooltip = disabled
+      ? 'Erst ERP-Daten vervollstaendigen'
+      : (isOrder ? 'KI erzeugt Auftragsbestaetigung aus bestehendem Angebot' : 'KI erzeugt + versendet Angebot');
+    btnSlot.innerHTML = `<button type="button" onclick="event.stopPropagation();${fn}(${ticketId})" class="text-[10px] uppercase tracking-wider ${cls} px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="${escapeHtml(tooltip)}"><i data-lucide="sparkles" class="w-2.5 h-2.5"></i> ${escapeHtml(label)}</button>`;
   }
   if (window.lucide) lucide.createIcons();
   return st;
@@ -3614,6 +3621,610 @@ const _aqcState = {
   // Pro new_article Item: User-Checkbox "auch in Artikelstamm" (Array indices match parsed.items)
   catalogInclusionChoice: {}
 };
+
+/* ============================================================
+   KI-AUFTRAG (Auftragsbestätigung) AUS BESTELLUNGEN-TICKET
+   Analog zum KI-Angebot-Flow, aber erzeugt ein Order-Record (AB-NNNN).
+   Bezieht sich idealerweise auf ein bestehendes Angebot fuer denselben Customer.
+   ============================================================ */
+const _aocState = {
+  ticketId: null,
+  chatHistory: [],
+  systemPrompt: '',
+  analyzing: false,
+  creating: false,
+  recording: false,
+  recognition: null,
+  finalProposal: null,
+  ticketContext: null,
+  existingQuotesForCustomer: []
+};
+
+async function aiAutoOrderFromTicket(ticketId) {
+  const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]');
+  const st = row?.dataset.erpState || 'unknown';
+  if (st !== 'green') {
+    showTicketErpStatusModal(ticketId);
+    return;
+  }
+  openAiOrderCreationModal(ticketId);
+}
+
+async function openAiOrderCreationModal(ticketId) {
+  _aocState.ticketId = ticketId;
+  _aocState.chatHistory = [];
+  _aocState.systemPrompt = '';
+  _aocState.analyzing = false;
+  _aocState.creating = false;
+  _aocState.recording = false;
+  _aocState.recognition = null;
+  _aocState.finalProposal = null;
+  _aocState.ticketContext = null;
+  _aocState.existingQuotesForCustomer = [];
+
+  const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
+  const reqIdRaw = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]')?.dataset.requesterId || null;
+  const reqId = reqIdRaw ? Number(reqIdRaw) : null;
+  const fdContact = reqId != null ? (_fdContactCache.get(reqId) || _fdContactCache.get(reqIdRaw)) : null;
+  const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail, erp.contactsByCustomer);
+  const customerName = erpState.customer?.fields?.name1 || fdContact?.company_name || '–';
+  const contactDisplay = erpState.contact
+    ? (((erpState.contact.fields.first_name || '') + ' ' + (erpState.contact.fields.last_name || '')).trim() || erpState.contact.fields.name || fdContact?.name || '–')
+    : (fdContact?.name || '–');
+  const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5">
+      <h3 class="text-base font-bold text-ink-900 mb-1 flex items-center gap-2">
+        <i data-lucide="sparkles" class="w-5 h-5 text-emerald-600"></i>
+        KI-Auftrag — Chat
+      </h3>
+      <p class="text-xs text-ink-500 mb-3">FT-${ticketId} · <strong>${escapeHtml(customerName)}</strong> · ${escapeHtml(contactDisplay)}</p>
+
+      <div id="aocChatLog" class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-2 min-h-[160px] max-h-[42vh] overflow-y-auto space-y-2" style="overscroll-behavior:contain;-webkit-overflow-scrolling:touch;">
+        <div class="bg-white border border-emerald-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+          <span class="text-base">🤖</span>
+          <div>
+            <p>Ich erstelle eine <strong>Auftragsbestätigung</strong> für dich. Idealerweise bezieht sie sich auf ein bestehendes Angebot.</p>
+            <p class="text-[10px] text-ink-500 mt-1 italic">Tipp: <em>„Auftragsbestätigung zu Q-1024"</em> · <em>„nimm Q-1024 und ändere Lieferzeit auf 10 Tage"</em></p>
+          </div>
+        </div>
+      </div>
+
+      <div id="aocInputWrap">
+        <textarea id="aocInput" rows="3" placeholder="Tippe oder sprich…" class="w-full px-3 py-2.5 border border-ink-200 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+          onkeydown="if(event.key==='Enter' && (event.metaKey||event.ctrlKey)){event.preventDefault();_aocSendChatMessage();}"></textarea>
+        <div class="flex gap-2 mt-2">
+          ${speechSupported ? `
+            <button type="button" id="aocMicBtn" onclick="_aocToggleMic()" class="shrink-0 px-3 py-3 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 border border-emerald-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium">
+              <i data-lucide="mic" class="w-5 h-5"></i>
+              <span class="hidden sm:inline">Sprechen</span>
+            </button>
+          ` : ''}
+          <button type="button" id="aocSendBtn" onclick="_aocSendChatMessage()" class="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition inline-flex items-center justify-center gap-2 text-base font-semibold">
+            <i data-lucide="send" class="w-5 h-5"></i>
+            <span>Senden</span>
+          </button>
+        </div>
+      </div>
+      <p id="aocStatus" class="text-[11px] text-ink-500 mt-1 italic min-h-[14px]"></p>
+
+      <div id="aocResult" class="mt-3 hidden">
+        <p class="text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1.5 flex items-center gap-1.5">
+          <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-emerald-600"></i> KI-Vorschlag — prüfen + Anlage starten
+        </p>
+        <div id="aocResultBody" class="bg-white border border-ink-200 rounded-lg p-3 max-h-[50vh] overflow-y-auto text-sm" style="overscroll-behavior:contain;"></div>
+      </div>
+
+      <div class="flex gap-2 mt-3 flex-wrap justify-end">
+        <button type="button" onclick="_aocClose()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Abbrechen</button>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-xl' });
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById('aocInput')?.focus(), 80);
+  setTimeout(() => { _aocAutoStart().catch(err => console.warn('[aoc] Auto-Init fehlgeschlagen:', err.message)); }, 150);
+}
+
+function _aocClose() {
+  if (_aocState.recording) { try { _aocState.recognition?.stop(); } catch (_) {} }
+  closeTopModal();
+}
+
+function _aocToggleMic() {
+  if (_aocState.recording) { _aocStopRecording(); } else { _aocStartRecording(); }
+}
+function _aocStartRecording() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { toast('Spracheingabe nicht verfügbar', 'warn'); return; }
+  const rec = new SR(); rec.lang = 'de-DE'; rec.interimResults = true; rec.continuous = true;
+  let acc = '';
+  rec.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) acc += r[0].transcript + ' ';
+      else interim += r[0].transcript;
+    }
+    const st = document.getElementById('aocStatus');
+    if (st) st.textContent = '🎤 ' + (acc + interim).trim();
+  };
+  rec.onerror = (e) => { if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Mikro-Fehler: ' + e.error, 'error'); };
+  rec.onend = () => {
+    _aocState.recording = false; _aocState.recognition = null;
+    const ta = document.getElementById('aocInput');
+    if (ta && acc.trim()) ta.value = ((ta.value || '').trim() ? (ta.value.trim() + ' ') : '') + acc.trim();
+    const st = document.getElementById('aocStatus'); if (st) st.textContent = '';
+    _aocRenderMicBtn();
+  };
+  _aocState.recognition = rec; _aocState.recording = true;
+  try { rec.start(); } catch (e) { toast('Mikro-Start: ' + e.message, 'error'); _aocState.recording = false; }
+  _aocRenderMicBtn();
+}
+function _aocStopRecording() {
+  if (_aocState.recognition) { try { _aocState.recognition.stop(); } catch (_) {} }
+}
+function _aocRenderMicBtn() {
+  const btn = document.getElementById('aocMicBtn');
+  if (!btn) return;
+  if (_aocState.recording) {
+    btn.innerHTML = '<i data-lucide="square" class="w-5 h-5"></i><span class="hidden sm:inline">Stop</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-red-500 hover:bg-red-600 text-white border border-red-600 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium animate-pulse';
+  } else {
+    btn.innerHTML = '<i data-lucide="mic" class="w-5 h-5"></i><span class="hidden sm:inline">Sprechen</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 border border-emerald-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+function _aocRenderChatLog() {
+  const log = document.getElementById('aocChatLog');
+  if (!log) return;
+  const intro = `<div class="bg-white border border-emerald-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+    <span class="text-base">🤖</span>
+    <div><p>Ich erstelle eine <strong>Auftragsbestätigung</strong> für dich.</p></div>
+  </div>`;
+  const items = [intro];
+  for (const m of _aocState.chatHistory) {
+    if (m._hidden) continue;
+    if (m.role === 'user') {
+      items.push(`<div class="flex justify-end"><div class="bg-emerald-600 text-white rounded-xl px-3 py-2 text-xs max-w-[85%] break-words" style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(m.content)}</div></div>`);
+    } else {
+      items.push(`<div class="bg-white border border-emerald-200 rounded-xl px-3 py-2 text-xs text-ink-800 flex items-start gap-2 max-w-[95%]"><span class="text-base shrink-0">🤖</span><div class="break-words flex-1" style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(m.content)}</div></div>`);
+    }
+  }
+  log.innerHTML = items.join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+async function _aocBuildSystemPrompt() {
+  const ticketId = _aocState.ticketId;
+  const cur = getCurrentCompany();
+  let ticket = null, conversations = [];
+  try { ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester'); } catch (_) {}
+  try {
+    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    conversations = (Array.isArray(conv) ? conv : []).slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  } catch (_) {}
+
+  const erp = window._inquiriesErpCache || { customers: [], contactsByEmail: new Map() };
+  const fdContact = ticket?.requester || (ticket?.requester_id ? _fdContactCache.get(ticket.requester_id) : null);
+  const erpState = _getTicketErpState(fdContact, erp.customers, erp.contactsByEmail, erp.contactsByCustomer);
+
+  // Existierende Angebote fuer DENSELBEN Kunden laden — Hauptquelle fuer die Auftragsbestätigung
+  let quotesForCustomer = [];
+  if (erpState.customer?.id) {
+    try {
+      const allQ = await readData('Quote').catch(() => []);
+      quotesForCustomer = allQ
+        .filter(q => (q.fields.customer_id || []).includes(erpState.customer.id) &&
+                     (q.fields.company_id || []).includes(cur?.id) &&
+                     (q.fields.status || 'Entwurf') !== 'archiviert')
+        .sort((a, b) => (b.fields.quote_no || '').localeCompare(a.fields.quote_no || '', 'de'))
+        .slice(0, 20);
+    } catch (_) {}
+  }
+  _aocState.existingQuotesForCustomer = quotesForCustomer;
+
+  // Pruefen ob es schon Auftraege fuer diesen Ticket gibt (Auto-Variant-Logik analog zu Angeboten)
+  let existingOrdersForTicket = [];
+  try {
+    const allO = await readData('Order').catch(() => []);
+    existingOrdersForTicket = allO
+      .filter(o =>
+        String(o.fields.freshdesk_ticket_id || '') === String(ticketId) &&
+        ((o.fields.company_id || []).includes(cur?.id) || o.fields.company_id === cur?.id) &&
+        (o.fields.status || 'Entwurf') !== 'archiviert')
+      .sort((a, b) => (b.fields.order_no || '').localeCompare(a.fields.order_no || '', 'de'));
+  } catch (_) {}
+  _aocState.existingOrdersForTicket = existingOrdersForTicket;
+
+  // Artikel-Katalog
+  let articles = [];
+  try { articles = await readData('Article'); } catch (_) {}
+  const articlesInMandant = articles.filter(a =>
+    (a.fields.company_id || []).includes(cur?.id) && (a.fields.status || 'aktiv') !== 'archiviert'
+  );
+  const catalog = articlesInMandant.slice(0, 250).map(a => ({
+    id: a.id, sku: a.fields.article_no || '', name: a.fields.name1 || '',
+    name2: a.fields.name2 || '', price: a.fields.sales_price || 0
+  }));
+
+  _aocState.ticketContext = { ticket, conversations, articlesInMandant, erpState, fdContact };
+
+  const ticketSubject = ticket?.subject || '';
+  const ticketBody = _fdHtmlToText(ticket?.description_html || ticket?.description || '').slice(0, 2000);
+  const convSnippet = conversations.slice(0, 5).map(c => {
+    const dir = c.incoming ? 'Kunde' : 'Wir';
+    return '### ' + dir + ' (' + (c.created_at || '').slice(0, 10) + '):\n' + _fdHtmlToText(c.body || c.body_text || '').slice(0, 800);
+  }).join('\n\n');
+
+  const quotesHint = quotesForCustomer.length
+    ? '\n═══ BESTEHENDE ANGEBOTE DIESES KUNDEN ═══\n' +
+      quotesForCustomer.slice(0, 10).map(q => {
+        const f = q.fields || {};
+        return `- [${q.id}] ${f.quote_no || '–'} vom ${f.date || '?'} (Status: ${f.status || 'Entwurf'})${f.total_gross ? ' · ' + f.total_gross + '€' : ''}${f.quote_title ? ' — ' + (f.quote_title.length > 60 ? f.quote_title.slice(0, 60) + '…' : f.quote_title) : ''}`;
+      }).join('\n') + '\n'
+    : '\n═══ ANGEBOTE ═══\n(keine bestehenden Angebote für diesen Kunden gefunden)\n';
+
+  const ordersHint = existingOrdersForTicket.length
+    ? '\n═══ EXISTIERENDE AUFTRÄGE FÜR DIESES TICKET ═══\n' +
+      existingOrdersForTicket.slice(0, 5).map(o => `- ${o.fields.order_no || '–'} (Status: ${o.fields.status || 'Entwurf'})`).join('\n') + '\n'
+    : '';
+
+  return `Du bist Vertriebsassistent bei FLP Lift Parts GmbH (B2B-Großhandel für Aufzug-Ersatzteile). Sprich locker auf Deutsch.
+
+DEINE AUFGABE: Erstelle eine AUFTRAGSBESTÄTIGUNG (AB-NNNN) für eine eingegangene Kundenbestellung.
+
+═══ ANGEBOTS-KONTEXT ═══
+Ticket: FT-${ticketId} (Bestellung des Kunden)
+Betreff: ${ticketSubject}
+Kunde: ${erpState.customer?.fields?.name1 || ''}
+Kontakt: ${(erpState.contact?.fields?.first_name || '') + ' ' + (erpState.contact?.fields?.last_name || '')}
+
+Erste Nachricht (Kunden-Bestellung):
+${ticketBody || '(leer)'}
+
+${convSnippet ? 'Verlauf:\n' + convSnippet + '\n' : ''}${quotesHint}${ordersHint}
+═══ ARTIKEL-KATALOG (Auszug) ═══
+${catalog.length ? catalog.map(c => `[${c.id}] ArtNr=${c.sku} · ${c.name}${c.name2 ? ' / ' + c.name2 : ''} · ${c.price}€`).join('\n') : '(kein Katalog)'}
+
+═══ VORGEHEN ═══
+1. Idealfall: User nennt ein Angebot (z.B. "Q-1024") oder du erkennst das passende aus den bestehenden Angeboten oben → übernimm Items + Texte aus dem Angebot
+2. Wenn KEIN Angebot existiert oder unklar ist welches → bau die Bestätigung aus der Kunden-Nachricht zusammen (Artikel via Katalog matchen, neue Artikel als new_article-Block)
+3. Frage bei Unklarheiten kurz nach (max 1-2 Fragen)
+
+═══ ANTWORT-FORMAT ═══
+ENTWEDER kurze Rueckfrage in normalem Deutsch (KEIN JSON) wenn Infos fehlen.
+
+ODER reines JSON wenn du alle Infos hast (keine Code-Fences, kein Text drumherum):
+{
+  "action": "create_order",
+  "source_quote_id": "rec... oder null",
+  "order_title": "Kurzer Titel (max 80 Z.)",
+  "description": "<p>Einleitung (Auftragsbestätigung-Text)</p>" oder "",
+  "notes": "<p>Schluss</p>" oder "",
+  "lieferzeit": "3-5 Tage" oder "",
+  "items": [
+    { "article_id": "rec...", "qty": 2, "note": "" },
+    { "qty": 1, "new_article": { "name1": "...", "article_no": "...", "sales_price": 4500 }, "note": "" }
+  ],
+  "summary_for_user": "1 Satz Bestaetigung"
+}
+
+REGELN:
+- Wenn ein passendes Angebot existiert → source_quote_id setzen, items aus dem Angebot uebernehmen
+- description/notes: Auftragsbestätigung-typische Texte ("Bestätigung Ihrer Bestellung vom X")
+- Items unveraendert lassen (Bezeichnung + Beschreibung des Katalog-Artikels gelten)
+- Lieferzeit in eigenes Feld
+- description NUR setzen wenn explizit erwaehnt`;
+}
+
+async function _aocAutoStart() {
+  if (_aocState.chatHistory.length > 0) return;
+  const status = document.getElementById('aocStatus');
+  if (status) status.textContent = '🤖 Analysiere Ticket + bestehende Angebote …';
+  try { _aocState.systemPrompt = await _aocBuildSystemPrompt(); }
+  catch (e) { if (status) status.textContent = ''; console.warn('[aoc] Kontext-Load:', e.message); return; }
+
+  // Info-Bubble: existierende Angebote + Auftrags-Variant-Hinweis
+  const quotesCount = (_aocState.existingQuotesForCustomer || []).length;
+  const ordersCount = (_aocState.existingOrdersForTicket || []).length;
+  if (quotesCount > 0 || ordersCount > 0) {
+    const lines = [];
+    if (quotesCount > 0) lines.push('📋 ' + quotesCount + ' bestehende Angebot' + (quotesCount === 1 ? '' : 'e') + ' für diesen Kunden gefunden — beziehe mich gerne darauf');
+    if (ordersCount > 0) lines.push('📑 Es gibt bereits ' + ordersCount + ' Auftrag' + (ordersCount === 1 ? '' : 'srecord') + ' für dieses Ticket');
+    _aocState.chatHistory.push({ role: 'assistant', content: lines.join('\n'), _aocInfo: true });
+    _aocRenderChatLog();
+  }
+
+  const initialMsg = 'Analysiere bitte das Bestellungs-Ticket FT-' + _aocState.ticketId + ' und schlage mir die Auftragsbestätigung vor. Wenn ein passendes Angebot existiert, nutze dieses als Basis. Wenn Wichtiges fehlt, frag nach.';
+  _aocState.chatHistory.push({ role: 'user', content: initialMsg, _hidden: true });
+  _aocState.analyzing = true;
+  const sendBtn = document.getElementById('aocSendBtn');
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i><span>Analysiere…</span>'; if (window.lucide) lucide.createIcons(); }
+  if (status) status.textContent = '🤖 KI bereitet Auftragsbestätigung vor …';
+  try {
+    const reply = await askAIChat({ system: _aocState.systemPrompt, messages: _aocState.chatHistory }, { maxTokens: 2500, purpose: 'ai_order_chat_init' });
+    const parsed = _aocExtractCreateOrderJson(reply);
+    if (parsed && parsed.action === 'create_order') {
+      _aocState.finalProposal = parsed;
+      _aocState.chatHistory.push({ role: 'assistant', content: '✓ Erster Vorschlag basierend auf dem Ticket erstellt. Bitte prüfen oder anpassen.' });
+      _aocRenderChatLog();
+      _aocRenderPreview(parsed);
+    } else {
+      _aocState.chatHistory.push({ role: 'assistant', content: (reply || '').trim() });
+      _aocRenderChatLog();
+    }
+  } catch (err) {
+    _aocState.chatHistory.push({ role: 'assistant', content: '⚠ Auto-Analyse fehlgeschlagen: ' + err.message + ' — bitte tipp mir kurz wonach die Bestätigung aussehen soll.' });
+    _aocRenderChatLog();
+  } finally {
+    _aocState.analyzing = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = '<i data-lucide="send" class="w-5 h-5"></i><span>Senden</span>'; if (window.lucide) lucide.createIcons(); }
+    if (status) status.textContent = '';
+  }
+}
+
+function _aocExtractCreateOrderJson(reply) {
+  if (!reply) return null;
+  let txt = String(reply).trim().replace(/```[a-z]*\s*\n?/gi, '').replace(/```/g, '').trim();
+  if (txt.startsWith('{')) { try { const p = JSON.parse(txt); if (p && p.action === 'create_order') return p; } catch (_) {} }
+  const start = txt.search(/\{[\s\S]*?"action"\s*:\s*"create_order"/);
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false, end = -1;
+  for (let i = start; i < txt.length; i++) {
+    const c = txt[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return null;
+  try { return JSON.parse(txt.slice(start, end + 1)); } catch (e) { return null; }
+}
+
+async function _aocSendChatMessage() {
+  if (_aocState.analyzing || _aocState.creating) return;
+  const inputEl = document.getElementById('aocInput');
+  const userText = (inputEl?.value || '').trim();
+  if (!userText) { toast('Bitte schreib oder sprich was', 'warn'); inputEl?.focus(); return; }
+  if (_aocState.recording) _aocStopRecording();
+  if (!_aocState.systemPrompt) {
+    try { _aocState.systemPrompt = await _aocBuildSystemPrompt(); }
+    catch (e) { toast('Kontext laden fehlgeschlagen: ' + e.message, 'error', 6000); return; }
+  }
+  _aocState.chatHistory.push({ role: 'user', content: userText });
+  inputEl.value = '';
+  _aocRenderChatLog();
+  _aocState.analyzing = true;
+  const sendBtn = document.getElementById('aocSendBtn');
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i><span>Denkt…</span>'; if (window.lucide) lucide.createIcons(); }
+  const status = document.getElementById('aocStatus');
+  if (status) status.textContent = 'KI denkt …';
+  try {
+    const reply = await askAIChat({ system: _aocState.systemPrompt, messages: _aocState.chatHistory }, { maxTokens: 2500, purpose: 'ai_order_chat' });
+    const parsed = _aocExtractCreateOrderJson(reply);
+    if (parsed && parsed.action === 'create_order') {
+      _aocState.finalProposal = parsed;
+      _aocState.chatHistory.push({ role: 'assistant', content: '✓ Alle Infos da — Vorschlag erstellt. Bitte prüfen.' });
+      _aocRenderChatLog();
+      _aocRenderPreview(parsed);
+    } else {
+      _aocState.chatHistory.push({ role: 'assistant', content: (reply || '').trim() });
+      _aocRenderChatLog();
+    }
+  } catch (err) {
+    _aocState.chatHistory.push({ role: 'assistant', content: '⚠ Fehler: ' + (err.message || err) });
+    _aocRenderChatLog();
+  } finally {
+    _aocState.analyzing = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = '<i data-lucide="send" class="w-5 h-5"></i><span>Senden</span>'; if (window.lucide) lucide.createIcons(); }
+    if (status) status.textContent = '';
+    inputEl?.focus();
+  }
+}
+
+function _aocRenderPreview(parsed) {
+  const resultBox = document.getElementById('aocResult');
+  const body = document.getElementById('aocResultBody');
+  if (!body || !resultBox) return;
+  resultBox.classList.remove('hidden');
+
+  const articlesInMandant = _aocState.ticketContext?.articlesInMandant || [];
+  const articleById = new Map(articlesInMandant.map(a => [a.id, a]));
+  const sourceQuote = (_aocState.existingQuotesForCustomer || []).find(q => q.id === parsed.source_quote_id);
+
+  const itemRows = (parsed.items || []).map(it => {
+    if (it.new_article && (it.new_article.name1 || it.new_article.name || '').trim()) {
+      const na = it.new_article;
+      const name = na.name1 || na.name || '';
+      const sku = na.article_no || na.sku || '–';
+      const price = (typeof na.sales_price === 'number' && na.sales_price > 0) ? na.sales_price.toFixed(2) + '€' : '';
+      return `<div class="border border-amber-200 bg-amber-50/60 rounded-lg p-2 text-ink-700 text-xs">
+        <div class="flex items-baseline gap-1.5 flex-wrap">
+          <strong>${escapeHtml(String(it.qty || 1))}×</strong>
+          <span class="font-mono text-[10px] text-ink-500">${escapeHtml(sku)}</span>
+          <span class="font-medium">${escapeHtml(name)}</span>
+          ${price ? '<span class="text-ink-500">' + escapeHtml(price) + '</span>' : ''}
+          <span class="text-[9px] uppercase font-bold tracking-wider bg-amber-200 text-amber-800 px-1 py-0.5 rounded">NEU</span>
+          ${it.note ? '<em class="text-ink-500 text-[11px]">· ' + escapeHtml(it.note) + '</em>' : ''}
+        </div>
+      </div>`;
+    }
+    const a = articleById.get(it.article_id);
+    if (!a) return `<div class="text-amber-700 text-xs">⚠ Artikel-ID ${escapeHtml(it.article_id || '?')} nicht im Katalog — wird übersprungen</div>`;
+    const f = a.fields;
+    return `<div class="border border-ink-200 rounded-lg px-2 py-1.5 text-ink-700 text-xs flex items-baseline gap-1.5 flex-wrap">
+      <strong>${escapeHtml(String(it.qty || 1))}×</strong>
+      <span class="font-mono text-[10px] text-ink-500">${escapeHtml(f.article_no || '')}</span>
+      <span>${escapeHtml(f.name1 || '')}</span>
+      ${it.note ? '<em class="text-ink-500">· ' + escapeHtml(it.note) + '</em>' : ''}
+      <span class="text-[9px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1 py-0.5 rounded ml-auto">Katalog</span>
+    </div>`;
+  }).join('');
+
+  body.innerHTML = `
+    <div class="space-y-2.5">
+      ${sourceQuote ? `<div class="bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-1.5 text-xs text-blue-900 flex items-center gap-1.5">
+        <i data-lucide="link" class="w-3.5 h-3.5"></i>
+        <span>Basiert auf Angebot <strong>${escapeHtml(sourceQuote.fields.quote_no || '–')}</strong></span>
+      </div>` : ''}
+      <div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Auftrags-Titel</p>
+        <p class="text-sm font-semibold text-ink-900">${escapeHtml(parsed.order_title || '–')}</p></div>
+      ${parsed.lieferzeit ? `<div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Lieferzeit</p>
+        <p class="text-sm"><span class="font-mono bg-blue-100 text-blue-800 px-2 py-0.5 rounded">${escapeHtml(parsed.lieferzeit)}</span></p></div>` : ''}
+      <div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Einleitung</p>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.description || '<em class="text-ink-400">leer</em>'}</div></div>
+      <div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Positionen (${(parsed.items || []).length})</p>
+        ${itemRows ? '<div class="space-y-1.5">' + itemRows + '</div>' : '<p class="text-xs text-ink-500 italic">— keine Positionen —</p>'}</div>
+      <div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Schlusstext</p>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.notes || '<em class="text-ink-400">leer</em>'}</div></div>
+      ${parsed.summary_for_user ? `<p class="text-[11px] text-emerald-700 italic bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5"><i data-lucide="info" class="inline w-3 h-3"></i> ${escapeHtml(parsed.summary_for_user)}</p>` : ''}
+    </div>
+    <div class="flex gap-2 mt-3 flex-wrap justify-end pt-2 border-t border-ink-200">
+      <button type="button" onclick="_aocResetForRefinement()" class="text-xs px-3 py-1.5 border border-ink-200 rounded-lg hover:bg-ink-50 inline-flex items-center gap-1">
+        <i data-lucide="message-circle" class="w-3.5 h-3.5"></i> Noch was anpassen
+      </button>
+      <button type="button" id="aocCreateBtn" onclick="_aocCreateOrder()" class="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
+        <i data-lucide="check" class="w-4 h-4"></i> Auftrag anlegen
+      </button>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+  resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function _aocResetForRefinement() {
+  const r = document.getElementById('aocResult');
+  if (r) r.classList.add('hidden');
+  _aocState.finalProposal = null;
+  _aocState.chatHistory.push({ role: 'assistant', content: '(Vorschlag verworfen — was soll noch angepasst werden?)' });
+  _aocRenderChatLog();
+  document.getElementById('aocInput')?.focus();
+}
+
+async function _aocCreateOrder() {
+  if (_aocState.creating) return;
+  const parsed = _aocState.finalProposal;
+  if (!parsed) { toast('Kein Vorschlag', 'warn'); return; }
+  const erpState = _aocState.ticketContext?.erpState;
+  const ticketId = _aocState.ticketId;
+  const cur = getCurrentCompany();
+  if (!cur || !erpState?.customer?.id) { toast('Kontext fehlt', 'error'); return; }
+
+  const btn = document.getElementById('aocCreateBtn');
+  _aocState.creating = true;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege Auftrag an…'; if (window.lucide) lucide.createIcons(); }
+
+  try {
+    try { await ensureOrderSchema(); } catch (_) {}
+    try { await ensureFields('Order', [
+      { name: 'freshdesk_ticket_id', type: 'singleLineText' },
+      { name: 'ai_summary',          type: 'multilineText' },
+      { name: 'custom_values',       type: 'multilineText' }
+    ]); } catch (_) {}
+
+    const orderNo = await nextOrderNo(cur.id);
+    const today = new Date();
+    const iso = d => d.toISOString().slice(0, 10);
+
+    const fields = {
+      order_no: orderNo,
+      company_id: [cur.id],
+      customer_id: [erpState.customer.id],
+      date: iso(today),
+      confirmation_date: iso(today),
+      status: 'Entwurf',
+      order_title: (parsed.order_title || '').trim(),
+      description: (parsed.description || '').trim(),
+      notes:       (parsed.notes || '').trim(),
+      ai_summary:  parsed.summary_for_user || '',
+      freshdesk_ticket_id: String(ticketId)
+    };
+    if (erpState.contact?.id) fields.contact_id = [erpState.contact.id];
+    if (parsed.source_quote_id) fields.quote_id = [parsed.source_quote_id];
+    if (parsed.lieferzeit) fields.custom_values = JSON.stringify({ lieferzeit: parsed.lieferzeit });
+    // Customer-Terms
+    try {
+      const terms = await getCustomerTerms(erpState.customer.id);
+      if (typeof terms.payment_terms  === 'string' && terms.payment_terms.trim())  fields.payment_terms  = terms.payment_terms;
+      if (typeof terms.delivery_terms === 'string' && terms.delivery_terms.trim()) fields.delivery_terms = terms.delivery_terms;
+    } catch (_) {}
+
+    // Resilient write
+    const OPT = ['custom_values', 'ai_summary', 'order_title', 'freshdesk_ticket_id', 'quote_id', 'confirmation_date'];
+    let created = null, lastErr = null;
+    const writeFields = { ...fields };
+    for (let i = 0; i <= OPT.length; i++) {
+      try { created = await writeData('Order', writeFields); break; }
+      catch (err) {
+        lastErr = err;
+        if (!/array of record|record id|invalid value|cannot accept/i.test(err.message)) throw err;
+        if (i >= OPT.length) throw err;
+        delete writeFields[OPT[i]];
+      }
+    }
+    if (!created) throw lastErr || new Error('Order-Anlage fehlgeschlagen');
+
+    // OrderItems
+    const articleById = new Map((_aocState.ticketContext?.articlesInMandant || []).map(a => [a.id, a]));
+    let pos = 1, itemErrors = 0, newArticlesCreated = 0;
+    for (const it of (parsed.items || [])) {
+      try {
+        const qty = Math.max(1, parseInt(it.qty || 1, 10) || 1);
+        let articleToUse = articleById.get(it.article_id) || null;
+        if (!articleToUse && it.new_article && (it.new_article.name1 || it.new_article.name || '').trim()) {
+          const na = it.new_article;
+          const artFields = {
+            name1: (na.name1 || na.name || '').trim(),
+            article_no: (na.article_no || ('NEU-' + Date.now() + '-' + pos)).trim(),
+            description: (na.description || '').trim(),
+            unit: (na.unit || 'Stück').trim(),
+            sales_price: (typeof na.sales_price === 'number' && na.sales_price >= 0) ? na.sales_price : 0,
+            vat_rate: 19,
+            status: 'aktiv',
+            company_id: [cur.id],
+            notes: '🤖 Aus KI-Auftrag übernommen · ' + new Date().toLocaleString('de-DE') + ' · Order ' + orderNo
+          };
+          try {
+            const newArt = await writeData('Article', artFields);
+            if (newArt?.id) {
+              articleToUse = { id: newArt.id, fields: artFields };
+              articleById.set(newArt.id, articleToUse);
+              newArticlesCreated++;
+            }
+          } catch (_) {}
+        }
+        if (articleToUse) {
+          // Adapt _aiBuildQuoteItemFields-Output zu OrderItem (Schema fast identisch — nur quote_id → order_id)
+          const itemFields = _aiBuildQuoteItemFields(articleToUse, qty, pos, created.id);
+          delete itemFields.quote_id;
+          itemFields.order_id = [created.id];
+          await writeData('OrderItem', itemFields);
+        }
+        pos++;
+      } catch (e) { console.warn('[aoc] OrderItem fail:', e.message); itemErrors++; }
+    }
+
+    const parts = ['✓ Auftrag ' + orderNo + ' angelegt'];
+    if (parsed.source_quote_id) parts.push('aus Angebot übernommen');
+    if (newArticlesCreated > 0) parts.push(newArticlesCreated + ' Artikel angelegt');
+    if (itemErrors > 0) parts.push(itemErrors + ' Item-Fehler');
+    toast(parts.join(' · '), itemErrors > 0 ? 'warn' : 'success', 6000);
+    closeTopModal();
+    setTimeout(() => { if (typeof openOrderModal === 'function') openOrderModal(created.id); }, 300);
+    setTimeout(() => { if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview(); }, 1000);
+  } catch (err) {
+    console.error('[aoc] order anlage:', err);
+    toast('Auftrag-Anlage fehlgeschlagen: ' + (err.message || err), 'error', 8000);
+    _aocState.creating = false;
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i> Auftrag anlegen'; if (window.lucide) lucide.createIcons(); }
+  }
+}
 
 async function aiAutoQuoteFromTicket(ticketId) {
   const row = document.querySelector('.swipe-card-wrap[data-ticket-id="' + ticketId + '"]');
