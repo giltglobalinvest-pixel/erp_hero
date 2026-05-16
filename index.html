@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.08';
+const APP_VERSION = 'v5.09';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -9536,7 +9536,14 @@ function _tcmClose() {
   closeTopModal();
   _tcmCtx = null;
   if (wasDirty && typeof loadFreshdeskTicketsPreview === 'function') {
-    setTimeout(() => loadFreshdeskTicketsPreview(), 100);
+    // Erster Refresh: kurz warten damit Airtable die Schreib-Operation propagiert hat (Read-after-Write-Lag).
+    // Vorher waren es 100ms — zu schnell, der Badge zeigte oft noch den alten Zustand.
+    setTimeout(() => loadFreshdeskTicketsPreview(), 700);
+    // Safety-Net: Falls die erste Anfrage trotzdem stale Airtable-Daten bekam,
+    // 3 Sekunden spaeter nochmal laden — Badge wird dann garantiert mit den neuen Daten gerendert.
+    setTimeout(() => {
+      if (typeof loadFreshdeskTicketsPreview === 'function') loadFreshdeskTicketsPreview();
+    }, 3000);
   }
 }
 
