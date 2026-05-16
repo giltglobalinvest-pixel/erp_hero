@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.07';
+const APP_VERSION = 'v5.08';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -3348,18 +3348,28 @@ function _toggleTicketResponderMenu(ticketId) {
    (Voraussetzung fuer den KI-Angebot-Workflow).
    ============================================================ */
 
-// Helper: prueft ob ein ERP-Contact "vollstaendig" ist (alle Felder die fuer ein
-// KI-generiertes Angebot/Mail noetig sind). Liefert Array mit fehlenden Feldern.
+// Helper: prueft ob ein ERP-Contact "vollstaendig" ist. Nur echte Blocker → issues.
+// Soft-Mängel (z.B. fehlende Anrede) → hints (im aufrufenden Code).
+// Email ist optional — fuer den Versand verwenden wir notfalls die FD-Requester-Email.
+// Gender ist optional — Fallback auf "Sehr geehrte Damen und Herren".
 function _erpContactCompletenessIssues(contact) {
   const issues = [];
   if (!contact) { issues.push('Kontakt fehlt'); return issues; }
   const f = contact.fields || {};
   const hasName = (f.first_name || '').trim() || (f.last_name || '').trim() || (f.name || '').trim();
   if (!hasName) issues.push('Name fehlt');
-  if (!(f.email || '').trim()) issues.push('Email fehlt');
-  // Geschlecht/Anrede ist Pflicht fuer 'Sehr geehrter Herr / Frau' in der Angebot-Mail
-  if (!(f.gender || '').trim()) issues.push('Anrede / Geschlecht fehlt');
   return issues;
+}
+
+// Liefert die "weichen" Mängel eines ERP-Contacts (nicht-blockierend → kommen in hints).
+function _erpContactSoftHints(contact) {
+  const hints = [];
+  if (!contact) return hints;
+  const f = contact.fields || {};
+  if (!(f.email || '').trim())   hints.push('Email fehlt am ERP-Kontakt (Versand nutzt FD-Email)');
+  if (!(f.gender || '').trim())  hints.push('Anrede/Geschlecht fehlt — Fallback auf „Sehr geehrte Damen und Herren"');
+  if (!(f.first_name || '').trim() && !(f.name || '').trim()) hints.push('Vorname fehlt');
+  return hints;
 }
 
 // Helper: Liefert ein State-Objekt fuer ein FD-Ticket.
@@ -3435,6 +3445,8 @@ function _getTicketErpState(fdContact, customersInMandant, contactsByEmail, cont
   // Contact-Vollstaendigkeit pruefen — nur ECHTE Mängel kommen in issues (gehen ins Yellow)
   const completenessIssues = _erpContactCompletenessIssues(contact);
   state.issues.push(...completenessIssues);
+  // Soft-Hints (Email/Anrede/Vorname fehlt) — informativ, kein Yellow-Blocker
+  state.hints.push(..._erpContactSoftHints(contact));
   // Hinweis (kein Blocker!) wenn Anfragende:r ein anderer ist als der gefundene ERP-Contact
   if (!state.requesterIsContact && email && fdContact.name) {
     const cName = ((contact.fields.first_name || '') + ' ' + (contact.fields.last_name || '')).trim() || contact.fields.name || '(unbekannt)';
@@ -3488,12 +3500,18 @@ function _renderTicketErpBadge(ticketId, fdContact) {
   // Badge
   if (slot) {
     let badgeHtml = '';
+    // Tooltip: bei Yellow/Red das konkrete fehlende Feld zeigen
+    const tooltipIssues = st.issues.length
+      ? 'Fehlt: ' + st.issues.join(', ') + (st.hints.length ? ' · Hinweise: ' + st.hints.join(', ') : '')
+      : (st.hints.length ? 'Hinweise: ' + st.hints.join(', ') : '');
     if (st.state === 'green') {
-      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 hover:bg-emerald-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="ERP-Status: Kunde + Kontakt vollstaendig"><i data-lucide="check-circle-2" class="w-2.5 h-2.5"></i> ERP OK</button>`;
+      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-emerald-100 text-emerald-700 hover:bg-emerald-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="ERP-Status: Kunde + Kontakt vorhanden${st.hints.length ? ' · ' + escapeHtml(st.hints.join(', ')) : ''}"><i data-lucide="check-circle-2" class="w-2.5 h-2.5"></i> ERP OK</button>`;
     } else if (st.state === 'yellow') {
-      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 hover:bg-amber-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="ERP: ${escapeHtml(st.issues.join(', '))}"><i data-lucide="alert-circle" class="w-2.5 h-2.5"></i> ERP unvollstaendig</button>`;
+      // Kompaktes Label das das wichtigste Problem zeigt — z.B. "ERP · Name fehlt"
+      const shortIssue = st.issues[0] || 'unvollständig';
+      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-amber-100 text-amber-700 hover:bg-amber-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition max-w-[180px]" title="${escapeHtml(tooltipIssues)}"><i data-lucide="alert-circle" class="w-2.5 h-2.5 shrink-0"></i> <span class="truncate">ERP · ${escapeHtml(shortIssue)}</span></button>`;
     } else if (st.state === 'red') {
-      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 hover:bg-red-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="ERP: ${escapeHtml(st.issues.join(', '))}"><i data-lucide="x-circle" class="w-2.5 h-2.5"></i> ERP fehlt</button>`;
+      badgeHtml = `<button type="button" onclick="event.stopPropagation();showTicketErpStatusModal(${ticketId})" class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 hover:bg-red-200 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5 transition" title="${escapeHtml(tooltipIssues)}"><i data-lucide="x-circle" class="w-2.5 h-2.5"></i> ERP fehlt</button>`;
     } else {
       badgeHtml = `<span class="text-[10px] uppercase tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded font-semibold inline-flex items-center gap-0.5"><i data-lucide="loader-2" class="w-2.5 h-2.5 animate-spin"></i> ERP…</span>`;
     }
