@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.04';
+const APP_VERSION = 'v5.05';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -5565,7 +5565,17 @@ async function _aqcCreateQuote() {
 async function loadFreshdeskTicketsPreview() {
   const wrap = document.getElementById('freshdeskTicketsWrap');
   if (!wrap) return;
+  // Reload-Icon dreht sich solange geladen wird
+  const refreshIcon = document.getElementById('inqRefreshIcon');
+  const refreshBtn  = document.getElementById('inqRefreshBtn');
+  if (refreshIcon) refreshIcon.classList.add('animate-spin');
+  if (refreshBtn)  refreshBtn.disabled = true;
+  const stopSpin = () => {
+    if (refreshIcon) refreshIcon.classList.remove('animate-spin');
+    if (refreshBtn)  refreshBtn.disabled = false;
+  };
   if (!_proxyBase()) {
+    stopSpin();
     wrap.innerHTML = `
       <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
         <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> API-Proxy nicht konfiguriert</p>
@@ -5577,6 +5587,7 @@ async function loadFreshdeskTicketsPreview() {
   const inqMode = window._currentInquiriesMode || 'sales';
   const modeGroupId = inqMode === 'order' ? getCurrentOrderGroupId() : getCurrentSalesGroupId();
   if (!modeGroupId) {
+    stopSpin();
     const modeLabel = inqMode === 'order' ? 'Bestellungen / Auftragsbearbeitung' : 'Sales';
     const fieldLabel = inqMode === 'order' ? 'Bestellungen-Gruppe' : 'Sales-Gruppe';
     wrap.innerHTML = `
@@ -5865,6 +5876,9 @@ async function loadFreshdeskTicketsPreview() {
         <p>${escapeHtml(err.message || String(err))}</p>
       </div>`;
     if (window.lucide) lucide.createIcons();
+  } finally {
+    // Reload-Icon stop spinnen — egal ob success oder Error
+    stopSpin();
   }
 }
 
@@ -18870,10 +18884,16 @@ async function renderInquiries(mode) {
 
   document.getElementById('pageContent').innerHTML = `
     <div class="max-w-5xl mx-auto">
-      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
-        <div>
-          <h2 class="text-xl font-bold text-ink-900">${escapeHtml(titleLabel)}</h2>
-          <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (${escapeHtml(groupLabel)} · ${escapeHtml(_inquiriesStatusFilterLabel().toLowerCase())}${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
+      <div class="flex items-start justify-between mb-4 flex-wrap gap-3">
+        <div class="flex items-center gap-3 min-w-0 flex-1">
+          <!-- Prominenter Reload-Button neben dem Titel — gleich erkennbar, gut taubar auf Mobile -->
+          <button type="button" id="inqRefreshBtn" onclick="loadFreshdeskTicketsPreview()" class="shrink-0 bg-brand-500 hover:bg-brand-600 active:bg-brand-700 text-white rounded-xl p-3 shadow-sm hover:shadow transition" title="Tickets jetzt neu laden">
+            <i data-lucide="refresh-cw" class="w-5 h-5" id="inqRefreshIcon"></i>
+          </button>
+          <div class="min-w-0">
+            <h2 class="text-xl font-bold text-ink-900 truncate">${escapeHtml(titleLabel)}</h2>
+            <p class="text-xs text-ink-500 mt-0.5">${escapeHtml(cur.name)} · Tickets aus Freshdesk (${escapeHtml(groupLabel)} · ${escapeHtml(_inquiriesStatusFilterLabel().toLowerCase())}${APP_KEYS.freshdeskTicketTypes ? ' · Typen: ' + escapeHtml(APP_KEYS.freshdeskTicketTypes) : ''})</p>
+          </div>
         </div>
         <div class="flex items-center gap-2 flex-wrap">
           <span id="inqFreshness" class="text-[11px] text-ink-500 italic"></span>
@@ -18884,9 +18904,6 @@ async function renderInquiries(mode) {
             <option value="120">alle 2 Min.</option>
             <option value="300">alle 5 Min.</option>
           </select>
-          <button type="button" onclick="loadFreshdeskTicketsPreview()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-            <i data-lucide="refresh-cw" class="w-4 h-4"></i> <span class="hidden sm:inline">Jetzt laden</span>
-          </button>
           <button type="button" onclick="openNewTicketModal('${mode}')" class="bg-emerald-600 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-emerald-700 flex items-center gap-2">
             <i data-lucide="plus" class="w-4 h-4"></i> <span class="hidden sm:inline">Neue ${mode === 'order' ? 'Bestellung' : 'Anfrage'}</span><span class="sm:hidden">Neu</span>
           </button>
