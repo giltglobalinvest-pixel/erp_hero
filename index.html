@@ -629,7 +629,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.11';
+const APP_VERSION = 'v5.12';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -1118,7 +1118,11 @@ async function loadCompanies() {
     id: r.id,
     name: r.fields.name || '–',
     fd_sales_group_id: String(r.fields.fd_sales_group_id || '').trim(),
-    fd_order_group_id: String(r.fields.fd_order_group_id || '').trim()
+    fd_order_group_id: String(r.fields.fd_order_group_id || '').trim(),
+    mailchimp_api_key:       String(r.fields.mailchimp_api_key || '').trim(),
+    mailchimp_server_prefix: String(r.fields.mailchimp_server_prefix || '').trim().toLowerCase(),
+    mailchimp_list_id:       String(r.fields.mailchimp_list_id || '').trim(),
+    mailchimp_list_name:     String(r.fields.mailchimp_list_name || '').trim()
   }))
     .sort((a, b) => a.name.localeCompare(b.name, 'de'));
 
@@ -1153,6 +1157,41 @@ function getCurrentSalesGroupId() {
 function getCurrentOrderGroupId() {
   const cur = getCurrentCompany();
   return (cur?.fd_order_group_id || APP_KEYS.freshdeskOrderGroupId || '').trim();
+}
+
+// Mailchimp-Config pro Mandant (Default: aktueller Mandant)
+function getMailchimpConfig(mandantId) {
+  const cur = mandantId
+    ? APP_KEYS.companies.find(c => c.id === mandantId)
+    : getCurrentCompany();
+  if (!cur) return null;
+  return {
+    mandantId:     cur.id,
+    mandantName:   cur.name,
+    api_key:       (cur.mailchimp_api_key || '').trim(),
+    server_prefix: (cur.mailchimp_server_prefix || '').trim().toLowerCase(),
+    list_id:       (cur.mailchimp_list_id || '').trim(),
+    list_name:     (cur.mailchimp_list_name || '').trim()
+  };
+}
+
+// Mailchimp-API-Call ueber den Val.town-Proxy mit Per-Mandant-Headers.
+// path: z.B. '3.0/ping', '3.0/lists', '3.0/lists/<id>/members'
+async function mailchimpFetch(path, opts = {}, mandantId = null) {
+  const cfg = getMailchimpConfig(mandantId);
+  if (!cfg) throw new Error('Kein Mandant ausgewählt');
+  if (!cfg.api_key || !cfg.server_prefix) {
+    throw new Error('Mailchimp ist nicht konfiguriert für Mandant „' + cfg.mandantName + '" (Admin → Einstellungen)');
+  }
+  const headers = Object.assign({
+    'x-mailchimp-key': cfg.api_key,
+    'x-mailchimp-server': cfg.server_prefix
+  }, opts.headers || {});
+  return await proxyFetch('mailchimp/' + String(path).replace(/^\/+/, ''), {
+    method: opts.method || 'GET',
+    headers,
+    body: opts.body
+  });
 }
 
 function setCurrentCompany(companyId) {
@@ -15510,7 +15549,7 @@ export default async function (req: Request): Promise<Response> {
       status: 204,
       headers: {
         "access-control-allow-origin": "*",
-        "access-control-allow-headers": "authorization, content-type, x-company-id",
+        "access-control-allow-headers": "authorization, content-type, x-company-id, x-mailchimp-key, x-mailchimp-server",
         "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         "access-control-max-age": "86400"
       }
@@ -15749,6 +15788,41 @@ export default async function (req: Request): Promise<Response> {
       method: req.method,
       headers: {
         "Authorization": \`Token token=\${fsKey}\`,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      }
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
+    const upstream = await fetch(target, init);
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: {
+        "content-type": upstream.headers.get("content-type") || "application/json",
+        "access-control-allow-origin": "*"
+      }
+    });
+  }
+
+  // 6) Mailchimp — Routet /mailchimp/3.0/... an https://<server>.api.mailchimp.com/3.0/...
+  //    Pro-Mandant-Modell: API-Key + Server-Prefix kommen vom Client als Header.
+  //    Erlaubt unabhaengige Mailchimp-Accounts je Mandant ohne env vars je Firma.
+  if (path.startsWith("mailchimp/")) {
+    const mcPath = path.replace(/^mailchimp\\//, "");
+    const apiKey = req.headers.get("x-mailchimp-key") || "";
+    const server = (req.headers.get("x-mailchimp-server") || "").trim().toLowerCase();
+    if (!apiKey || !server) {
+      return jsonResponse({ error: "x-mailchimp-key + x-mailchimp-server Header benoetigt (per-Mandant-Setup)" }, 400);
+    }
+    // server-Prefix validieren (us1-us20, eu1-eu5, etc.) — verhindert SSRF
+    if (!/^[a-z]{2,3}\\d{1,2}$/.test(server)) {
+      return jsonResponse({ error: "Ungueltiger Mailchimp-Server-Prefix: " + server }, 400);
+    }
+    const target = \`https://\${server}.api.mailchimp.com/\${mcPath}\${url.search}\`;
+    const init: RequestInit = {
+      method: req.method,
+      headers: {
+        "Authorization": "Basic " + btoa("anystring:" + apiKey),
         "Content-Type": "application/json",
         "Accept": "application/json"
       }
@@ -16647,6 +16721,74 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         `;
       })()}
 
+      <!-- ============ STEP 8b — Mailchimp pro Mandant ============ -->
+      ${(() => {
+        const companies = (APP_KEYS.companies || []);
+        const anySet = companies.some(c => c.mailchimp_api_key && c.mailchimp_server_prefix);
+        return `
+        <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
+          ${stepHeader(9, 'Mailchimp pro Mandant (optional)', anySet ? statusBadge(true, companies.filter(c => c.mailchimp_api_key && c.mailchimp_server_prefix).length + '/' + companies.length + ' Mandanten verknüpft') : statusBadge(false, 'nicht konfiguriert'))}
+          <div class="pl-11">
+            <p class="text-sm text-ink-700 mb-2">Jeder Mandant kann mit einem eigenen Mailchimp-Account verbunden werden. Die API-Daten liegen am Mandanten in Airtable, der Val.town-Proxy verwendet sie pro Request (kein env var je Firma notwendig).</p>
+            <div class="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-900 mb-3">
+              <strong>API-Key holen:</strong> in Mailchimp → Profil oben rechts → <em>Profile → Extras → API keys</em> → „Create A Key". Format: <code class="bg-blue-100 px-1 rounded text-[10px]">xxxxxxxxxxxxxxxx-us21</code> — der Suffix nach dem Bindestrich ist der <strong>Server-Prefix</strong> (z.B. <code>us21</code>, <code>eu1</code>).
+            </div>
+            <div class="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-900 mb-3">
+              <strong>⚙ Wichtig:</strong> Damit das funktioniert, muss der Val.town-Proxy auf der aktuellen Version sein (Step 2 → „Code kopieren" → in Val.town aktualisieren). Die Mailchimp-Route nutzt die Header <code class="bg-amber-100 px-1 rounded text-[10px]">x-mailchimp-key</code> + <code class="bg-amber-100 px-1 rounded text-[10px]">x-mailchimp-server</code>.
+            </div>
+
+            <div class="bg-white border border-ink-200 rounded-lg overflow-hidden">
+              <div class="grid grid-cols-1 px-2 py-1.5 bg-ink-50 border-b border-ink-200 text-[10px] uppercase tracking-wider text-ink-500 font-semibold">
+                <span>Mandant · API-Key · Server-Prefix · Audience</span>
+              </div>
+              ${companies.length === 0 ? '<p class="text-xs text-ink-500 italic p-3">Keine Mandanten geladen.</p>' : companies.map(c => {
+                const hasKey = !!c.mailchimp_api_key;
+                const hasList = !!c.mailchimp_list_id;
+                return `
+                <div class="p-3 border-b border-ink-100 last:border-b-0 space-y-2" data-mc-row-company="${c.id}">
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm font-medium text-ink-900 flex-1 truncate" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
+                    ${hasKey && hasList ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">OK</span>' : (hasKey ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Audience fehlt</span>' : '<span class="text-[10px] uppercase font-bold tracking-wider bg-ink-100 text-ink-500 px-1.5 py-0.5 rounded">leer</span>')}
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label class="block text-[10px] text-ink-500 mb-0.5">API-Key</label>
+                      <input type="password" data-mc-input="api_key" value="${escapeHtml(c.mailchimp_api_key || '')}" placeholder="xxxxx-us21" class="w-full px-2 py-1.5 border border-ink-200 rounded text-xs font-mono">
+                    </div>
+                    <div>
+                      <label class="block text-[10px] text-ink-500 mb-0.5">Server-Prefix</label>
+                      <input type="text" data-mc-input="server_prefix" value="${escapeHtml(c.mailchimp_server_prefix || '')}" placeholder="us21" class="w-full px-2 py-1.5 border border-ink-200 rounded text-xs font-mono">
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-[10px] text-ink-500 mb-0.5">Audience (List-ID)</label>
+                    <div class="flex gap-1">
+                      <input type="text" data-mc-input="list_id" value="${escapeHtml(c.mailchimp_list_id || '')}" placeholder="${c.mailchimp_list_name ? escapeHtml(c.mailchimp_list_name) : 'Audience-ID'}" class="flex-1 px-2 py-1.5 border border-ink-200 rounded text-xs font-mono">
+                      <button type="button" onclick="_mcLoadAudiences('${c.id}', this)" class="shrink-0 text-xs px-2 py-1.5 border border-ink-200 hover:bg-ink-50 rounded inline-flex items-center gap-1" title="Audiences von Mailchimp laden">
+                        <i data-lucide="list" class="w-3 h-3"></i> Listen
+                      </button>
+                    </div>
+                    ${c.mailchimp_list_name ? `<p class="text-[10px] text-ink-500 mt-0.5">Aktuell: <strong>${escapeHtml(c.mailchimp_list_name)}</strong></p>` : ''}
+                    <div data-mc-audiences="${c.id}" class="mt-2"></div>
+                  </div>
+                  <div class="flex gap-1.5 pt-1">
+                    <button type="button" onclick="_mcTestConnection('${c.id}', this)" class="text-xs px-3 py-1.5 border border-blue-300 text-blue-700 hover:bg-blue-50 rounded inline-flex items-center gap-1">
+                      <i data-lucide="zap" class="w-3 h-3"></i> Verbindung testen
+                    </button>
+                    <button type="button" onclick="_mcSaveCompany('${c.id}', this)" class="ml-auto text-xs px-3 py-1.5 bg-brand-500 hover:bg-brand-600 text-white rounded inline-flex items-center gap-1 font-medium">
+                      <i data-lucide="save" class="w-3 h-3"></i> Speichern
+                    </button>
+                  </div>
+                  <div data-mc-status="${c.id}" class="text-[11px]"></div>
+                </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        </div>
+        `;
+      })()}
+
       <!-- ============ STEP 9 — Freshsales-CRM (optional) ============ -->
       ${(() => {
         const fsDomain = APP_KEYS.freshsalesSubdomain || '';
@@ -16964,6 +17106,147 @@ async function saveCompanyFdGroups(companyId, btnEl) {
 }
 
 // Helper: holt alle Gruppen aus Freshdesk und listet sie zur Auswahl auf.
+// ===== Mailchimp Admin-Settings-Helper =====
+
+// Liest die per-Mandant Mailchimp-Inputs aus der UI (api_key, server_prefix, list_id, list_name)
+function _mcReadRowInputs(companyId) {
+  const row = document.querySelector('[data-mc-row-company="' + companyId + '"]');
+  if (!row) return null;
+  return {
+    api_key:       (row.querySelector('[data-mc-input="api_key"]')?.value || '').trim(),
+    server_prefix: (row.querySelector('[data-mc-input="server_prefix"]')?.value || '').trim().toLowerCase(),
+    list_id:       (row.querySelector('[data-mc-input="list_id"]')?.value || '').trim(),
+    list_name:     row.querySelector('[data-mc-input="list_id"]')?.dataset?.lname || ''
+  };
+}
+
+// Schreibt die Mailchimp-Felder am Company-Record. Ensure'd das Schema beim ersten Save.
+async function _mcSaveCompany(companyId, btnEl) {
+  if (!companyId) return;
+  const vals = _mcReadRowInputs(companyId);
+  if (!vals) return;
+  const status = document.querySelector('[data-mc-status="' + companyId + '"]');
+  // Validierung
+  if (vals.api_key && !vals.server_prefix) {
+    // versuche Server aus dem Key zu extrahieren (Format xxxx-usNN)
+    const m = vals.api_key.match(/-([a-z]{2,3}\d{1,2})$/i);
+    if (m) vals.server_prefix = m[1].toLowerCase();
+  }
+  if (vals.api_key && !/^[a-z]{2,3}\d{1,2}$/.test(vals.server_prefix)) {
+    if (status) status.innerHTML = '<span class="text-red-700">Server-Prefix ungültig (Erwartet z.B. us21, eu1)</span>';
+    return;
+  }
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
+  try {
+    await ensureFields('Company', [
+      { name: 'mailchimp_api_key',       type: 'singleLineText' },
+      { name: 'mailchimp_server_prefix', type: 'singleLineText' },
+      { name: 'mailchimp_list_id',       type: 'singleLineText' },
+      { name: 'mailchimp_list_name',     type: 'singleLineText' }
+    ]).catch(e => console.warn('[mc] ensureFields:', e.message));
+    await updateData('Company', companyId, {
+      mailchimp_api_key:       vals.api_key,
+      mailchimp_server_prefix: vals.server_prefix,
+      mailchimp_list_id:       vals.list_id,
+      mailchimp_list_name:     vals.list_name
+    });
+    // Lokalen Cache updaten
+    const c = APP_KEYS.companies.find(c => c.id === companyId);
+    if (c) {
+      c.mailchimp_api_key = vals.api_key;
+      c.mailchimp_server_prefix = vals.server_prefix;
+      c.mailchimp_list_id = vals.list_id;
+      c.mailchimp_list_name = vals.list_name;
+    }
+    toast('Mailchimp-Config gespeichert', 'success', 2500);
+    if (status) status.innerHTML = '<span class="text-emerald-700">✓ Gespeichert</span>';
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+    if (status) status.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message) + '</span>';
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="save" class="w-3 h-3"></i> Speichern'; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
+// Verbindung testen — ruft /3.0/ping auf
+async function _mcTestConnection(companyId, btnEl) {
+  const vals = _mcReadRowInputs(companyId);
+  if (!vals) return;
+  if (!vals.api_key) { toast('API-Key fehlt', 'warn'); return; }
+  if (vals.api_key && !vals.server_prefix) {
+    const m = vals.api_key.match(/-([a-z]{2,3}\d{1,2})$/i);
+    if (m) vals.server_prefix = m[1].toLowerCase();
+  }
+  if (!vals.server_prefix) { toast('Server-Prefix fehlt (oder im Key nicht erkennbar)', 'warn'); return; }
+  const status = document.querySelector('[data-mc-status="' + companyId + '"]');
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Teste…'; if (window.lucide) lucide.createIcons(); }
+  if (status) status.innerHTML = '<span class="text-ink-500">Pinge Mailchimp …</span>';
+  try {
+    const res = await proxyFetch('mailchimp/3.0/ping', {
+      method: 'GET',
+      headers: { 'x-mailchimp-key': vals.api_key, 'x-mailchimp-server': vals.server_prefix }
+    });
+    const msg = res?.health_status || (typeof res === 'string' ? res : JSON.stringify(res));
+    if (status) status.innerHTML = '<span class="text-emerald-700">✓ Verbindung OK: ' + escapeHtml(String(msg).slice(0, 80)) + '</span>';
+    toast('Mailchimp-Verbindung OK', 'success', 3000);
+  } catch (e) {
+    if (status) status.innerHTML = '<span class="text-red-700">✗ ' + escapeHtml(e.message || String(e)) + '</span>';
+    toast('Verbindung fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="zap" class="w-3 h-3"></i> Verbindung testen'; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
+// Lädt alle Audiences (Lists) des Mandanten und zeigt sie zur Auswahl an
+async function _mcLoadAudiences(companyId, btnEl) {
+  const vals = _mcReadRowInputs(companyId);
+  if (!vals) return;
+  if (!vals.api_key) { toast('API-Key fehlt', 'warn'); return; }
+  if (vals.api_key && !vals.server_prefix) {
+    const m = vals.api_key.match(/-([a-z]{2,3}\d{1,2})$/i);
+    if (m) vals.server_prefix = m[1].toLowerCase();
+  }
+  const wrap = document.querySelector('[data-mc-audiences="' + companyId + '"]');
+  const origHtml = btnEl?.innerHTML;
+  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i>'; if (window.lucide) lucide.createIcons(); }
+  if (wrap) wrap.innerHTML = '<p class="text-xs text-ink-500 italic">Lade Audiences …</p>';
+  try {
+    const res = await proxyFetch('mailchimp/3.0/lists?count=50&fields=lists.id,lists.name,lists.stats.member_count', {
+      method: 'GET',
+      headers: { 'x-mailchimp-key': vals.api_key, 'x-mailchimp-server': vals.server_prefix }
+    });
+    const lists = res?.lists || [];
+    if (!lists.length) {
+      if (wrap) wrap.innerHTML = '<p class="text-xs text-amber-700">Keine Audiences gefunden. Bitte zuerst eine in Mailchimp anlegen.</p>';
+      return;
+    }
+    if (wrap) wrap.innerHTML = `
+      <div class="bg-ink-50 border border-ink-200 rounded-lg p-2 space-y-1">
+        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-1">${lists.length} Audience${lists.length===1?'':'s'} — Klick zum Übernehmen</p>
+        ${lists.map(l => `
+          <button type="button" onclick="(function(){
+            const row = document.querySelector('[data-mc-row-company=&quot;${companyId}&quot;]');
+            if (row) {
+              const inp = row.querySelector('[data-mc-input=&quot;list_id&quot;]');
+              if (inp) { inp.value = '${escapeHtml(l.id)}'; inp.dataset.lname = '${escapeHtml(l.name || '')}'; }
+            }
+            toast('Audience „${escapeHtml(l.name || '–')}" ausgewählt — bitte Speichern klicken', 'info', 3000);
+          })()" class="w-full text-left bg-white border border-ink-200 rounded px-2 py-1.5 hover:bg-brand-50 hover:border-brand-300 transition flex items-center justify-between gap-2">
+            <span class="text-xs font-medium text-ink-900 truncate">${escapeHtml(l.name || '–')}</span>
+            <span class="text-[10px] text-ink-500 shrink-0">${l.stats?.member_count || 0} Mitglieder · <code class="font-mono">${escapeHtml(l.id)}</code></span>
+          </button>
+        `).join('')}
+      </div>
+    `;
+  } catch (e) {
+    if (wrap) wrap.innerHTML = '<p class="text-xs text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="list" class="w-3 h-3"></i> Listen'; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
 async function loadFreshdeskGroupsList(btnEl) {
   const wrap = document.getElementById('fdGroupsListHelper');
   if (!wrap) return;
