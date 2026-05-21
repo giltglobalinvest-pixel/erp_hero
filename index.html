@@ -694,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.13';
+const APP_VERSION = 'v5.14';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -17264,6 +17264,28 @@ async function _mcTestConnection(companyId, btnEl) {
   }
 }
 
+// Wird vom Audience-Picker-Button aufgerufen. Liest IDs/Namen aus data-Attributen
+// und schreibt sie in den passenden Input des Mandanten. Robust gegen Sonderzeichen
+// im Audience-Namen (vorher: inline onclick mit String-Interpolation hatte Quote-Probleme).
+function _mcSelectAudienceFromButton(btn) {
+  if (!btn) return;
+  const companyId = btn.dataset.mcPickCompany || '';
+  const listId    = btn.dataset.mcPickListId || '';
+  const listName  = btn.dataset.mcPickListName || '';
+  if (!companyId || !listId) return;
+  const row = document.querySelector('[data-mc-row-company="' + companyId + '"]');
+  if (!row) { toast('Mandant-Zeile nicht gefunden', 'error'); return; }
+  const inp = row.querySelector('[data-mc-input="list_id"]');
+  if (inp) {
+    inp.value = listId;
+    inp.dataset.lname = listName;
+  }
+  // Audiences-Liste schließen + Hinweis zur Speicherung
+  const wrap = document.querySelector('[data-mc-audiences="' + companyId + '"]');
+  if (wrap) wrap.innerHTML = '<p class="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5">✓ <strong>' + escapeHtml(listName || listId) + '</strong> ausgewählt — bitte „Speichern" klicken</p>';
+  toast('Audience „' + (listName || listId) + '" übernommen — bitte Speichern klicken', 'info', 3500);
+}
+
 // Lädt alle Audiences (Lists) des Mandanten und zeigt sie zur Auswahl an
 async function _mcLoadAudiences(companyId, btnEl) {
   const vals = _mcReadRowInputs(companyId);
@@ -17291,14 +17313,12 @@ async function _mcLoadAudiences(companyId, btnEl) {
       <div class="bg-ink-50 border border-ink-200 rounded-lg p-2 space-y-1">
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-1">${lists.length} Audience${lists.length===1?'':'s'} — Klick zum Übernehmen</p>
         ${lists.map(l => `
-          <button type="button" onclick="(function(){
-            const row = document.querySelector('[data-mc-row-company=&quot;${companyId}&quot;]');
-            if (row) {
-              const inp = row.querySelector('[data-mc-input=&quot;list_id&quot;]');
-              if (inp) { inp.value = '${escapeHtml(l.id)}'; inp.dataset.lname = '${escapeHtml(l.name || '')}'; }
-            }
-            toast('Audience „${escapeHtml(l.name || '–')}" ausgewählt — bitte Speichern klicken', 'info', 3000);
-          })()" class="w-full text-left bg-white border border-ink-200 rounded px-2 py-1.5 hover:bg-brand-50 hover:border-brand-300 transition flex items-center justify-between gap-2">
+          <button type="button"
+            data-mc-pick-company="${escapeHtml(companyId)}"
+            data-mc-pick-list-id="${escapeHtml(l.id)}"
+            data-mc-pick-list-name="${escapeHtml(l.name || '')}"
+            onclick="_mcSelectAudienceFromButton(this)"
+            class="w-full text-left bg-white border border-ink-200 rounded px-2 py-1.5 hover:bg-brand-50 hover:border-brand-300 transition flex items-center justify-between gap-2">
             <span class="text-xs font-medium text-ink-900 truncate">${escapeHtml(l.name || '–')}</span>
             <span class="text-[10px] text-ink-500 shrink-0">${l.stats?.member_count || 0} Mitglieder · <code class="font-mono">${escapeHtml(l.id)}</code></span>
           </button>
