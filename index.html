@@ -14,6 +14,67 @@
 <link id="appleTouchIcon" rel="apple-touch-icon" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' fill='%23FFFFFF'/%3E%3Cpath d='M 30 130 L 15 178 L 70 165 L 110 165 L 165 178 L 150 130 Z' fill='%23DC2626'/%3E%3Cellipse cx='90' cy='195' rx='55' ry='35' fill='%231FA8D6'/%3E%3Crect x='80' y='130' width='20' height='15' fill='%23F4C795'/%3E%3Ccircle cx='90' cy='100' r='38' fill='%23F4C795'/%3E%3Cpath d='M 60 95 Q 60 88 70 88 L 110 88 Q 120 88 120 95 L 120 102 Q 120 108 110 108 L 70 108 Q 60 108 60 102 Z' fill='%230F172A'/%3E%3Cellipse cx='76' cy='98' rx='6' ry='5' fill='%23FFFFFF'/%3E%3Cellipse cx='104' cy='98' rx='6' ry='5' fill='%23FFFFFF'/%3E%3Ccircle cx='77' cy='99' r='2.5' fill='%230F172A'/%3E%3Ccircle cx='105' cy='99' r='2.5' fill='%230F172A'/%3E%3Cpath d='M 80 120 Q 90 128 100 120' stroke='%231F2937' stroke-width='3' stroke-linecap='round' fill='none'/%3E%3Cpath d='M 50 80 Q 50 50 90 50 Q 130 50 130 80 L 130 87 L 50 87 Z' fill='%231FA8D6'/%3E%3Cellipse cx='115' cy='86' rx='35' ry='6' fill='%23157699'/%3E%3Ctext x='90' y='76' font-family='Impact,Arial,sans-serif' font-weight='900' font-size='22' fill='%23FFFFFF' text-anchor='middle'%3EFLP%3C/text%3E%3C/svg%3E" />
 <link id="appFavicon" rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' fill='%23FFFFFF'/%3E%3Ccircle cx='90' cy='100' r='38' fill='%23F4C795'/%3E%3Cpath d='M 50 80 Q 50 50 90 50 Q 130 50 130 80 L 130 87 L 50 87 Z' fill='%231FA8D6'/%3E%3Cellipse cx='115' cy='86' rx='35' ry='6' fill='%23157699'/%3E%3Ctext x='90' y='76' font-family='Impact,Arial,sans-serif' font-weight='900' font-size='22' fill='%23FFFFFF' text-anchor='middle'%3EFLP%3C/text%3E%3C/svg%3E" />
 <link id="appManifest" rel="manifest" />
+<!-- PWA-Setup-Script: sofortiges Manifest (SVG-Icons) + Service-Worker-Registrierung + Install-Prompt-Capture.
+     Laeuft VOR dem App-Skript damit Chrome das Manifest schon beim Discovery sieht — sonst wuerden
+     'Install app'-Prompts manchmal nicht ausgeloest werden. Die spaetere drawAppIcon()-Logik
+     ueberschreibt das Manifest mit hochwertigen PNG-Icons (besser fuer Splash + Home-Screen). -->
+<script>
+(function() {
+  try {
+    // 1) Sofort-Manifest mit SVG-Icons. Chrome 93+ akzeptiert SVG in manifest.icons.
+    const iconSvg = "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20512%20512%27%3E%3Crect%20width%3D%27512%27%20height%3D%27512%27%20fill%3D%27%231FA8D6%27%20rx%3D%2780%27%2F%3E%3Ctext%20x%3D%27256%27%20y%3D%27340%27%20font-family%3D%27Inter%2Csystem-ui%2Csans-serif%27%20font-weight%3D%27800%27%20font-size%3D%27210%27%20fill%3D%27white%27%20text-anchor%3D%27middle%27%3EFLP%3C%2Ftext%3E%3Ctext%20x%3D%27256%27%20y%3D%27440%27%20font-family%3D%27Inter%2Csystem-ui%2Csans-serif%27%20font-weight%3D%27600%27%20font-size%3D%2756%27%20fill%3D%27%23B8E4F7%27%20text-anchor%3D%27middle%27%3EERP%20HERO%3C%2Ftext%3E%3C%2Fsvg%3E";
+    const path = (location.pathname || '/').replace(/[^/]+$/, '');
+    const m = {
+      name: 'ERP Hero',
+      short_name: 'ERP Hero',
+      description: 'FLP Lift Parts ERP — Anfragen, Angebote, Aufträge, Rechnungen',
+      start_url: path,
+      scope: path,
+      display: 'standalone',
+      orientation: 'any',
+      background_color: '#1FA8D6',
+      theme_color: '#1FA8D6',
+      categories: ['business', 'productivity'],
+      icons: [
+        { src: iconSvg, sizes: '192x192 512x512', type: 'image/svg+xml', purpose: 'any maskable' }
+      ]
+    };
+    const url = 'data:application/manifest+json;base64,' + btoa(unescape(encodeURIComponent(JSON.stringify(m))));
+    const lnk = document.getElementById('appManifest');
+    if (lnk) lnk.setAttribute('href', url);
+  } catch (_) {}
+
+  // 2) Service Worker registrieren — sw.js liegt im selben Verzeichnis (per gitdeploy hochgeladen).
+  // Ohne SW zeigt Chrome zwar 'Install app' im Menue, aber das automatische beforeinstallprompt
+  // wird nicht ausgeloest. Mit minimalem SW haben wir den Install-Button verlaesslich verfuegbar.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('sw.js').catch(function(e) {
+        console.warn('[PWA] SW-Registrierung fehlgeschlagen:', e.message);
+      });
+    });
+  }
+
+  // 3) beforeinstallprompt einfangen — Chrome feuert das, wenn die App installierbar ist.
+  // Wir merken uns das Event in window.__pwaDeferredPrompt und zeigen den Install-Button.
+  window.__pwaDeferredPrompt = null;
+  window.addEventListener('beforeinstallprompt', function(e) {
+    e.preventDefault();
+    window.__pwaDeferredPrompt = e;
+    // Eventuelle UI-Indikatoren aktualisieren
+    const btn = document.getElementById('pwaInstallBtn');
+    if (btn) btn.style.display = '';
+    try { document.dispatchEvent(new CustomEvent('pwa-installable')); } catch(_){}
+  });
+  // appinstalled: nach erfolgreicher Installation — Button verstecken
+  window.addEventListener('appinstalled', function() {
+    window.__pwaDeferredPrompt = null;
+    const btn = document.getElementById('pwaInstallBtn');
+    if (btn) btn.style.display = 'none';
+    try { (typeof toast === 'function') && toast('✓ App installiert — du findest sie ab jetzt im Programm-Menü / Startbildschirm', 'success', 6000); } catch(_){}
+  });
+})();
+</script>
 
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
@@ -586,6 +647,10 @@
           <button onclick="forceAppUpdate()" class="h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 inline-flex items-center justify-center" title="App-Update erzwingen (Cache leeren + Hard Reload)">
             <i data-lucide="rocket" class="w-4 h-4"></i>
           </button>
+          <button id="pwaInstallBtn" onclick="pwaInstall()" style="display:none;" class="h-9 px-2.5 rounded-lg bg-brand-500 text-white hover:bg-brand-600 inline-flex items-center gap-1.5 text-xs font-semibold shadow-sm" title="App auf diesem Gerät installieren — läuft danach in eigenem Fenster, schneller, offlinefähig">
+            <i data-lucide="download" class="w-4 h-4"></i>
+            <span class="hidden sm:inline">App installieren</span>
+          </button>
           <button id="searchBtn" class="hidden md:inline-flex h-9 w-9 rounded-lg border border-ink-200 text-ink-700 hover:bg-ink-100 items-center justify-center" title="Suche">
             <i data-lucide="search" class="w-4 h-4"></i>
           </button>
@@ -629,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.12';
+const APP_VERSION = 'v5.13';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -26933,6 +26998,121 @@ function initPullToRefresh() {
     document.head.appendChild(s);
   }
 }
+
+// ===== PWA-Installation =====
+
+// Triggert die "App installieren"-Aufforderung wenn Chrome es erlaubt
+// (beforeinstallprompt wurde gefangen). Sonst: Anleitung anzeigen.
+async function pwaInstall() {
+  const prompt = window.__pwaDeferredPrompt;
+  if (prompt && typeof prompt.prompt === 'function') {
+    try {
+      prompt.prompt();
+      const choice = await prompt.userChoice;
+      window.__pwaDeferredPrompt = null;
+      const btn = document.getElementById('pwaInstallBtn');
+      if (btn) btn.style.display = 'none';
+      if (choice && choice.outcome === 'accepted') {
+        if (typeof toast === 'function') toast('Installiere App …', 'success', 2500);
+      } else {
+        if (typeof toast === 'function') toast('Installation abgebrochen — kannst du jederzeit über Chrome → Menü → "App installieren" nachholen', 'info', 6000);
+        // Button wieder anzeigen damit User es nochmal versuchen kann
+        if (btn) setTimeout(() => { btn.style.display = ''; }, 800);
+      }
+    } catch (e) {
+      console.warn('[PWA] install fehlgeschlagen:', e.message);
+      _pwaShowManualInstructions();
+    }
+  } else {
+    _pwaShowManualInstructions();
+  }
+}
+
+// Zeigt manuelle Anleitung wenn der Browser kein beforeinstallprompt liefert
+// (z.B. iOS Safari, Firefox, oder wenn schon einmal abgelehnt).
+function _pwaShowManualInstructions() {
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
+  const isFirefox = /Firefox/i.test(ua);
+  const isEdge = /Edg\//i.test(ua);
+  const isChrome = /Chrome/i.test(ua) && !isEdge;
+
+  let instructions;
+  if (isIOS) {
+    instructions = `
+      <p class="mb-2"><strong>iOS-Geräte:</strong></p>
+      <ol class="list-decimal ml-5 space-y-1 text-sm">
+        <li>Tippe auf das <strong>Teilen-Symbol</strong> ⬆️ unten in Safari</li>
+        <li>Scroll runter zu <strong>„Zum Home-Bildschirm"</strong></li>
+        <li>Tippe auf <strong>„Hinzufügen"</strong> rechts oben</li>
+      </ol>`;
+  } else if (isChrome || isEdge) {
+    instructions = `
+      <p class="mb-2"><strong>${isEdge ? 'Edge' : 'Chrome'}-Browser:</strong></p>
+      <ol class="list-decimal ml-5 space-y-1 text-sm">
+        <li>Klick auf das <strong>Drei-Punkte-Menü</strong> ⋮ oben rechts</li>
+        <li>Wähle <strong>„App installieren …"</strong> oder <strong>„Verknüpfung erstellen … → Als Fenster öffnen"</strong></li>
+        <li>Bestätige mit <strong>„Installieren"</strong></li>
+      </ol>
+      <p class="text-xs text-ink-500 mt-2 italic">Falls der Eintrag fehlt: Seite neu laden, die App muss den Service-Worker registriert haben.</p>`;
+  } else if (isFirefox) {
+    instructions = `
+      <p class="mb-2"><strong>Firefox:</strong></p>
+      <p class="text-sm">Firefox unterstützt PWA-Installation nur auf Android. Auf Desktop empfehle ich Chrome oder Edge zu nutzen.</p>`;
+  } else if (isSafari) {
+    instructions = `
+      <p class="mb-2"><strong>Safari (macOS):</strong></p>
+      <ol class="list-decimal ml-5 space-y-1 text-sm">
+        <li>Im Menü <strong>„Ablage" → „Zum Dock hinzufügen…"</strong> (macOS 14+)</li>
+        <li>Oder benutze Chrome / Edge für klassische PWA-Installation</li>
+      </ol>`;
+  } else {
+    instructions = `
+      <p class="text-sm">Dein Browser unterstützt evtl. keine PWA-Installation. Versuch's mit <strong>Chrome</strong> oder <strong>Edge</strong>.</p>`;
+  }
+
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5 max-w-md">
+      <h3 class="text-base font-bold text-ink-900 mb-3 flex items-center gap-2">
+        <i data-lucide="download" class="w-5 h-5 text-brand-600"></i>
+        ERP Hero installieren
+      </h3>
+      <div class="text-ink-700">${instructions}</div>
+      <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 mt-3 text-xs text-emerald-900">
+        <strong>Nach der Installation:</strong>
+        <ul class="list-disc ml-5 mt-1 space-y-0.5">
+          <li>Eigenes Programmsymbol, kein Browser-Tab</li>
+          <li>Schneller (Service Worker cached Assets)</li>
+          <li>Funktioniert auch offline (eingeschränkt)</li>
+          <li>Push-/System-Benachrichtigungen möglich</li>
+        </ul>
+      </div>
+      <div class="flex justify-end mt-4">
+        <button type="button" onclick="closeTopModal()" class="px-3 py-2 text-sm bg-brand-500 hover:bg-brand-600 text-white rounded-lg font-medium">OK</button>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-md' });
+  if (window.lucide) lucide.createIcons();
+}
+
+// Den Install-Button auch dann zeigen, wenn beforeinstallprompt nicht feuert
+// (z.B. iOS Safari oder bereits abgelehnt) — User kann manuelle Anleitung sehen.
+// Wird nach DOMContentLoaded einmal ausgewertet.
+function _pwaShowButtonAlwaysOnNonChrome() {
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua);
+  // Wenn IOS oder kein beforeinstallprompt gefeuert hat innerhalb 3s → Button trotzdem zeigen
+  setTimeout(() => {
+    if (window.__pwaDeferredPrompt) return; // Chrome hat es schon gefeuert
+    if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return; // schon installiert
+    if (navigator.standalone) return; // iOS schon installiert
+    const btn = document.getElementById('pwaInstallBtn');
+    if (btn) btn.style.display = '';
+  }, 3000);
+}
+document.addEventListener('DOMContentLoaded', _pwaShowButtonAlwaysOnNonChrome);
 
 function forceAppUpdate() {
   toast('Lade neueste Version…', 'info', 1500);
