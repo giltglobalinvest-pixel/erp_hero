@@ -694,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.15';
+const APP_VERSION = 'v5.16';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -19626,8 +19626,8 @@ async function openAiArticleCreationModal() {
           <div>
             <p>Ich lege einen Artikel für dich an. Du kannst:</p>
             <ul class="ml-3 mt-1 space-y-0.5 list-disc text-[11px]">
-              <li>Eine <strong>FD-Ticket-Nr</strong> nennen (z.B. „aus FT-184372") — ich lese Inhalt + Anhänge</li>
-              <li><strong>Screenshots / PDFs</strong> reinziehen via 📎</li>
+              <li>Eine <strong>FD-Ticket-Nr</strong> nennen (z.B. „aus FT-184372") — ich lese Inhalt, Bilder UND PDFs aus dem Ticket</li>
+              <li><strong>Screenshots / PDFs</strong> reinziehen via 📎 oder mit <kbd class="bg-ink-100 px-1 rounded text-[10px]">⌘/Strg+V</kbd> direkt ins Eingabefeld einfügen</li>
               <li>Frei <strong>beschreiben</strong> („Antrieb V3F25L, Lieferant Schmitt+Sohn, EK 4200€")</li>
             </ul>
             <p class="text-[11px] text-ink-500 mt-1.5 italic">Fremdsprachen werden automatisch übersetzt. EK + Lieferantennummer kommen in die Article-Supplier-Beziehung.</p>
@@ -19674,7 +19674,10 @@ async function openAiArticleCreationModal() {
     </div>
   `, { maxWidth: 'max-w-xl' });
   if (window.lucide) lucide.createIcons();
-  setTimeout(() => document.getElementById('aacInput')?.focus(), 80);
+  setTimeout(() => {
+    document.getElementById('aacInput')?.focus();
+    _aacAttachPasteHandler();
+  }, 80);
   // System-Prompt im Hintergrund vorbereiten — die KI antwortet sofort wenn User sendet
   _aacBuildSystemPrompt().then(p => { _aacState.systemPrompt = p; }).catch(() => {});
 }
@@ -19684,22 +19687,26 @@ function _aacClose() {
   closeTopModal();
 }
 
-// File-Upload-Handler — Bilder werden zu base64 fuer Vision-API, PDFs werden best-effort als Text gelesen
+// File-Upload-Handler — Bilder + PDFs werden zu base64 fuer Vision/Document-API
 async function _aacHandleFileUpload(inp) {
   if (!inp.files || !inp.files.length) return;
   for (const file of inp.files) {
     try {
-      if (/^image\//.test(file.type)) {
+      const isImg = /^image\//.test(file.type);
+      const isPdf = /pdf|application\/pdf/.test(file.type) || /\.pdf$/i.test(file.name);
+      if (isImg || isPdf) {
         const base64 = await new Promise((res, rej) => {
           const r = new FileReader();
           r.onload = () => { const s = r.result; res(typeof s === 'string' ? s.split(',')[1] : ''); };
           r.onerror = rej;
           r.readAsDataURL(file);
         });
-        _aacState.pendingUploads.push({ name: file.name, mediaType: file.type, base64, kind: 'image' });
-      } else if (/pdf|application\/pdf/.test(file.type)) {
-        // PDF: nur Name + Hint — KI muss User fragen / nutzt ggf. spaeter Anhang im FD-Ticket
-        _aacState.pendingUploads.push({ name: file.name, mediaType: file.type, base64: '', kind: 'pdf' });
+        _aacState.pendingUploads.push({
+          name: file.name,
+          mediaType: isPdf ? 'application/pdf' : (file.type || 'image/png'),
+          base64,
+          kind: isImg ? 'image' : 'pdf'
+        });
       } else {
         _aacState.pendingUploads.push({ name: file.name, mediaType: file.type, base64: '', kind: 'other' });
       }
@@ -19707,6 +19714,42 @@ async function _aacHandleFileUpload(inp) {
   }
   inp.value = ''; // Reset damit der gleiche File nochmal angefuegt werden koennte
   _aacRenderUploadsPreview();
+}
+
+// Erlaubt Screenshots / Bilder per Strg+V / ⌘+V direkt in das Eingabefeld einzufügen
+function _aacAttachPasteHandler() {
+  const inp = document.getElementById('aacInput');
+  if (!inp || inp._aacPasteAttached) return;
+  inp._aacPasteAttached = true;
+  inp.addEventListener('paste', async (e) => {
+    const items = e.clipboardData?.items || [];
+    let pastedCount = 0;
+    for (const item of items) {
+      if (item && /^image\//.test(item.type)) {
+        e.preventDefault(); // verhindert Einfügen von <img>-HTML
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        try {
+          const base64 = await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload = () => { const s = r.result; res(typeof s === 'string' ? s.split(',')[1] : ''); };
+            r.onerror = rej;
+            r.readAsDataURL(blob);
+          });
+          const ext = item.type.includes('png') ? '.png' : (item.type.includes('jpeg') ? '.jpg' : '');
+          _aacState.pendingUploads.push({
+            name: 'Screenshot-' + new Date().toLocaleTimeString('de-DE').replace(/[:.]/g, '') + ext,
+            mediaType: item.type, base64, kind: 'image'
+          });
+          pastedCount++;
+        } catch (err) { console.warn('[aac] Paste-Lesen fehlgeschlagen:', err.message); }
+      }
+    }
+    if (pastedCount > 0) {
+      _aacRenderUploadsPreview();
+      toast('✓ ' + pastedCount + ' Bild' + (pastedCount === 1 ? '' : 'er') + ' aus Zwischenablage angehängt', 'success', 2000);
+    }
+  });
 }
 
 function _aacRenderUploadsPreview() {
@@ -19814,6 +19857,11 @@ async function _aacBuildSystemPrompt() {
 
   return `Du bist Einkaufsassistent bei FLP Lift Parts GmbH. Du legst neue ERP-Artikel aus Lieferanten-Angeboten an. Sprich auf Deutsch.
 
+WICHTIG — DEINE FÄHIGKEITEN:
+- Du kannst Bilder direkt analysieren (Vision)
+- Du kannst PDFs direkt lesen (auch mehrseitige Lieferanten-Angebote) — diese werden dir als type:document Bloecke geschickt
+- Wenn dir Anhaenge zur Verfuegung stehen, NICHT sagen "ich kann nicht lesen" — direkt analysieren
+
 ═══ DEINE AUFGABE ═══
 Analysiere den User-Input (FD-Ticket-Verweis, Texte, Bilder, PDFs) und erstelle EINEN ERP-Artikel mit:
 - Bezeichnung (name1) — knapp + technisch (z.B. "Antrieb V3F25L Kone")
@@ -19909,7 +19957,9 @@ function _aacExtractCreateArticleJson(reply) {
   try { return JSON.parse(txt.slice(start, end + 1)); } catch (_) { return null; }
 }
 
-// Wenn User "aus FT-XYZ" sagt, FD-Ticket laden + Anhaenge-Bilder als base64 dranhaengen
+// Wenn User "aus FT-XYZ" sagt, FD-Ticket laden + Anhaenge-Bilder UND PDFs als base64 dranhaengen.
+// Claude Sonnet 4.5 kann PDFs nativ via type:document verarbeiten — KI kann also direkt aus dem
+// Lieferanten-Angebot-PDF lesen.
 async function _aacMaybeLoadFdTicket(userText) {
   const m = String(userText).match(/(?:FT[-\s]?|aus\s+|Ticket\s+)(\d{4,7})\b/i);
   if (!m) return null;
@@ -19921,17 +19971,27 @@ async function _aacMaybeLoadFdTicket(userText) {
       const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
       conversations = Array.isArray(conv) ? conv : [];
     } catch (_) {}
-    // Bild-Anhaenge sammeln + base64 laden (max 5 wegen Token-Budget)
+    // Bild- + PDF-Anhaenge sammeln + base64 laden
     let attachments = [];
     if (typeof _collectFreshdeskAttachmentsFrom === 'function') {
       attachments = _collectFreshdeskAttachmentsFrom(ticket, conversations) || [];
     }
     const images = [];
+    const pdfs = [];
     const imageAttachments = attachments.filter(a => /^image\//i.test(a.content_type || '')).slice(0, 5);
+    const pdfAttachments   = attachments.filter(a => /pdf/i.test(a.content_type || '') || /\.pdf$/i.test(a.name || '')).slice(0, 5);
     for (const att of imageAttachments) {
       if (typeof _downloadAttachmentAsBase64 === 'function') {
         const b64 = await _downloadAttachmentAsBase64(att);
-        if (b64) images.push({ name: att.name || '?', mediaType: att.content_type, base64: b64 });
+        if (b64) images.push({ name: att.name || '?', mediaType: att.content_type || 'image/png', base64: b64 });
+      }
+    }
+    for (const att of pdfAttachments) {
+      if (typeof _downloadAttachmentAsBase64 === 'function') {
+        try {
+          const b64 = await _downloadAttachmentAsBase64(att);
+          if (b64) pdfs.push({ name: att.name || '?', mediaType: 'application/pdf', base64: b64 });
+        } catch (e) { console.warn('[aac] PDF-Download fehlgeschlagen:', att.name, e.message); }
       }
     }
     const ticketText = [
@@ -19939,7 +19999,10 @@ async function _aacMaybeLoadFdTicket(userText) {
       'Erste Nachricht:\n' + _fdHtmlToText(ticket.description_html || ticket.description || ''),
       ...conversations.slice(0, 5).map(c => '--- ' + (c.incoming ? 'Lieferant' : 'Wir') + ' ---\n' + _fdHtmlToText(c.body || c.body_text || '').slice(0, 1500))
     ].join('\n\n');
-    return { ticketId, ticketText, images, otherAttachments: attachments.filter(a => !/^image\//i.test(a.content_type || '')) };
+    return {
+      ticketId, ticketText, images, pdfs,
+      otherAttachments: attachments.filter(a => !/^image\//i.test(a.content_type || '') && !/pdf/i.test(a.content_type || '') && !/\.pdf$/i.test(a.name || ''))
+    };
   } catch (e) {
     console.warn('[aac] FD-Ticket-Load fehlgeschlagen:', e.message);
     return null;
@@ -19975,28 +20038,39 @@ async function _aacSendChatMessage() {
   }
   if (fdLoaded) {
     _aacState.ticketContext = fdLoaded;
-    // FD-Bilder zu pending-uploads dazu (visuell sichtbar)
+    // FD-Bilder + PDFs zu pending-uploads dazu (visuell sichtbar)
     fdLoaded.images.forEach(img => _aacState.pendingUploads.push({ ...img, kind: 'image' }));
+    (fdLoaded.pdfs || []).forEach(pdf => _aacState.pendingUploads.push({ ...pdf, kind: 'pdf' }));
     _aacRenderUploadsPreview();
   }
 
-  // Message-Content zusammenbauen (Text + Bilder + ggf. FD-Ticket-Text)
+  // Message-Content zusammenbauen (Text + Bilder + PDFs)
+  // PDFs werden als type:document geschickt — Claude Sonnet 4.5 kann sie nativ lesen.
   const content = [];
   for (const u of _aacState.pendingUploads) {
     if (u.kind === 'image' && u.base64) {
       content.push({ type: 'image', source: { type: 'base64', media_type: u.mediaType, data: u.base64 } });
+    } else if (u.kind === 'pdf' && u.base64) {
+      content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: u.base64 } });
     }
   }
-  const pdfNames = _aacState.pendingUploads.filter(u => u.kind === 'pdf').map(u => u.name);
   const otherNames = _aacState.pendingUploads.filter(u => u.kind === 'other').map(u => u.name);
   let textPart = userText || '';
   if (fdLoaded) {
     textPart = (textPart ? textPart + '\n\n' : '') + 'Inhalt von FT-' + fdLoaded.ticketId + ':\n' + fdLoaded.ticketText;
+    const pdfCount = (fdLoaded.pdfs || []).length;
+    const imgCount = (fdLoaded.images || []).length;
+    if (pdfCount || imgCount) {
+      textPart += '\n\nAnhänge aus dem FD-Ticket im Chat-Kontext: '
+        + (pdfCount ? pdfCount + ' PDF' + (pdfCount===1?'':'s') : '')
+        + (pdfCount && imgCount ? ', ' : '')
+        + (imgCount ? imgCount + ' Bild' + (imgCount===1?'':'er') : '')
+        + ' — bitte direkt analysieren.';
+    }
     if (fdLoaded.otherAttachments.length) {
-      textPart += '\n\nWeitere Anhänge im FD-Ticket (nicht als Bild geladen): ' + fdLoaded.otherAttachments.map(a => a.name).join(', ');
+      textPart += '\n\nWeitere Anhänge im FD-Ticket (nicht ladbar): ' + fdLoaded.otherAttachments.map(a => a.name).join(', ');
     }
   }
-  if (pdfNames.length) textPart = (textPart ? textPart + '\n\n' : '') + 'PDF-Anhänge (Inhalt nicht direkt lesbar): ' + pdfNames.join(', ');
   if (otherNames.length) textPart = (textPart ? textPart + '\n\n' : '') + 'Weitere Anhänge: ' + otherNames.join(', ');
   if (textPart) content.push({ type: 'text', text: textPart });
 
