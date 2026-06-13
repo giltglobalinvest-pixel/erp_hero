@@ -694,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.14';
+const APP_VERSION = 'v5.15';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -19430,8 +19430,11 @@ async function renderArticles() {
           <button onclick="openManufacturerManagement()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
             <i data-lucide="factory" class="w-4 h-4"></i> Hersteller
           </button>
+          <button onclick="openAiArticleCreationModal()" class="bg-purple-600 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-purple-700 flex items-center gap-2" title="Artikel per KI aus FD-Ticket / Beschreibung / Screenshot anlegen">
+            <i data-lucide="sparkles" class="w-4 h-4"></i> <span class="hidden sm:inline">KI-Artikel</span>
+          </button>
           <button onclick="openArticleModal()" class="bg-brand-500 text-white rounded-lg px-3 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-            <i data-lucide="plus" class="w-4 h-4"></i> Neuer Artikel
+            <i data-lucide="plus" class="w-4 h-4"></i> <span class="hidden sm:inline">Neuer Artikel</span><span class="sm:hidden">Neu</span>
           </button>
         </div>
       </div>
@@ -19574,6 +19577,691 @@ function articleRow(rec, catMap, manMap) {
       </div>
     </div>
   `;
+}
+
+/* ============================================================
+   KI-ARTIKEL — chat-basierte Artikel-Anlage aus FD-Ticket / Screenshots / Text
+   Liefert Artikel + ArticleSupplier mit EK + Lieferzeit. Fremdsprachen werden
+   automatisch übersetzt + Übersetzung in internal_notes gespeichert.
+   ============================================================ */
+const _aacState = {
+  chatHistory: [],
+  systemPrompt: '',
+  analyzing: false,
+  creating: false,
+  recording: false,
+  recognition: null,
+  finalProposal: null,
+  pendingUploads: [],     // Array von {name, mediaType, base64} — werden mit naechster User-Message gesendet
+  ticketContext: null     // {ticket, conversations, attachments, images} wenn FD-Ticket geladen
+};
+
+async function openAiArticleCreationModal() {
+  if (!_proxyBase()) { toast('KI nicht verfügbar — API-Proxy nicht konfiguriert', 'error', 6000); return; }
+  const cur = getCurrentCompany();
+  if (!cur) { toast('Bitte erst Mandant wählen', 'error'); return; }
+
+  _aacState.chatHistory = [];
+  _aacState.systemPrompt = '';
+  _aacState.analyzing = false;
+  _aacState.creating = false;
+  _aacState.recording = false;
+  _aacState.finalProposal = null;
+  _aacState.pendingUploads = [];
+  _aacState.ticketContext = null;
+
+  const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const opener = typeof openModal2 === 'function' ? openModal2 : openModal;
+  opener(`
+    <div class="p-5">
+      <h3 class="text-base font-bold text-ink-900 mb-1 flex items-center gap-2">
+        <i data-lucide="sparkles" class="w-5 h-5 text-purple-600"></i>
+        KI-Artikel — Chat
+      </h3>
+      <p class="text-xs text-ink-500 mb-3">${escapeHtml(cur.name)} · Artikel aus Lieferanten-Angebot anlegen (FD-Ticket / Text / Screenshots)</p>
+
+      <div id="aacChatLog" class="bg-ink-50 border border-ink-200 rounded-lg p-3 mb-2 min-h-[180px] max-h-[42vh] overflow-y-auto space-y-2" style="overscroll-behavior:contain;-webkit-overflow-scrolling:touch;">
+        <div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+          <span class="text-base">🤖</span>
+          <div>
+            <p>Ich lege einen Artikel für dich an. Du kannst:</p>
+            <ul class="ml-3 mt-1 space-y-0.5 list-disc text-[11px]">
+              <li>Eine <strong>FD-Ticket-Nr</strong> nennen (z.B. „aus FT-184372") — ich lese Inhalt + Anhänge</li>
+              <li><strong>Screenshots / PDFs</strong> reinziehen via 📎</li>
+              <li>Frei <strong>beschreiben</strong> („Antrieb V3F25L, Lieferant Schmitt+Sohn, EK 4200€")</li>
+            </ul>
+            <p class="text-[11px] text-ink-500 mt-1.5 italic">Fremdsprachen werden automatisch übersetzt. EK + Lieferantennummer kommen in die Article-Supplier-Beziehung.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pending-Uploads-Vorschau -->
+      <div id="aacUploads" class="mb-2 flex flex-wrap gap-1 empty:hidden"></div>
+
+      <div id="aacInputWrap">
+        <textarea id="aacInput" rows="3" placeholder="Tippe oder sprich… (z.B. „aus FT-184372")" class="w-full px-3 py-2.5 border border-ink-200 rounded-lg text-base focus:outline-none focus:ring-2 focus:ring-purple-500/30"
+          onkeydown="if(event.key==='Enter' && (event.metaKey||event.ctrlKey)){event.preventDefault();_aacSendChatMessage();}"></textarea>
+        <div class="flex gap-2 mt-2">
+          <label class="shrink-0 px-3 py-3 bg-ink-100 hover:bg-ink-200 text-ink-700 border border-ink-300 rounded-lg cursor-pointer inline-flex items-center gap-1.5 text-sm font-medium" title="Bild oder PDF anhängen">
+            <i data-lucide="paperclip" class="w-5 h-5"></i>
+            <span class="hidden sm:inline">Datei</span>
+            <input type="file" accept="image/*,application/pdf" multiple class="hidden" onchange="_aacHandleFileUpload(this)">
+          </label>
+          ${speechSupported ? `
+            <button type="button" id="aacMicBtn" onclick="_aacToggleMic()" class="shrink-0 px-3 py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium">
+              <i data-lucide="mic" class="w-5 h-5"></i>
+              <span class="hidden sm:inline">Sprechen</span>
+            </button>
+          ` : ''}
+          <button type="button" id="aacSendBtn" onclick="_aacSendChatMessage()" class="flex-1 px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition inline-flex items-center justify-center gap-2 text-base font-semibold">
+            <i data-lucide="send" class="w-5 h-5"></i>
+            <span>Senden</span>
+          </button>
+        </div>
+      </div>
+      <p id="aacStatus" class="text-[11px] text-ink-500 mt-1 italic min-h-[14px]"></p>
+
+      <div id="aacResult" class="mt-3 hidden">
+        <p class="text-xs font-semibold uppercase tracking-wider text-ink-700 mb-1.5 flex items-center gap-1.5">
+          <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-emerald-600"></i> KI-Vorschlag — prüfen + anlegen
+        </p>
+        <div id="aacResultBody" class="bg-white border border-ink-200 rounded-lg p-3 max-h-[50vh] overflow-y-auto text-sm" style="overscroll-behavior:contain;"></div>
+      </div>
+
+      <div class="flex gap-2 mt-3 justify-end">
+        <button type="button" onclick="_aacClose()" class="px-3 py-2 text-sm border border-ink-200 rounded-lg hover:bg-ink-50">Abbrechen</button>
+      </div>
+    </div>
+  `, { maxWidth: 'max-w-xl' });
+  if (window.lucide) lucide.createIcons();
+  setTimeout(() => document.getElementById('aacInput')?.focus(), 80);
+  // System-Prompt im Hintergrund vorbereiten — die KI antwortet sofort wenn User sendet
+  _aacBuildSystemPrompt().then(p => { _aacState.systemPrompt = p; }).catch(() => {});
+}
+
+function _aacClose() {
+  if (_aacState.recording) { try { _aacState.recognition?.stop(); } catch (_) {} }
+  closeTopModal();
+}
+
+// File-Upload-Handler — Bilder werden zu base64 fuer Vision-API, PDFs werden best-effort als Text gelesen
+async function _aacHandleFileUpload(inp) {
+  if (!inp.files || !inp.files.length) return;
+  for (const file of inp.files) {
+    try {
+      if (/^image\//.test(file.type)) {
+        const base64 = await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => { const s = r.result; res(typeof s === 'string' ? s.split(',')[1] : ''); };
+          r.onerror = rej;
+          r.readAsDataURL(file);
+        });
+        _aacState.pendingUploads.push({ name: file.name, mediaType: file.type, base64, kind: 'image' });
+      } else if (/pdf|application\/pdf/.test(file.type)) {
+        // PDF: nur Name + Hint — KI muss User fragen / nutzt ggf. spaeter Anhang im FD-Ticket
+        _aacState.pendingUploads.push({ name: file.name, mediaType: file.type, base64: '', kind: 'pdf' });
+      } else {
+        _aacState.pendingUploads.push({ name: file.name, mediaType: file.type, base64: '', kind: 'other' });
+      }
+    } catch (e) { console.warn('[aac] Upload-Lesen fehlgeschlagen:', e.message); }
+  }
+  inp.value = ''; // Reset damit der gleiche File nochmal angefuegt werden koennte
+  _aacRenderUploadsPreview();
+}
+
+function _aacRenderUploadsPreview() {
+  const wrap = document.getElementById('aacUploads');
+  if (!wrap) return;
+  if (_aacState.pendingUploads.length === 0) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = _aacState.pendingUploads.map((u, idx) => `
+    <div class="inline-flex items-center gap-1 bg-purple-50 border border-purple-200 rounded-lg px-2 py-1 text-[11px]">
+      <i data-lucide="${u.kind === 'image' ? 'image' : 'file'}" class="w-3 h-3 text-purple-700"></i>
+      <span class="font-medium text-purple-900 max-w-[140px] truncate">${escapeHtml(u.name)}</span>
+      <button type="button" onclick="_aacRemoveUpload(${idx})" class="text-purple-400 hover:text-red-600 ml-0.5" title="Entfernen">
+        <i data-lucide="x" class="w-3 h-3"></i>
+      </button>
+    </div>
+  `).join('');
+  if (window.lucide) lucide.createIcons();
+}
+
+function _aacRemoveUpload(idx) {
+  _aacState.pendingUploads.splice(idx, 1);
+  _aacRenderUploadsPreview();
+}
+
+// Speech-Recognition (gleicher Pattern wie _aqc/_aoc)
+function _aacToggleMic() { if (_aacState.recording) _aacStopRecording(); else _aacStartRecording(); }
+function _aacStartRecording() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { toast('Spracheingabe nicht verfügbar', 'warn'); return; }
+  const rec = new SR(); rec.lang = 'de-DE'; rec.interimResults = true; rec.continuous = true;
+  let acc = '';
+  rec.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) acc += r[0].transcript + ' ';
+      else interim += r[0].transcript;
+    }
+    const st = document.getElementById('aacStatus');
+    if (st) st.textContent = '🎤 ' + (acc + interim).trim();
+  };
+  rec.onerror = (e) => { if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Mikro-Fehler: ' + e.error, 'error'); };
+  rec.onend = () => {
+    _aacState.recording = false; _aacState.recognition = null;
+    const ta = document.getElementById('aacInput');
+    if (ta && acc.trim()) ta.value = ((ta.value || '').trim() ? (ta.value.trim() + ' ') : '') + acc.trim();
+    const st = document.getElementById('aacStatus'); if (st) st.textContent = '';
+    _aacRenderMicBtn();
+  };
+  _aacState.recognition = rec; _aacState.recording = true;
+  try { rec.start(); } catch (e) { toast('Mikro-Start: ' + e.message, 'error'); _aacState.recording = false; }
+  _aacRenderMicBtn();
+}
+function _aacStopRecording() { if (_aacState.recognition) { try { _aacState.recognition.stop(); } catch (_) {} } }
+function _aacRenderMicBtn() {
+  const btn = document.getElementById('aacMicBtn');
+  if (!btn) return;
+  if (_aacState.recording) {
+    btn.innerHTML = '<i data-lucide="square" class="w-5 h-5"></i><span class="hidden sm:inline">Stop</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-red-500 hover:bg-red-600 text-white border border-red-600 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium animate-pulse';
+  } else {
+    btn.innerHTML = '<i data-lucide="mic" class="w-5 h-5"></i><span class="hidden sm:inline">Sprechen</span>';
+    btn.className = 'shrink-0 px-3 py-3 bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 rounded-lg transition inline-flex items-center gap-1.5 text-sm font-medium';
+  }
+  if (window.lucide) lucide.createIcons();
+}
+
+function _aacRenderChatLog() {
+  const log = document.getElementById('aacChatLog');
+  if (!log) return;
+  const intro = `<div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-700 flex items-start gap-2">
+    <span class="text-base">🤖</span>
+    <div><p>Ich lege einen Artikel an. Sag mir Ticket-Nr / beschreib / hänge Bilder an.</p></div>
+  </div>`;
+  const items = [intro];
+  for (const m of _aacState.chatHistory) {
+    if (m._hidden) continue;
+    if (m.role === 'user') {
+      const text = typeof m.content === 'string' ? m.content : (m.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+      const imgs = typeof m.content === 'string' ? [] : (m.content || []).filter(c => c.type === 'image');
+      items.push(`<div class="flex justify-end">
+        <div class="bg-purple-600 text-white rounded-xl px-3 py-2 text-xs max-w-[85%] break-words" style="white-space:pre-wrap;word-break:break-word;">
+          ${imgs.length ? `<div class="flex gap-1 mb-1 flex-wrap">${imgs.map(() => '<span class="text-[10px] bg-white/20 px-1.5 py-0.5 rounded">📎 Bild</span>').join('')}</div>` : ''}
+          ${escapeHtml(text || '(nur Anhänge)')}
+        </div>
+      </div>`);
+    } else {
+      items.push(`<div class="bg-white border border-purple-200 rounded-xl px-3 py-2 text-xs text-ink-800 flex items-start gap-2 max-w-[95%]"><span class="text-base shrink-0">🤖</span><div class="break-words flex-1" style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(m.content)}</div></div>`);
+    }
+  }
+  log.innerHTML = items.join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+async function _aacBuildSystemPrompt() {
+  const cur = getCurrentCompany();
+  // Lade aktive Lieferanten + Artikel-Katalog des Mandanten fuer Matching
+  let suppliers = [], articles = [], categories = [], manufacturers = [];
+  try { suppliers = await readData('Supplier').catch(() => []); } catch (_) {}
+  try { articles  = await readData('Article').catch(() => []); } catch (_) {}
+  try { categories = await readData('Category').catch(() => []); } catch (_) {}
+  try { manufacturers = await readData('Manufacturer').catch(() => []); } catch (_) {}
+  const suppliersInMandant = suppliers.filter(s => (s.fields.company_id || []).includes(cur?.id))
+    .sort((a, b) => (a.fields.name1 || '').localeCompare(b.fields.name1 || '', 'de'));
+  const articlesInMandant = articles.filter(a => (a.fields.company_id || []).includes(cur?.id) && (a.fields.status || 'aktiv') !== 'archiviert');
+
+  return `Du bist Einkaufsassistent bei FLP Lift Parts GmbH. Du legst neue ERP-Artikel aus Lieferanten-Angeboten an. Sprich auf Deutsch.
+
+═══ DEINE AUFGABE ═══
+Analysiere den User-Input (FD-Ticket-Verweis, Texte, Bilder, PDFs) und erstelle EINEN ERP-Artikel mit:
+- Bezeichnung (name1) — knapp + technisch (z.B. "Antrieb V3F25L Kone")
+- Optionaler Untertitel (name2)
+- Artikelnummer-Vorschlag (article_no — kurz, alphanumerisch)
+- Beschreibung (description — mehrzeilig)
+- Hersteller-Typennummer (manufacturer_no)
+- Verkaufspreis (sales_price — wenn Kalkulation moeglich, sonst 0)
+- Lieferanten-Daten (supplier_name + purchase_price + supplier_article_no + lead_time)
+
+═══ FREMDSPRACHEN-REGEL ═══
+Wenn der Lieferanten-Inhalt nicht Deutsch ist (Englisch/Italienisch/...), uebersetze ALLE Felder ins Deutsche.
+Speichere die Original-Sprache + ein paar Original-Kernpassagen als Hinweis im Feld internal_notes.
+
+═══ MEHRERE ARTIKEL IM ANGEBOT ═══
+Wenn das Lieferanten-Angebot mehrere Positionen enthaelt (z.B. 3 separate Komponenten):
+FRAGE ZUERST den User: "Im Angebot sehe ich 3 Positionen (X, Y, Z). Soll ich sie als EINEN Artikel mit Gesamtpreis zusammenfassen, oder 3 separate Artikel anlegen (step-by-step)?"
+Warte auf Antwort. Default-Empfehlung: zusammenfassen wenn die Positionen funktional zusammenhaengen.
+
+═══ LIEFERANTEN-MATCHING ═══
+Pruefe ob der Lieferant aus dem User-Input bereits im ERP existiert (Liste unten).
+Wenn JA → supplier_id aus Liste verwenden.
+Wenn NEIN → FRAGE den User: "Lieferant „X" ist nicht im ERP-Lieferantenstamm. Soll ich ihn anlegen?"
+
+═══ EXISTIERENDE LIEFERANTEN (${suppliersInMandant.length}) ═══
+${suppliersInMandant.slice(0, 80).map(s => `[${s.id}] ${s.fields.name1 || '–'}${s.fields.email ? ' · ' + s.fields.email : ''}`).join('\n') || '(keine)'}
+
+═══ EXISTIERENDE KATEGORIEN ═══
+${categories.filter(c => (c.fields.company_id || []).includes(cur?.id)).slice(0, 40).map(c => `[${c.id}] ${c.fields.name || '–'}`).join('\n') || '(keine)'}
+
+═══ EXISTIERENDE HERSTELLER ═══
+${manufacturers.filter(m => (m.fields.company_id || []).includes(cur?.id)).slice(0, 40).map(m => `[${m.id}] ${m.fields.name || '–'}`).join('\n') || '(keine)'}
+
+═══ ARTIKEL-DUPLIKAT-CHECK ═══
+Wenn die generierte article_no oder name1 stark einem bestehenden Artikel aehnelt — weise im summary darauf hin. Liste der existierenden Artikel-Bezeichnungen (Top 100):
+${articlesInMandant.slice(0, 100).map(a => `[${a.id}] ${a.fields.article_no || ''} · ${a.fields.name1 || ''}`).join('\n') || '(keine)'}
+
+═══ ANTWORT-FORMAT ═══
+ENTWEDER kurze Rueckfrage in normalem Deutsch (KEIN JSON) — vor allem fuer die zwei oben genannten Fragen (Mehrfach-Artikel / Neuer Lieferant).
+
+ODER reines JSON wenn du alle Infos hast (keine Code-Fences, kein Text drumherum):
+{
+  "action": "create_article",
+  "article": {
+    "name1": "...",
+    "name2": "..." oder "",
+    "article_no": "...",
+    "description": "..." oder "",
+    "manufacturer_no": "..." oder "",
+    "unit": "Stück" oder "...",
+    "sales_price": 0,
+    "vat_rate": 19,
+    "internal_notes": "Quelle / Übersetzung / Hinweise"
+  },
+  "category_id": "rec... oder null",
+  "manufacturer_id": "rec... oder null",
+  "source_freshdesk_ticket_id": "184372" oder null,
+  "supplier": {
+    "id": "rec... wenn bestehender Lieferant ODER null",
+    "create_new": true/false,
+    "name1": "...",
+    "email": "..." oder "",
+    "purchase_price": 4200,
+    "supplier_article_no": "..." oder "",
+    "lead_time": "3-4 Wochen" oder ""
+  },
+  "summary_for_user": "1 Satz was du gemacht hast (inkl. Hinweis auf Uebersetzung wenn relevant)"
+}
+
+WICHTIG:
+- Bei FD-Ticket-Quelle: source_freshdesk_ticket_id setzen — der Article bekommt im ERP einen direkten Link zum FD-Ticket statt Anhang-Kopien.
+- Bei neuem Lieferanten: supplier.create_new=true + supplier.name1 + email setzen.
+- internal_notes: bei Uebersetzung kurze Erwaehnung der Original-Sprache + 1-2 Schluesselbegriffe im Original.`;
+}
+
+function _aacExtractCreateArticleJson(reply) {
+  if (!reply) return null;
+  let txt = String(reply).trim().replace(/```[a-z]*\s*\n?/gi, '').replace(/```/g, '').trim();
+  if (txt.startsWith('{')) { try { const p = JSON.parse(txt); if (p && p.action === 'create_article') return p; } catch (_) {} }
+  const start = txt.search(/\{[\s\S]*?"action"\s*:\s*"create_article"/);
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false, end = -1;
+  for (let i = start; i < txt.length; i++) {
+    const c = txt[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  if (end < 0) return null;
+  try { return JSON.parse(txt.slice(start, end + 1)); } catch (_) { return null; }
+}
+
+// Wenn User "aus FT-XYZ" sagt, FD-Ticket laden + Anhaenge-Bilder als base64 dranhaengen
+async function _aacMaybeLoadFdTicket(userText) {
+  const m = String(userText).match(/(?:FT[-\s]?|aus\s+|Ticket\s+)(\d{4,7})\b/i);
+  if (!m) return null;
+  const ticketId = m[1];
+  try {
+    const ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    let conversations = [];
+    try {
+      const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+      conversations = Array.isArray(conv) ? conv : [];
+    } catch (_) {}
+    // Bild-Anhaenge sammeln + base64 laden (max 5 wegen Token-Budget)
+    let attachments = [];
+    if (typeof _collectFreshdeskAttachmentsFrom === 'function') {
+      attachments = _collectFreshdeskAttachmentsFrom(ticket, conversations) || [];
+    }
+    const images = [];
+    const imageAttachments = attachments.filter(a => /^image\//i.test(a.content_type || '')).slice(0, 5);
+    for (const att of imageAttachments) {
+      if (typeof _downloadAttachmentAsBase64 === 'function') {
+        const b64 = await _downloadAttachmentAsBase64(att);
+        if (b64) images.push({ name: att.name || '?', mediaType: att.content_type, base64: b64 });
+      }
+    }
+    const ticketText = [
+      'Ticket FT-' + ticketId + ': ' + (ticket.subject || ''),
+      'Erste Nachricht:\n' + _fdHtmlToText(ticket.description_html || ticket.description || ''),
+      ...conversations.slice(0, 5).map(c => '--- ' + (c.incoming ? 'Lieferant' : 'Wir') + ' ---\n' + _fdHtmlToText(c.body || c.body_text || '').slice(0, 1500))
+    ].join('\n\n');
+    return { ticketId, ticketText, images, otherAttachments: attachments.filter(a => !/^image\//i.test(a.content_type || '')) };
+  } catch (e) {
+    console.warn('[aac] FD-Ticket-Load fehlgeschlagen:', e.message);
+    return null;
+  }
+}
+
+async function _aacSendChatMessage() {
+  if (_aacState.analyzing || _aacState.creating) return;
+  const inputEl = document.getElementById('aacInput');
+  const userText = (inputEl?.value || '').trim();
+  const hasUploads = _aacState.pendingUploads.length > 0;
+  if (!userText && !hasUploads) {
+    toast('Bitte was eingeben oder ein Bild anhängen', 'warn');
+    inputEl?.focus();
+    return;
+  }
+  if (_aacState.recording) _aacStopRecording();
+  if (!_aacState.systemPrompt) {
+    try { _aacState.systemPrompt = await _aacBuildSystemPrompt(); }
+    catch (e) { toast('Kontext laden fehlgeschlagen: ' + e.message, 'error', 6000); return; }
+  }
+
+  // Wenn der User eine FT-Nr nannte, jetzt das Ticket laden + Bilder einsammeln
+  const status = document.getElementById('aacStatus');
+  let fdLoaded = null;
+  if (userText) {
+    const sendBtn = document.getElementById('aacSendBtn');
+    if (sendBtn) { sendBtn.disabled = true; sendBtn.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i><span>Lade Ticket…</span>'; if (window.lucide) lucide.createIcons(); }
+    if (status) status.textContent = '🔍 FD-Ticket prüfen + Anhänge laden …';
+    fdLoaded = await _aacMaybeLoadFdTicket(userText);
+    if (sendBtn) { sendBtn.innerHTML = '<i data-lucide="send" class="w-5 h-5"></i><span>Senden</span>'; sendBtn.disabled = false; if (window.lucide) lucide.createIcons(); }
+    if (status) status.textContent = '';
+  }
+  if (fdLoaded) {
+    _aacState.ticketContext = fdLoaded;
+    // FD-Bilder zu pending-uploads dazu (visuell sichtbar)
+    fdLoaded.images.forEach(img => _aacState.pendingUploads.push({ ...img, kind: 'image' }));
+    _aacRenderUploadsPreview();
+  }
+
+  // Message-Content zusammenbauen (Text + Bilder + ggf. FD-Ticket-Text)
+  const content = [];
+  for (const u of _aacState.pendingUploads) {
+    if (u.kind === 'image' && u.base64) {
+      content.push({ type: 'image', source: { type: 'base64', media_type: u.mediaType, data: u.base64 } });
+    }
+  }
+  const pdfNames = _aacState.pendingUploads.filter(u => u.kind === 'pdf').map(u => u.name);
+  const otherNames = _aacState.pendingUploads.filter(u => u.kind === 'other').map(u => u.name);
+  let textPart = userText || '';
+  if (fdLoaded) {
+    textPart = (textPart ? textPart + '\n\n' : '') + 'Inhalt von FT-' + fdLoaded.ticketId + ':\n' + fdLoaded.ticketText;
+    if (fdLoaded.otherAttachments.length) {
+      textPart += '\n\nWeitere Anhänge im FD-Ticket (nicht als Bild geladen): ' + fdLoaded.otherAttachments.map(a => a.name).join(', ');
+    }
+  }
+  if (pdfNames.length) textPart = (textPart ? textPart + '\n\n' : '') + 'PDF-Anhänge (Inhalt nicht direkt lesbar): ' + pdfNames.join(', ');
+  if (otherNames.length) textPart = (textPart ? textPart + '\n\n' : '') + 'Weitere Anhänge: ' + otherNames.join(', ');
+  if (textPart) content.push({ type: 'text', text: textPart });
+
+  _aacState.chatHistory.push({ role: 'user', content: content.length === 1 && content[0].type === 'text' ? content[0].text : content });
+  inputEl.value = '';
+  _aacState.pendingUploads = [];
+  _aacRenderUploadsPreview();
+  _aacRenderChatLog();
+
+  _aacState.analyzing = true;
+  const sendBtn = document.getElementById('aacSendBtn');
+  if (sendBtn) { sendBtn.disabled = true; sendBtn.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i><span>Denkt…</span>'; if (window.lucide) lucide.createIcons(); }
+  if (status) status.textContent = 'KI analysiert …';
+  try {
+    const reply = await askAIChat({ system: _aacState.systemPrompt, messages: _aacState.chatHistory }, { maxTokens: 2500, purpose: 'ai_article_chat' });
+    const parsed = _aacExtractCreateArticleJson(reply);
+    if (parsed && parsed.action === 'create_article') {
+      _aacState.finalProposal = parsed;
+      _aacState.chatHistory.push({ role: 'assistant', content: '✓ Vorschlag erstellt. Bitte prüfen.' });
+      _aacRenderChatLog();
+      _aacRenderPreview(parsed);
+    } else {
+      _aacState.chatHistory.push({ role: 'assistant', content: (reply || '').trim() });
+      _aacRenderChatLog();
+    }
+  } catch (err) {
+    _aacState.chatHistory.push({ role: 'assistant', content: '⚠ Fehler: ' + (err.message || err) });
+    _aacRenderChatLog();
+  } finally {
+    _aacState.analyzing = false;
+    if (sendBtn) { sendBtn.disabled = false; sendBtn.innerHTML = '<i data-lucide="send" class="w-5 h-5"></i><span>Senden</span>'; if (window.lucide) lucide.createIcons(); }
+    if (status) status.textContent = '';
+    inputEl?.focus();
+  }
+}
+
+function _aacRenderPreview(parsed) {
+  const resultBox = document.getElementById('aacResult');
+  const body = document.getElementById('aacResultBody');
+  if (!body || !resultBox) return;
+  resultBox.classList.remove('hidden');
+
+  const a = parsed.article || {};
+  const sup = parsed.supplier || {};
+  const supplierBadge = sup.create_new
+    ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">NEUER LIEFERANT</span>'
+    : (sup.id ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">VORHANDEN</span>' : '');
+
+  body.innerHTML = `
+    <div class="space-y-3">
+      ${parsed.source_freshdesk_ticket_id ? `
+      <div class="bg-blue-50 border border-blue-200 rounded-lg px-3 py-1.5 text-xs text-blue-900 flex items-center gap-2">
+        <i data-lucide="link" class="w-3.5 h-3.5"></i>
+        <span>Quelle: <strong>FT-${escapeHtml(parsed.source_freshdesk_ticket_id)}</strong> — wird im Artikel als Link gespeichert (kein Anhang-Doppel)</span>
+      </div>` : ''}
+
+      <div>
+        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Bezeichnung</p>
+        <p class="text-sm font-semibold text-ink-900">${escapeHtml(a.name1 || '–')}</p>
+        ${a.name2 ? `<p class="text-xs text-ink-600">${escapeHtml(a.name2)}</p>` : ''}
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">ArtNr.</p>
+          <p class="text-sm font-mono">${escapeHtml(a.article_no || '–')}</p>
+        </div>
+        <div>
+          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">Hersteller-Nr.</p>
+          <p class="text-sm font-mono">${escapeHtml(a.manufacturer_no || '–')}</p>
+        </div>
+        <div>
+          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">VK netto</p>
+          <p class="text-sm font-mono">${a.sales_price != null ? Number(a.sales_price).toFixed(2) + ' €' : '–'}</p>
+        </div>
+        <div>
+          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">Einheit</p>
+          <p class="text-sm">${escapeHtml(a.unit || 'Stück')}</p>
+        </div>
+      </div>
+
+      ${a.description ? `<div>
+        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Beschreibung</p>
+        <div class="text-xs text-ink-700 whitespace-pre-wrap leading-relaxed bg-ink-50 rounded p-2 max-h-[100px] overflow-y-auto">${escapeHtml(a.description)}</div>
+      </div>` : ''}
+
+      <div class="bg-emerald-50/50 border border-emerald-200 rounded-lg p-2.5">
+        <div class="flex items-center gap-2 mb-1.5">
+          <i data-lucide="truck" class="w-3.5 h-3.5 text-emerald-700"></i>
+          <p class="text-xs font-semibold text-emerald-900">Lieferant</p>
+          ${supplierBadge}
+        </div>
+        <p class="text-sm font-medium text-ink-900">${escapeHtml(sup.name1 || '–')}</p>
+        ${sup.email ? `<p class="text-[11px] text-ink-600">${escapeHtml(sup.email)}</p>` : ''}
+        <div class="grid grid-cols-2 gap-2 mt-1.5">
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-ink-500">EK netto</p>
+            <p class="text-sm font-mono font-semibold text-emerald-900">${sup.purchase_price != null ? Number(sup.purchase_price).toFixed(2) + ' €' : '–'}</p>
+          </div>
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-ink-500">Lief.-ArtNr</p>
+            <p class="text-sm font-mono">${escapeHtml(sup.supplier_article_no || '–')}</p>
+          </div>
+          ${sup.lead_time ? `<div class="col-span-2">
+            <p class="text-[10px] uppercase tracking-wider text-ink-500">Lieferzeit</p>
+            <p class="text-sm">${escapeHtml(sup.lead_time)}</p>
+          </div>` : ''}
+        </div>
+      </div>
+
+      ${a.internal_notes ? `<div>
+        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Interne Notizen (KI / Übersetzung)</p>
+        <div class="text-xs text-ink-700 whitespace-pre-wrap leading-relaxed bg-purple-50 border border-purple-100 rounded p-2 max-h-[80px] overflow-y-auto">${escapeHtml(a.internal_notes)}</div>
+      </div>` : ''}
+
+      ${parsed.summary_for_user ? `<p class="text-[11px] text-purple-700 italic bg-purple-50 border border-purple-200 rounded px-2 py-1.5"><i data-lucide="info" class="inline w-3 h-3"></i> ${escapeHtml(parsed.summary_for_user)}</p>` : ''}
+    </div>
+
+    <div class="flex gap-2 mt-3 flex-wrap justify-end pt-2 border-t border-ink-200">
+      <button type="button" onclick="_aacResetForRefinement()" class="text-xs px-3 py-1.5 border border-ink-200 rounded-lg hover:bg-ink-50 inline-flex items-center gap-1">
+        <i data-lucide="message-circle" class="w-3.5 h-3.5"></i> Anpassen
+      </button>
+      <button type="button" id="aacCreateBtn" onclick="_aacCreateArticle()" class="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
+        <i data-lucide="check" class="w-4 h-4"></i> Artikel anlegen
+      </button>
+    </div>
+  `;
+  if (window.lucide) lucide.createIcons();
+  resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function _aacResetForRefinement() {
+  const r = document.getElementById('aacResult');
+  if (r) r.classList.add('hidden');
+  _aacState.finalProposal = null;
+  _aacState.chatHistory.push({ role: 'assistant', content: '(Vorschlag verworfen — was soll geändert werden?)' });
+  _aacRenderChatLog();
+  document.getElementById('aacInput')?.focus();
+}
+
+async function _aacCreateArticle() {
+  if (_aacState.creating) return;
+  const p = _aacState.finalProposal;
+  if (!p) return toast('Kein Vorschlag', 'warn');
+  const cur = getCurrentCompany();
+  if (!cur) return toast('Mandant fehlt', 'error');
+  const a = p.article || {};
+  const sup = p.supplier || {};
+  if (!(a.name1 || '').trim()) return toast('name1 fehlt — KI nochmal befragen', 'warn');
+
+  const btn = document.getElementById('aacCreateBtn');
+  _aacState.creating = true;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
+
+  try {
+    // 1) Schema sichern
+    try {
+      await ensureFields('Article', [
+        { name: 'source_freshdesk_ticket_id', type: 'singleLineText' },
+        { name: 'internal_notes',             type: 'multilineText' }
+      ]);
+    } catch (_) {}
+    try {
+      await ensureFields('ArticleSupplier', [
+        { name: 'lead_time', type: 'singleLineText' }
+      ]);
+    } catch (_) {}
+
+    // 2) Lieferant anlegen falls neu
+    let supplierId = sup.id || null;
+    if (sup.create_new) {
+      const supFields = {
+        name1: (sup.name1 || '').trim(),
+        email: (sup.email || '').trim(),
+        status: 'aktiv',
+        company_id: [cur.id]
+      };
+      try {
+        const newSup = await writeData('Supplier', supFields);
+        supplierId = newSup?.id || null;
+      } catch (e) { console.warn('[aac] Supplier-Create:', e.message); }
+    }
+
+    // 3) Article anlegen
+    const artFields = {
+      name1:           (a.name1 || '').trim(),
+      name2:           (a.name2 || '').trim(),
+      article_no:      (a.article_no || ('NEU-' + Date.now())).trim(),
+      description:     (a.description || '').trim(),
+      manufacturer_no: (a.manufacturer_no || '').trim(),
+      unit:            (a.unit || 'Stück').trim(),
+      sales_price:     Number(a.sales_price) >= 0 ? Number(a.sales_price) : 0,
+      vat_rate:        Number(a.vat_rate) > 0 ? Number(a.vat_rate) : 19,
+      status:          'aktiv',
+      company_id:      [cur.id],
+      notes:           '🤖 Via KI-Artikel angelegt · ' + new Date().toLocaleString('de-DE')
+    };
+    if (p.category_id) artFields.category_id = [p.category_id];
+    if (p.manufacturer_id) artFields.manufacturer_id = [p.manufacturer_id];
+    if (p.source_freshdesk_ticket_id) artFields.source_freshdesk_ticket_id = String(p.source_freshdesk_ticket_id);
+    if (a.internal_notes) artFields.internal_notes = String(a.internal_notes).trim();
+
+    // Article_no Konflikt-Resilienz
+    let newArt = null;
+    try {
+      newArt = await writeData('Article', artFields);
+    } catch (e1) {
+      if (/unique|duplicate|conflict|already/i.test(e1.message)) {
+        artFields.article_no = artFields.article_no + '-' + Date.now().toString().slice(-5);
+        newArt = await writeData('Article', artFields).catch(() => null);
+      } else {
+        // Resilient fallback: optionale Felder iterativ entfernen
+        const OPT = ['source_freshdesk_ticket_id', 'internal_notes', 'category_id', 'manufacturer_id'];
+        let writeFields = { ...artFields }, ok = null;
+        for (const k of OPT) {
+          delete writeFields[k];
+          try { ok = await writeData('Article', writeFields); break; } catch (_) {}
+        }
+        newArt = ok;
+        if (!newArt) throw e1;
+      }
+    }
+    if (!newArt?.id) throw new Error('Article-Anlage fehlgeschlagen');
+
+    // 4) ArticleSupplier wenn Lieferant da
+    if (supplierId && (sup.purchase_price != null || sup.supplier_article_no || sup.lead_time)) {
+      try {
+        const asFields = {
+          article_id:    [newArt.id],
+          supplier_id:   [supplierId],
+          purchase_price: Number(sup.purchase_price) >= 0 ? Number(sup.purchase_price) : 0,
+          order_text:    [artFields.name1, artFields.name2, artFields.description].filter(Boolean).join('\n'),
+          is_default:    true
+        };
+        if (sup.supplier_article_no) asFields.supplier_article_no = String(sup.supplier_article_no).trim();
+        if (sup.lead_time) asFields.lead_time = String(sup.lead_time).trim();
+        await writeData('ArticleSupplier', asFields);
+      } catch (e) { console.warn('[aac] ArticleSupplier:', e.message); }
+    }
+
+    // 5) FD-Notiz im Ticket (best-effort)
+    if (p.source_freshdesk_ticket_id) {
+      try {
+        await proxyFetch('freshdesk/api/v2/tickets/' + p.source_freshdesk_ticket_id + '/notes', {
+          method: 'POST',
+          body: {
+            body: '<p><strong>📦 Artikel im ERP angelegt</strong> · ' + new Date().toLocaleString('de-DE') + '</p>'
+              + '<p>ArtNr: <strong>' + artFields.article_no + '</strong> · ' + artFields.name1 + '</p>'
+              + (supplierId ? '<p>Lieferant: ' + (sup.name1 || '?') + (sup.purchase_price ? ' · EK ' + sup.purchase_price + '€' : '') + '</p>' : ''),
+            private: true
+          }
+        });
+      } catch (e) { console.warn('[aac] FD-Notiz:', e.message); }
+    }
+
+    toast('✓ Artikel ' + artFields.article_no + ' angelegt' + (supplierId ? (sup.create_new ? ' · Lieferant neu' : ' · Lieferant verknüpft') : ''), 'success', 5000);
+    closeTopModal();
+    setTimeout(() => { if (typeof openArticleModal === 'function') openArticleModal(newArt.id); }, 300);
+    setTimeout(() => { if (typeof renderArticles === 'function' && _currentRoute === 'artikel') renderArticles(); }, 1000);
+  } catch (err) {
+    console.error('[aac] Anlage:', err);
+    toast('Anlage fehlgeschlagen: ' + (err.message || err), 'error', 8000);
+    _aacState.creating = false;
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i> Artikel anlegen'; if (window.lucide) lucide.createIcons(); }
+  }
 }
 
 async function openArticleModal(id) {
