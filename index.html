@@ -694,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.18';
+const APP_VERSION = 'v5.19';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -6364,29 +6364,79 @@ async function loadFreshdeskTicketsPreview() {
     // Agents im Hintergrund laden (parallel zum Ticket-Search), damit Bearbeiter-Names beim Render bereits da sind
     const agentsPromise = _loadFdAgents();
     let data;
+    let typeFilterDropped = false;
+    let typeFilterEffective = typeFilter;
     try {
       data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(query));
     } catch (eSearch) {
-      // Wenn Freshdesk-Account nicht alle Status-Codes kennt (z.B. nur 2,3,4,5
-      // statt 2,3,4,5,6,7), gibt's 400 "It should be one of these values: '2,3,4,5'".
-      // Parse die akzeptierten Werte aus der Fehlermeldung und retry.
-      const m = eSearch.message?.match(/one of these values:?\s*'([\d,\s]+)'/i);
-      if (m) {
-        const allowedStatusCodes = m[1].split(',').map(x => parseInt(x.trim(), 10)).filter(Boolean);
-        const wantedSet = _inquiriesStatusFilterAllowedSet();
-        const usableCodes = wantedSet
-          ? allowedStatusCodes.filter(c => wantedSet.has(c))
-          : allowedStatusCodes;
-        if (usableCodes.length > 0) {
-          const retryStatusPart = ' AND (' + usableCodes.map(c => 'status:' + c).join(' OR ') + ')';
-          const retryQuery = `"(group_id:${groupId})${retryStatusPart}${typeFilter}"`;
-          console.warn('[Inquiries] Status-Codes ' + m[1] + ' nur teilweise verfügbar — retry mit', usableCodes);
-          data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(retryQuery));
+      // FD-API liefert 400 "field type / It should be one of these values: 'A,B'"
+      // wenn entweder Status- oder Typ-Filter ungültige Werte enthält.
+      // Wir parsen die Fehlermeldung und retry-en mit korrigiertem Filter.
+      const msg = eSearch.message || '';
+      const isTypeField = /"field"\s*:\s*"type"/.test(msg) || /\btype\b[^"]*?invalid_value/.test(msg);
+      const isStatusField = /"field"\s*:\s*"status"/.test(msg);
+
+      if (isTypeField && typeFilter) {
+        // Konfigurierte Ticket-Typen existieren in FD nicht (mehr).
+        // Versuche zuerst die in der Fehlermeldung erlaubten Werte zu intersect-en,
+        // sonst Filter komplett droppen + User warnen.
+        const m = msg.match(/one of these values:?\s*'([^']+)'/i);
+        const allowedTypes = m ? m[1].split(',').map(x => x.trim()).filter(Boolean) : [];
+        const wantedTypes = types.map(t => t.trim());
+        const usableTypes = allowedTypes.filter(a => wantedTypes.some(w => w.toLowerCase() === a.toLowerCase()));
+        if (usableTypes.length > 0) {
+          typeFilterEffective = ' AND (' + usableTypes.map(t => `type:'${t.replace(/'/g, "")}'`).join(' OR ') + ')';
+          console.warn('[Inquiries] Ticket-Typ-Filter teilweise gültig — retry mit', usableTypes);
         } else {
-          throw eSearch;
+          typeFilterEffective = '';
+          typeFilterDropped = true;
+          console.warn('[Inquiries] Konfigurierte Ticket-Typen nicht in FD vorhanden — Filter gedroppt. Erlaubt:', allowedTypes, 'Gesendet:', wantedTypes);
         }
+        const retryStatusPart = statusPart;
+        const retryQuery = `"(group_id:${groupId})${retryStatusPart}${typeFilterEffective}"`;
+        try {
+          data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(retryQuery));
+        } catch (eRetry) {
+          // Beim Retry ggf. nochmal Status-Korrektur unten anwenden
+          const m2 = eRetry.message?.match(/one of these values:?\s*'([\d,\s]+)'/i);
+          if (m2) {
+            const allowedStatusCodes = m2[1].split(',').map(x => parseInt(x.trim(), 10)).filter(Boolean);
+            const wantedSet = _inquiriesStatusFilterAllowedSet();
+            const usableCodes = wantedSet ? allowedStatusCodes.filter(c => wantedSet.has(c)) : allowedStatusCodes;
+            if (usableCodes.length > 0) {
+              const retryStatusPart2 = ' AND (' + usableCodes.map(c => 'status:' + c).join(' OR ') + ')';
+              const retryQuery2 = `"(group_id:${groupId})${retryStatusPart2}${typeFilterEffective}"`;
+              data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(retryQuery2));
+            } else { throw eRetry; }
+          } else { throw eRetry; }
+        }
+      } else if (isStatusField || /one of these values:?\s*'[\d,\s]+'/.test(msg)) {
+        // Status-Code-Mismatch wie bisher
+        const m = msg.match(/one of these values:?\s*'([\d,\s]+)'/i);
+        if (m) {
+          const allowedStatusCodes = m[1].split(',').map(x => parseInt(x.trim(), 10)).filter(Boolean);
+          const wantedSet = _inquiriesStatusFilterAllowedSet();
+          const usableCodes = wantedSet
+            ? allowedStatusCodes.filter(c => wantedSet.has(c))
+            : allowedStatusCodes;
+          if (usableCodes.length > 0) {
+            const retryStatusPart = ' AND (' + usableCodes.map(c => 'status:' + c).join(' OR ') + ')';
+            const retryQuery = `"(group_id:${groupId})${retryStatusPart}${typeFilter}"`;
+            console.warn('[Inquiries] Status-Codes ' + m[1] + ' nur teilweise verfügbar — retry mit', usableCodes);
+            data = await freshdeskFetch('search/tickets?query=' + encodeURIComponent(retryQuery));
+          } else { throw eSearch; }
+        } else { throw eSearch; }
       } else {
         throw eSearch;
+      }
+    }
+    // Wenn Typ-Filter komplett gedroppt wurde, dezente Warnung anzeigen (1x pro Session pro Mandant)
+    if (typeFilterDropped) {
+      const cur = getCurrentCompany();
+      const warnKey = 'inq_type_warn_' + (cur?.id || 'na');
+      if (!window['_' + warnKey]) {
+        window['_' + warnKey] = true;
+        toast('Ticket-Typen-Filter ignoriert — konfigurierte Typen nicht in Freshdesk. Bitte in den Einstellungen → Ticket-Typen korrigieren.', 'warn', 7000);
       }
     }
     await agentsPromise; // warten, damit der erste Render mit Names ist
