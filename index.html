@@ -694,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.16';
+const APP_VERSION = 'v5.17';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -19687,26 +19687,55 @@ function _aacClose() {
   closeTopModal();
 }
 
+// Normalisiert Image-Media-Type fuer Claude's Vision-API.
+// Claude akzeptiert NUR: image/jpeg, image/png, image/gif, image/webp.
+// Variationen werden gemappt, nicht-unterstuetzte Formate (heic/tiff/bmp/svg) werden geblockt.
+// Returns gueltiger Media-Type oder null wenn nicht unterstuetzt.
+function _aacNormalizeImageMediaType(rawType, fileName) {
+  const ALLOWED = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+  let mt = String(rawType || '').toLowerCase().trim();
+  // Mapping bekannter Variationen
+  if (mt === 'image/jpg' || mt === 'image/pjpeg' || mt === 'image/x-jpg' || mt === 'image/x-jpeg') mt = 'image/jpeg';
+  if (mt === 'image/x-png') mt = 'image/png';
+  // Wenn Mime fehlt / generisch — aus Dateiname raten
+  if (!mt || mt === 'application/octet-stream' || mt === 'binary/octet-stream') {
+    const name = String(fileName || '').toLowerCase();
+    if (/\.(jpg|jpeg)$/i.test(name)) mt = 'image/jpeg';
+    else if (/\.png$/i.test(name))   mt = 'image/png';
+    else if (/\.gif$/i.test(name))   mt = 'image/gif';
+    else if (/\.webp$/i.test(name))  mt = 'image/webp';
+  }
+  return ALLOWED.has(mt) ? mt : null;
+}
+
 // File-Upload-Handler — Bilder + PDFs werden zu base64 fuer Vision/Document-API
 async function _aacHandleFileUpload(inp) {
   if (!inp.files || !inp.files.length) return;
   for (const file of inp.files) {
     try {
-      const isImg = /^image\//.test(file.type);
+      const isImg = /^image\//.test(file.type) || /\.(jpe?g|png|gif|webp)$/i.test(file.name);
       const isPdf = /pdf|application\/pdf/.test(file.type) || /\.pdf$/i.test(file.name);
-      if (isImg || isPdf) {
+      if (isImg) {
+        const normalized = _aacNormalizeImageMediaType(file.type, file.name);
+        if (!normalized) {
+          toast('Format "' + (file.type || file.name) + '" wird nicht unterstützt (nur JPEG/PNG/GIF/WebP)', 'warn', 5500);
+          continue;
+        }
         const base64 = await new Promise((res, rej) => {
           const r = new FileReader();
           r.onload = () => { const s = r.result; res(typeof s === 'string' ? s.split(',')[1] : ''); };
           r.onerror = rej;
           r.readAsDataURL(file);
         });
-        _aacState.pendingUploads.push({
-          name: file.name,
-          mediaType: isPdf ? 'application/pdf' : (file.type || 'image/png'),
-          base64,
-          kind: isImg ? 'image' : 'pdf'
+        _aacState.pendingUploads.push({ name: file.name, mediaType: normalized, base64, kind: 'image' });
+      } else if (isPdf) {
+        const base64 = await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => { const s = r.result; res(typeof s === 'string' ? s.split(',')[1] : ''); };
+          r.onerror = rej;
+          r.readAsDataURL(file);
         });
+        _aacState.pendingUploads.push({ name: file.name, mediaType: 'application/pdf', base64, kind: 'pdf' });
       } else {
         _aacState.pendingUploads.push({ name: file.name, mediaType: file.type, base64: '', kind: 'other' });
       }
@@ -19729,6 +19758,12 @@ function _aacAttachPasteHandler() {
         e.preventDefault(); // verhindert Einfügen von <img>-HTML
         const blob = item.getAsFile();
         if (!blob) continue;
+        const fallbackName = 'Screenshot-' + new Date().toLocaleTimeString('de-DE').replace(/[:.]/g, '') + (item.type.includes('png') ? '.png' : (item.type.includes('jpeg') ? '.jpg' : ''));
+        const normalized = _aacNormalizeImageMediaType(item.type, blob.name || fallbackName);
+        if (!normalized) {
+          toast('Pastes Bild-Format "' + item.type + '" nicht unterstützt — speicher als PNG/JPEG', 'warn', 5500);
+          continue;
+        }
         try {
           const base64 = await new Promise((res, rej) => {
             const r = new FileReader();
@@ -19736,11 +19771,7 @@ function _aacAttachPasteHandler() {
             r.onerror = rej;
             r.readAsDataURL(blob);
           });
-          const ext = item.type.includes('png') ? '.png' : (item.type.includes('jpeg') ? '.jpg' : '');
-          _aacState.pendingUploads.push({
-            name: 'Screenshot-' + new Date().toLocaleTimeString('de-DE').replace(/[:.]/g, '') + ext,
-            mediaType: item.type, base64, kind: 'image'
-          });
+          _aacState.pendingUploads.push({ name: fallbackName, mediaType: normalized, base64, kind: 'image' });
           pastedCount++;
         } catch (err) { console.warn('[aac] Paste-Lesen fehlgeschlagen:', err.message); }
       }
@@ -19899,10 +19930,30 @@ ${manufacturers.filter(m => (m.fields.company_id || []).includes(cur?.id)).slice
 Wenn die generierte article_no oder name1 stark einem bestehenden Artikel aehnelt — weise im summary darauf hin. Liste der existierenden Artikel-Bezeichnungen (Top 100):
 ${articlesInMandant.slice(0, 100).map(a => `[${a.id}] ${a.fields.article_no || ''} · ${a.fields.name1 || ''}`).join('\n') || '(keine)'}
 
-═══ ANTWORT-FORMAT ═══
-ENTWEDER kurze Rueckfrage in normalem Deutsch (KEIN JSON) — vor allem fuer die zwei oben genannten Fragen (Mehrfach-Artikel / Neuer Lieferant).
+═══ KRITISCH — VERIFIKATIONS-PFLICHT (immer befolgen!) ═══
+BEVOR du das finale JSON lieferst, MUSST du folgendes tun:
 
-ODER reines JSON wenn du alle Infos hast (keine Code-Fences, kein Text drumherum):
+1. Klar zusammenfassen was du extrahiert hast — als deutscher Text, KEIN JSON. Format:
+   "Hier ist was ich aus dem Ticket / PDF / Bild gelesen habe:
+   • Lieferant: <Name> (<Email/Telefon>)
+   • Artikel-Bezeichnung: <name1>
+   • Hersteller-Nr / Lieferanten-Artikelnr: <X>
+   • Einkaufspreis: <X €>
+   • Lieferzeit: <X>
+   • <weitere wichtige Punkte>
+
+   Stimmt das so? Soll ich den Artikel + Lieferanten so anlegen?"
+
+2. Warte auf User-Bestaetigung ("ja", "passt", "anlegen", "korrekt", "go") — ERST DANN das JSON.
+
+3. Wenn der User korrigiert ("Lieferant ist falsch", "Preis ist 5000 nicht 4500", ...) — passe die Daten an und ZEIGE WIEDER die korrigierte Zusammenfassung. NIE direkt mit JSON antworten wenn User noch korrigiert.
+
+4. NIE Daten erfinden! Wenn ein Feld nicht eindeutig aus Quelle ablesbar ist — frage explizit nach oder lass es leer in der Zusammenfassung.
+
+═══ ANTWORT-FORMAT ═══
+ENTWEDER kurze Rueckfrage / Zusammenfassung-zur-Verifikation in normalem Deutsch (KEIN JSON) — das ist der DEFAULT.
+
+ODER reines JSON wenn der User schon explizit bestaetigt hat ("ja anlegen" / "passt"):
 {
   "action": "create_article",
   "article": {
@@ -19982,8 +20033,10 @@ async function _aacMaybeLoadFdTicket(userText) {
     const pdfAttachments   = attachments.filter(a => /pdf/i.test(a.content_type || '') || /\.pdf$/i.test(a.name || '')).slice(0, 5);
     for (const att of imageAttachments) {
       if (typeof _downloadAttachmentAsBase64 === 'function') {
+        const normalized = _aacNormalizeImageMediaType(att.content_type, att.name);
+        if (!normalized) { console.warn('[aac] FD-Bild übersprungen — Format nicht unterstützt:', att.content_type, att.name); continue; }
         const b64 = await _downloadAttachmentAsBase64(att);
-        if (b64) images.push({ name: att.name || '?', mediaType: att.content_type || 'image/png', base64: b64 });
+        if (b64) images.push({ name: att.name || '?', mediaType: normalized, base64: b64 });
       }
     }
     for (const att of pdfAttachments) {
@@ -20046,10 +20099,13 @@ async function _aacSendChatMessage() {
 
   // Message-Content zusammenbauen (Text + Bilder + PDFs)
   // PDFs werden als type:document geschickt — Claude Sonnet 4.5 kann sie nativ lesen.
+  // Safety-Net: jedes Bild nochmal media_type-validieren — defekte Uploads im State werden hier herausgefiltert.
   const content = [];
   for (const u of _aacState.pendingUploads) {
     if (u.kind === 'image' && u.base64) {
-      content.push({ type: 'image', source: { type: 'base64', media_type: u.mediaType, data: u.base64 } });
+      const safeType = _aacNormalizeImageMediaType(u.mediaType, u.name);
+      if (!safeType) { console.warn('[aac] Bild im State mit ungültigem Type, skip:', u.name, u.mediaType); continue; }
+      content.push({ type: 'image', source: { type: 'base64', media_type: safeType, data: u.base64 } });
     } else if (u.kind === 'pdf' && u.base64) {
       content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: u.base64 } });
     }
