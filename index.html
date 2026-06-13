@@ -694,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.17';
+const APP_VERSION = 'v5.18';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -20175,87 +20175,165 @@ function _aacRenderPreview(parsed) {
     ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">NEUER LIEFERANT</span>'
     : (sup.id ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded">VORHANDEN</span>' : '');
 
+  // Alle Felder als editierbare Inputs — User kann den KI-Vorschlag direkt korrigieren
+  // bevor er "Artikel anlegen" klickt. Werte werden in _aacCreateArticle aus dem DOM gelesen.
+  const inpCls = 'w-full px-2 py-1.5 border border-ink-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500/30';
+  const txtCls = inpCls + ' font-mono';
+  const taCls  = 'w-full px-2 py-1.5 border border-ink-200 rounded text-xs focus:outline-none focus:ring-2 focus:ring-purple-500/30 leading-relaxed resize-y';
+
   body.innerHTML = `
-    <div class="space-y-3">
+    <div class="bg-amber-50/70 border border-amber-200 rounded-lg px-2.5 py-1.5 text-[11px] text-amber-900 mb-3 flex items-center gap-1.5">
+      <i data-lucide="pencil" class="w-3.5 h-3.5 shrink-0"></i>
+      <span>Du kannst alle Felder unten direkt bearbeiten — Änderungen werden beim „Artikel anlegen" übernommen.</span>
+    </div>
+
+    <div class="space-y-2.5">
       ${parsed.source_freshdesk_ticket_id ? `
-      <div class="bg-blue-50 border border-blue-200 rounded-lg px-3 py-1.5 text-xs text-blue-900 flex items-center gap-2">
-        <i data-lucide="link" class="w-3.5 h-3.5"></i>
-        <span>Quelle: <strong>FT-${escapeHtml(parsed.source_freshdesk_ticket_id)}</strong> — wird im Artikel als Link gespeichert (kein Anhang-Doppel)</span>
-      </div>` : ''}
+      <div>
+        <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Quelle (FD-Ticket-Nr)</label>
+        <div class="flex items-center gap-1">
+          <input id="aac_source_ft" type="text" value="${escapeHtml(parsed.source_freshdesk_ticket_id)}" placeholder="z.B. 184372" class="${txtCls} flex-1">
+          <span class="text-[10px] text-ink-500 italic shrink-0">→ Link, kein Anhang-Doppel</span>
+        </div>
+      </div>` : `
+      <div>
+        <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Quelle (FD-Ticket-Nr, optional)</label>
+        <input id="aac_source_ft" type="text" value="" placeholder="leer oder z.B. 184372" class="${txtCls}">
+      </div>`}
 
       <div>
-        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Bezeichnung</p>
-        <p class="text-sm font-semibold text-ink-900">${escapeHtml(a.name1 || '–')}</p>
-        ${a.name2 ? `<p class="text-xs text-ink-600">${escapeHtml(a.name2)}</p>` : ''}
+        <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Bezeichnung *</label>
+        <input id="aac_name1" type="text" value="${escapeHtml(a.name1 || '')}" required class="${inpCls} font-semibold">
+      </div>
+      <div>
+        <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Untertitel (Bezeichnung 2)</label>
+        <input id="aac_name2" type="text" value="${escapeHtml(a.name2 || '')}" placeholder="optional" class="${inpCls}">
       </div>
 
       <div class="grid grid-cols-2 gap-2">
         <div>
-          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">ArtNr.</p>
-          <p class="text-sm font-mono">${escapeHtml(a.article_no || '–')}</p>
+          <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">ArtNr. *</label>
+          <input id="aac_article_no" type="text" value="${escapeHtml(a.article_no || '')}" required class="${txtCls}">
         </div>
         <div>
-          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">Hersteller-Nr.</p>
-          <p class="text-sm font-mono">${escapeHtml(a.manufacturer_no || '–')}</p>
+          <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Hersteller-Nr.</label>
+          <input id="aac_manufacturer_no" type="text" value="${escapeHtml(a.manufacturer_no || '')}" class="${txtCls}">
         </div>
         <div>
-          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">VK netto</p>
-          <p class="text-sm font-mono">${a.sales_price != null ? Number(a.sales_price).toFixed(2) + ' €' : '–'}</p>
+          <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">VK netto (€)</label>
+          <input id="aac_sales_price" type="number" step="0.01" value="${a.sales_price != null ? Number(a.sales_price).toFixed(2) : '0'}" class="${txtCls}">
         </div>
         <div>
-          <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500">Einheit</p>
-          <p class="text-sm">${escapeHtml(a.unit || 'Stück')}</p>
+          <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Einheit</label>
+          <input id="aac_unit" type="text" value="${escapeHtml(a.unit || 'Stück')}" class="${inpCls}">
         </div>
       </div>
 
-      ${a.description ? `<div>
-        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Beschreibung</p>
-        <div class="text-xs text-ink-700 whitespace-pre-wrap leading-relaxed bg-ink-50 rounded p-2 max-h-[100px] overflow-y-auto">${escapeHtml(a.description)}</div>
-      </div>` : ''}
+      <div>
+        <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Beschreibung</label>
+        <textarea id="aac_description" rows="4" class="${taCls}" placeholder="optional — z.B. technische Details, Inhalt des Bundles">${escapeHtml(a.description || '')}</textarea>
+      </div>
 
-      <div class="bg-emerald-50/50 border border-emerald-200 rounded-lg p-2.5">
-        <div class="flex items-center gap-2 mb-1.5">
+      <div class="bg-emerald-50/50 border border-emerald-200 rounded-lg p-2.5 space-y-2">
+        <div class="flex items-center gap-2">
           <i data-lucide="truck" class="w-3.5 h-3.5 text-emerald-700"></i>
-          <p class="text-xs font-semibold text-emerald-900">Lieferant</p>
+          <p class="text-xs font-semibold text-emerald-900 flex-1">Lieferant</p>
           ${supplierBadge}
         </div>
-        <p class="text-sm font-medium text-ink-900">${escapeHtml(sup.name1 || '–')}</p>
-        ${sup.email ? `<p class="text-[11px] text-ink-600">${escapeHtml(sup.email)}</p>` : ''}
-        <div class="grid grid-cols-2 gap-2 mt-1.5">
-          <div>
-            <p class="text-[10px] uppercase tracking-wider text-ink-500">EK netto</p>
-            <p class="text-sm font-mono font-semibold text-emerald-900">${sup.purchase_price != null ? Number(sup.purchase_price).toFixed(2) + ' €' : '–'}</p>
-          </div>
-          <div>
-            <p class="text-[10px] uppercase tracking-wider text-ink-500">Lief.-ArtNr</p>
-            <p class="text-sm font-mono">${escapeHtml(sup.supplier_article_no || '–')}</p>
-          </div>
-          ${sup.lead_time ? `<div class="col-span-2">
-            <p class="text-[10px] uppercase tracking-wider text-ink-500">Lieferzeit</p>
-            <p class="text-sm">${escapeHtml(sup.lead_time)}</p>
-          </div>` : ''}
+        <div>
+          <label class="block text-[10px] uppercase font-bold tracking-wider text-emerald-900 mb-0.5">Name *</label>
+          <input id="aac_sup_name1" type="text" value="${escapeHtml(sup.name1 || '')}" class="${inpCls}">
         </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div>
+            <label class="block text-[10px] uppercase font-bold tracking-wider text-emerald-900 mb-0.5">Email</label>
+            <input id="aac_sup_email" type="email" value="${escapeHtml(sup.email || '')}" placeholder="info@..." class="${inpCls}">
+          </div>
+          <div>
+            <label class="block text-[10px] uppercase font-bold tracking-wider text-emerald-900 mb-0.5">Lief.-ArtNr</label>
+            <input id="aac_sup_article_no" type="text" value="${escapeHtml(sup.supplier_article_no || '')}" class="${txtCls}">
+          </div>
+          <div>
+            <label class="block text-[10px] uppercase font-bold tracking-wider text-emerald-900 mb-0.5">EK netto (€)</label>
+            <input id="aac_sup_price" type="number" step="0.01" value="${sup.purchase_price != null ? Number(sup.purchase_price).toFixed(2) : '0'}" class="${txtCls} font-semibold">
+          </div>
+          <div>
+            <label class="block text-[10px] uppercase font-bold tracking-wider text-emerald-900 mb-0.5">Lieferzeit</label>
+            <input id="aac_sup_lead_time" type="text" value="${escapeHtml(sup.lead_time || '')}" placeholder="z.B. 3-4 Wochen" class="${inpCls}">
+          </div>
+        </div>
+        <label class="flex items-center gap-2 cursor-pointer pt-1 border-t border-emerald-200">
+          <input id="aac_sup_create_new" type="checkbox" ${sup.create_new ? 'checked' : ''} class="w-3.5 h-3.5 rounded border-emerald-300 text-emerald-600">
+          <span class="text-[11px] text-emerald-900">Diesen Lieferanten neu im ERP anlegen <span class="text-emerald-600">(wenn unchecked: nur Artikel anlegen, keine Lieferant-Verknüpfung)</span></span>
+        </label>
       </div>
 
-      ${a.internal_notes ? `<div>
-        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Interne Notizen (KI / Übersetzung)</p>
-        <div class="text-xs text-ink-700 whitespace-pre-wrap leading-relaxed bg-purple-50 border border-purple-100 rounded p-2 max-h-[80px] overflow-y-auto">${escapeHtml(a.internal_notes)}</div>
-      </div>` : ''}
+      <div>
+        <label class="block text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Interne Notizen <span class="font-normal italic">(KI-Übersetzung, Hinweise)</span></label>
+        <textarea id="aac_internal_notes" rows="3" class="${taCls}" placeholder="optional">${escapeHtml(a.internal_notes || '')}</textarea>
+      </div>
 
       ${parsed.summary_for_user ? `<p class="text-[11px] text-purple-700 italic bg-purple-50 border border-purple-200 rounded px-2 py-1.5"><i data-lucide="info" class="inline w-3 h-3"></i> ${escapeHtml(parsed.summary_for_user)}</p>` : ''}
     </div>
 
-    <div class="flex gap-2 mt-3 flex-wrap justify-end pt-2 border-t border-ink-200">
+    <div class="flex gap-2 mt-3 flex-wrap justify-end pt-2 border-t border-ink-200 sticky bottom-0 bg-white">
       <button type="button" onclick="_aacResetForRefinement()" class="text-xs px-3 py-1.5 border border-ink-200 rounded-lg hover:bg-ink-50 inline-flex items-center gap-1">
-        <i data-lucide="message-circle" class="w-3.5 h-3.5"></i> Anpassen
+        <i data-lucide="message-circle" class="w-3.5 h-3.5"></i> Zurück zum Chat
       </button>
-      <button type="button" id="aacCreateBtn" onclick="_aacCreateArticle()" class="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5">
+      <button type="button" id="aacCreateBtn" onclick="_aacCreateArticle()" class="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold inline-flex items-center gap-1.5 shadow-sm">
         <i data-lucide="check" class="w-4 h-4"></i> Artikel anlegen
       </button>
     </div>
   `;
   if (window.lucide) lucide.createIcons();
   resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Liest die editierten Werte aus den Preview-Inputs in dieselbe Struktur wie das KI-Proposal.
+// Falls Inputs nicht da sind (z.B. weil _aacRenderPreview noch nicht lief), wird das ursprüngliche
+// Proposal verwendet.
+function _aacReadEditedProposal() {
+  const orig = _aacState.finalProposal || {};
+  const article = orig.article || {};
+  const supplier = orig.supplier || {};
+  const $v = (id) => (document.getElementById(id)?.value || '').trim();
+  const $num = (id) => {
+    const v = document.getElementById(id)?.value;
+    if (v === '' || v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  // Wenn keine Inputs gerendert sind, Original zurückgeben
+  if (!document.getElementById('aac_name1')) return orig;
+  const editedSourceFt = $v('aac_source_ft');
+  const supCreate = !!document.getElementById('aac_sup_create_new')?.checked;
+  return {
+    ...orig,
+    action: 'create_article',
+    source_freshdesk_ticket_id: editedSourceFt || null,
+    article: {
+      ...article,
+      name1: $v('aac_name1'),
+      name2: $v('aac_name2'),
+      article_no: $v('aac_article_no'),
+      manufacturer_no: $v('aac_manufacturer_no'),
+      unit: $v('aac_unit') || 'Stück',
+      sales_price: $num('aac_sales_price') ?? 0,
+      description: $v('aac_description'),
+      internal_notes: $v('aac_internal_notes'),
+      vat_rate: article.vat_rate || 19
+    },
+    supplier: {
+      ...supplier,
+      id: supCreate ? null : supplier.id,
+      create_new: supCreate,
+      name1: $v('aac_sup_name1'),
+      email: $v('aac_sup_email'),
+      supplier_article_no: $v('aac_sup_article_no'),
+      purchase_price: $num('aac_sup_price') ?? 0,
+      lead_time: $v('aac_sup_lead_time')
+    }
+  };
 }
 
 function _aacResetForRefinement() {
@@ -20269,13 +20347,16 @@ function _aacResetForRefinement() {
 
 async function _aacCreateArticle() {
   if (_aacState.creating) return;
-  const p = _aacState.finalProposal;
+  // Editierte Werte aus den Preview-Inputs lesen (User hat ggf. KI-Vorschlag korrigiert).
+  // Fallback auf _aacState.finalProposal wenn Inputs nicht da sind.
+  const p = _aacReadEditedProposal();
   if (!p) return toast('Kein Vorschlag', 'warn');
   const cur = getCurrentCompany();
   if (!cur) return toast('Mandant fehlt', 'error');
   const a = p.article || {};
   const sup = p.supplier || {};
-  if (!(a.name1 || '').trim()) return toast('name1 fehlt — KI nochmal befragen', 'warn');
+  if (!(a.name1 || '').trim()) return toast('Bezeichnung darf nicht leer sein', 'warn');
+  if (!(a.article_no || '').trim()) return toast('ArtNr. darf nicht leer sein', 'warn');
 
   const btn = document.getElementById('aacCreateBtn');
   _aacState.creating = true;
