@@ -694,7 +694,7 @@
 /* ============================================================
    APP CONFIG
    ============================================================ */
-const APP_VERSION = 'v5.19';
+const APP_VERSION = 'v5.20';
 
 // FLP Standard-Daten für Briefkopf, Adresszeile und Footer.
 // (Werden später ggf. aus Company-Settings gezogen — vorerst hart codiert.)
@@ -25219,6 +25219,9 @@ async function addTerm() {
     await writeData(ctx.table, { name, company_id: [cur.id], status: 'aktiv' });
     if (input) input.value = '';
     await renderTermManagement();
+    // Parent-Form-Selects mit-aktualisieren — und neu angelegten Wert direkt vorauswählen,
+    // damit der User nicht das Modal schließen und neu öffnen muss.
+    await _refreshTermSelectsInForms(ctx.table, name);
     toast(ctx.titleSing + ' angelegt', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -25232,6 +25235,8 @@ async function renameTerm(id, currentName) {
   try {
     await updateData(ctx.table, id, { name: trimmed });
     await renderTermManagement();
+    // Parent-Selects refreshen — wenn der alte Name dort ausgewählt war, mappen wir auf den neuen
+    await _refreshTermSelectsInForms(ctx.table, null, { renameFrom: currentName, renameTo: trimmed });
     toast('Umbenannt', 'success');
   } catch (err) { toast(err.message, 'error'); }
 }
@@ -25242,8 +25247,67 @@ async function deleteTerm(id) {
   try {
     await deleteData(ctx.table, id);
     await renderTermManagement();
+    await _refreshTermSelectsInForms(ctx.table);
     toast(ctx.titleSing + ' gelöscht', 'success');
   } catch (err) { toast(err.message, 'error'); }
+}
+
+async function toggleTermDefault(id, makeDefault) {
+  const ctx = _termMgmtCtx;
+  const cur = getCurrentCompany();
+  try {
+    if (makeDefault) {
+      // Zuerst alle anderen entdefaulten — nur einer kann Standard sein pro Mandant
+      const all = await readData(ctx.table).catch(() => []);
+      const others = all.filter(r => (r.fields.company_id || []).includes(cur.id) && r.id !== id && r.fields.is_default);
+      for (const o of others) {
+        try { await updateData(ctx.table, o.id, { is_default: false }); } catch (_) {}
+      }
+    }
+    await updateData(ctx.table, id, { is_default: !!makeDefault });
+    await renderTermManagement();
+    await _refreshTermSelectsInForms(ctx.table);
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+// Aktualisiert alle <select name="payment_terms"> oder <select name="delivery_terms">
+// im offenen Parent-Formular (Angebot, Bestellung, Rechnung, …) nachdem im CRUD-Modal
+// etwas geändert wurde. Behält die bisherige Auswahl bei wenn möglich.
+//
+// table:               'PaymentTerm' oder 'DeliveryTerm'
+// preselectName:       wenn gesetzt, wird dieser Wert in allen Selects ausgewählt
+// opts.renameFrom/To:  wenn beim Rename der bisherige Wert ausgewählt war, mappen wir ihn um
+async function _refreshTermSelectsInForms(table, preselectName = null, opts = {}) {
+  const selectName = table === 'PaymentTerm' ? 'payment_terms' : 'delivery_terms';
+  const cur = getCurrentCompany();
+  if (!cur) return;
+  const selects = document.querySelectorAll(`select[name="${selectName}"]`);
+  if (!selects.length) return;
+  let all = [];
+  try { all = await readData(table); } catch (_) { return; }
+  const list = all
+    .filter(r => (r.fields.company_id || []).includes(cur.id))
+    .sort((a, b) => (a.fields.name || '').localeCompare(b.fields.name || '', 'de'));
+  selects.forEach(sel => {
+    let prev = sel.value;
+    if (opts.renameFrom && prev === opts.renameFrom) prev = opts.renameTo;
+    const wantValue = preselectName || prev;
+    const opts2 = ['<option value="">— wählen —</option>'];
+    list.forEach(t => {
+      const n = t.fields.name || '';
+      const sel2 = (n === wantValue) ? ' selected' : '';
+      opts2.push(`<option value="${escapeHtml(n)}"${sel2}>${t.fields.is_default ? '★ ' : ''}${escapeHtml(n)}</option>`);
+    });
+    // Falls aktueller Wert nicht mehr in der Liste ist (z.B. nach Delete oder alter Custom-Wert):
+    // als "(alt)"-Option behalten, damit das Form-Feld konsistent bleibt.
+    if (wantValue && !list.find(t => (t.fields.name || '') === wantValue)) {
+      opts2.push(`<option value="${escapeHtml(wantValue)}" selected>${escapeHtml(wantValue)} (alt)</option>`);
+    }
+    sel.innerHTML = opts2.join('');
+    if (wantValue) sel.value = wantValue;
+    // Change-Event triggern, damit eventuelle Preview-Updates greifen
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
 }
 
 /* ============================================================
@@ -26150,22 +26214,6 @@ async function _emailQuoteDoSend(quoteId, customerName, quoteNo, btnEl) {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = '<i data-lucide="send" class="w-4 h-4"></i> PDF erzeugen + senden'; if (window.lucide) lucide.createIcons(); }
     toast('Versand fehlgeschlagen: ' + (e.message || e), 'error', 9000);
   }
-}
-
-async function toggleTermDefault(id, makeDefault) {
-  const ctx = _termMgmtCtx;
-  const cur = getCurrentCompany();
-  try {
-    if (makeDefault) {
-      // andere Defaults entflaggen
-      const all = await readData(ctx.table);
-      const others = all.filter(r => (r.fields.company_id || []).includes(cur.id) && r.fields.is_default && r.id !== id);
-      for (const o of others) await updateData(ctx.table, o.id, { is_default: false });
-    }
-    await updateData(ctx.table, id, { is_default: !!makeDefault });
-    await renderTermManagement();
-    toast(makeDefault ? 'Als Standard gesetzt' : 'Standard entfernt', 'success');
-  } catch (err) { toast(err.message, 'error'); }
 }
 
 function renderQuoteItems(quoteId, items) {
