@@ -10,6 +10,7 @@ import type { AppDeps } from './deps.js';
 import { healthRoutes } from './http/health.js';
 import { errorHandler, requestContext } from './http/requestContext.js';
 import { securityHeaders } from './http/securityHeaders.js';
+import { freshdeskRoutes } from './proxy/freshdesk.js';
 import { staticRoutes } from './http/static.js';
 import { settingsRoutes } from './settings/routes.js';
 import type { AppEnv } from './types.js';
@@ -41,6 +42,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   api.route('/', fileRoutes(deps));
   api.route('/', settingsRoutes(deps));
   api.route('/admin', adminRoutes(deps));
+  api.route('/', freshdeskRoutes(deps));
   app.route('/api', api);
   return app;
 }
