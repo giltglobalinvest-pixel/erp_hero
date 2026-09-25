@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { adminRoutes } from './admin/routes.js';
 import { originCheck, requireAuth } from './auth/middleware.js';
 import { publicAuthRoutes, sessionRoutes } from './auth/routes.js';
 import { fileRoutes } from './data/files.js';
@@ -10,6 +11,7 @@ import { healthRoutes } from './http/health.js';
 import { errorHandler, requestContext } from './http/requestContext.js';
 import { securityHeaders } from './http/securityHeaders.js';
 import { staticRoutes } from './http/static.js';
+import { settingsRoutes } from './settings/routes.js';
 import type { AppEnv } from './types.js';
 import { jsonError } from './util/errors.js';
 
@@ -37,6 +39,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   api.route('/', numberRoutes(deps));
   api.route('/', lockRoutes(deps));
   api.route('/', fileRoutes(deps));
+  api.route('/', settingsRoutes(deps));
+  api.route('/admin', adminRoutes(deps));
   app.route('/api', api);
   return app;
 }
