@@ -80,6 +80,12 @@ describe('POST /api/auth', () => {
     expect(JSON.stringify(ctx.logs)).not.toMatch(/old-default|old-c1|v1:/);
   });
 
+  it('refuses oversized login bodies with 413 instead of buffering them', async () => {
+    const res = await login('x', { pad: 'x'.repeat(64 * 1024) });
+    expect(res.status).toBe(413);
+    expect((await res.json()).error.type).toBe('PAYLOAD_TOO_LARGE');
+  });
+
   it('rejects wrong keys, inactive users and missing keys', async () => {
     const inactive = await ctx.createUser({ status: 'inaktiv' });
     expect((await login('wrong-key-wrong-key')).status).toBe(401);

@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { AppDeps } from '../deps.js';
-import { readJsonBody } from '../http/body.js';
+import { limit, readJsonBody } from '../http/body.js';
 import type { AppEnv } from '../types.js';
 import { ApiError } from '../util/errors.js';
 import { clearSessionCookie, clientIp, readSessionCookie, requireAdmin, writeSessionCookie } from './middleware.js';
@@ -26,7 +26,8 @@ export function publicAuthRoutes(deps: AppDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
   const secure = deps.config.isProduction;
 
-  app.post('/auth', async (c) => {
+  // The only route that reads a body before authentication: keep it small ({user_key, long_lived}).
+  app.post('/auth', limit(16 * 1024), async (c) => {
     const ip = clientIp(c);
     if (deps.limiter.isBlocked(ip)) {
       throw new ApiError('RATE_LIMITED', 'Zu viele Fehlversuche. Bitte in einigen Minuten erneut versuchen.');
