@@ -135,14 +135,20 @@ After the frontend switch, or with a REST client and the session cookie:
    ```
 
    Then **Restart** the service in the dashboard.
-6. Everyone logs in at the new address with their existing login key.
+6. Everyone logs in at the new address with their existing login key (replaced in step 8).
 7. Remove the four import variables again, and delete the read-only Airtable token.
 8. **Rotate every key the old setup exposed.** The old `index.html` is public, including in the git history:
    - revoke the Airtable token embedded in `index.html` and the old Airtable write key;
    - create a new Anthropic key (update `ANTHROPIC_API_KEY`);
    - have each user regenerate their Freshdesk API key, then enter it again under Admin → Benutzer;
    - rotate Mailchimp keys;
-   - revoke the Val.town API token and delete the Val.town proxy (`erpHeroProxy`).
+   - revoke the Val.town API token and delete the Val.town proxy (`erpHeroProxy`);
+   - **give every user a new login key.** The imported keys were readable through the Airtable
+     token in `index.html`, and the old proxy sent them to every logged-in user. As admin, generate
+     a new key for each user, yourself included, under Admin → Benutzer
+     (`PATCH /api/admin/users/<id>/secrets` with `{"generate_api_key": true}`), then end that
+     user's sessions (`POST /api/sessions/revoke-user` with `{"user_id": "<id>"}`). Hand each new
+     key over in person or by phone.
 9. Keep the Airtable bases untouched as an archive.
 
 ## Local development
