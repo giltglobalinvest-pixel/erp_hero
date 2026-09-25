@@ -1,6 +1,10 @@
+import { LoginRateLimiter } from './auth/rateLimit.js';
+import { SessionStore } from './auth/sessions.js';
 import type { Config } from './config.js';
+import { RecordStore } from './data/records.js';
 import type { Database } from './db/database.js';
 import { jsonLogger, type Logger } from './http/logger.js';
+import { SecretStore } from './secrets/store.js';
 
 export type FetchFn = typeof fetch;
 
@@ -16,6 +20,10 @@ export interface AppDeps {
   logger: Logger;
   now: () => number;
   timeouts: Timeouts;
+  records: RecordStore;
+  sessions: SessionStore;
+  secrets: SecretStore;
+  limiter: LoginRateLimiter;
 }
 
 export interface BuildDepsOptions {
@@ -29,6 +37,7 @@ export interface BuildDepsOptions {
 
 export function buildDeps(o: BuildDepsOptions): AppDeps {
   const now = o.now ?? Date.now;
+  const records = new RecordStore(o.db, now);
   return {
     config: o.config,
     db: o.db,
@@ -37,5 +46,9 @@ export function buildDeps(o: BuildDepsOptions): AppDeps {
     logger: o.logger ?? jsonLogger,
     now,
     timeouts: { upstreamMs: 60_000, anthropicMs: 300_000, ...o.timeouts },
+    records,
+    sessions: new SessionStore(o.db, now),
+    secrets: new SecretStore(o.db, o.config.secretsKey),
+    limiter: new LoginRateLimiter({}, now),
   };
 }

@@ -60,8 +60,10 @@ describe('health and errors', () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
-  it('unknown /api paths return a JSON 404 with no-store', async () => {
-    const res = await ctx.req('/api/does-not-exist');
+  it('unknown /api paths return JSON 401 when logged out and JSON 404 with no-store when logged in', async () => {
+    expect((await ctx.req('/api/does-not-exist')).status).toBe(401);
+    const { cookie } = await ctx.loginAs();
+    const res = await ctx.req('/api/does-not-exist', { cookie });
     expect(res.status).toBe(404);
     expect(res.headers.get('cache-control')).toBe('no-store');
     expect(await res.json()).toEqual({ error: { type: 'NOT_FOUND', message: 'Nicht gefunden' } });

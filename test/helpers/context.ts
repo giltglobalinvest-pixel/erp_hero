@@ -10,6 +10,8 @@ import { runMigrations } from '../../server/db/migrations.js';
 import { buildDeps, type AppDeps, type Timeouts } from '../../server/deps.js';
 import type { Logger } from '../../server/http/logger.js';
 import type { AppEnv } from '../../server/types.js';
+import { hashLoginKey } from '../../server/auth/passwords.js';
+import { newLoginKey } from '../../server/util/ids.js';
 import { FakeFetch } from './fakeFetch.js';
 
 export const ROOT_DIR = fileURLToPath(new URL('../../', import.meta.url));
@@ -38,6 +40,20 @@ export interface ReqOptions {
   headers?: Record<string, string>;
 }
 
+export interface CreateUserOptions {
+  name?: string;
+  role?: string;
+  isAdmin?: boolean;
+  companies?: string[];
+  status?: string;
+  key?: string;
+}
+
+export interface TestUser {
+  id: string;
+  key: string;
+}
+
 export interface TestContext {
   app: Hono<AppEnv>;
   deps: AppDeps;
@@ -46,6 +62,11 @@ export interface TestContext {
   dataDir: string;
   clock: { now: number };
   req(pathname: string, options?: ReqOptions): Promise<Response>;
+  createUser(options?: CreateUserOptions): Promise<TestUser>;
+  /** Logs in and returns the "name=value" cookie pair. */
+  login(key: string, longLived?: boolean): Promise<string>;
+  /** Creates a user and logs in; returns the user and cookie. */
+  loginAs(options?: CreateUserOptions): Promise<TestUser & { cookie: string }>;
   close(): Promise<void>;
 }
 
@@ -79,6 +100,26 @@ export async function createTestContext(options: ContextOptions = {}): Promise<T
     return Promise.resolve(app.request(pathname, { method: o.method ?? 'GET', headers, body }));
   };
 
+  const createUser = async (o: CreateUserOptions = {}): Promise<TestUser> => {
+    const key = o.key ?? newLoginKey();
+    const hash = await hashLoginKey(key);
+    const fields: Record<string, unknown> = { name: o.name ?? 'Test User', role: o.role ?? 'Vertrieb', status: o.status ?? 'aktiv' };
+    if (o.isAdmin) fields.is_admin = true;
+    if (o.companies?.length) fields.allowed_companies = o.companies;
+    const record = await db.write(async (tx) => {
+      const r = await deps.records.insert(tx, 'User', fields);
+      await deps.secrets.setApiKeyHash(tx, r.id, hash);
+      return r;
+    });
+    return { id: record.id, key };
+  };
+
+  const login = async (key: string, longLived = false): Promise<string> => {
+    const res = await req('/api/auth', { method: 'POST', body: { user_key: key, long_lived: longLived } });
+    if (res.status !== 200) throw new Error(`login failed: ${res.status} ${await res.text()}`);
+    return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+  };
+
   return {
     app,
     deps,
@@ -87,6 +128,12 @@ export async function createTestContext(options: ContextOptions = {}): Promise<T
     dataDir,
     clock,
     req,
+    createUser,
+    login,
+    async loginAs(o: CreateUserOptions = {}) {
+      const user = await createUser(o);
+      return { ...user, cookie: await login(user.key) };
+    },
     async close() {
       db.close();
       await rm(dataDir, { recursive: true, force: true });
