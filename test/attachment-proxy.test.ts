@@ -48,6 +48,16 @@ describe('GET /api/attachment-proxy', () => {
     expect(ctx.fake.calls[0]?.headers.get('authorization')).toBeNull();
   });
 
+  it('sends proxied files as downloads, so customer HTML never renders on the app origin', async () => {
+    ctx.fake.on('GET', 'https://attachment.freshdesk.com/page', () =>
+      new Response('<script>alert(1)</script>', { headers: { 'content-type': 'text/html' } }),
+    );
+    const res = await proxy('https://attachment.freshdesk.com/page');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/html');
+    expect(res.headers.get('content-disposition')).toBe('attachment');
+  });
+
   it('refuses disallowed hosts before any request is made', async () => {
     const res = await proxy('https://169.254.169.254/latest/meta-data');
     expect(res.status).toBe(403);

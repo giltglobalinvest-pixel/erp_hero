@@ -91,6 +91,8 @@ export function attachmentProxyRoutes(deps: AppDeps): Hono<AppEnv> {
     return new Response(new Uint8Array(data), {
       headers: {
         'content-type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+        // The app reads this with fetch(); opened directly, customer files must not render on our origin.
+        'content-disposition': 'attachment',
         'cache-control': 'private, max-age=300',
       },
     });

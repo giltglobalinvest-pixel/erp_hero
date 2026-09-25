@@ -104,6 +104,15 @@ describe('file upload and download', () => {
     expect(sanitizeFilename('..hidden')).toBe('hidden');
   });
 
+  it('shows raster images inline but serves SVG as a download, since SVG can carry script', async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    const svgAtt = (await (await upload(user.cookie, 'Attachment', attachmentId, 'file', svg, 'zeichnung.svg', 'image/svg+xml')).json()).fields.file[0];
+    const svgRes = await ctx.req(svgAtt.url, { cookie: user.cookie });
+    expect(svgRes.headers.get('content-disposition')).toMatch(/^attachment; /);
+    const png = (await (await upload(user.cookie, 'Attachment', attachmentId, 'file', Buffer.from('PNG'), 'foto.png', 'image/png')).json()).fields.file[1];
+    expect((await ctx.req(png.url, { cookie: user.cookie })).headers.get('content-disposition')).toMatch(/^inline; /);
+  });
+
   it('serves unknown ids as 404 and non-image files as attachment downloads', async () => {
     expect((await ctx.req('/api/files/attNOPENOPENOPE12/x', { cookie: user.cookie })).status).toBe(404);
     const att = (await (await upload(user.cookie, 'Attachment', attachmentId, 'file', Buffer.from('a;b'), 'liste.csv', 'text/csv')).json()).fields.file[0];

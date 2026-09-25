@@ -150,7 +150,9 @@ export class FileStore {
 }
 
 function contentDisposition(file: FileRow): string {
-  const inline = file.contentType.startsWith('image/') || file.contentType === 'application/pdf';
+  // SVG is an image type that can carry script, so it is downloaded rather than rendered on our origin.
+  const isRasterImage = file.contentType.startsWith('image/') && !file.contentType.startsWith('image/svg');
+  const inline = isRasterImage || file.contentType === 'application/pdf';
   const ascii = file.filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
   return `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(file.filename)}`;
 }
