@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LONG_TTL_MS, SHORT_TTL_MS } from '../server/auth/sessions.js';
+import { SecretStore } from '../server/secrets/store.js';
 import { createTestContext, type TestContext } from './helpers/context.js';
 
 let ctx: TestContext;
@@ -61,6 +62,22 @@ describe('POST /api/auth', () => {
     } finally {
       await prod.close();
     }
+  });
+
+  it('still logs in after SECRETS_KEY changed; keys that no longer decrypt count as not set and are logged', async () => {
+    const u = await ctx.createUser({ name: 'Rita' });
+    const previous = new SecretStore(ctx.deps.db, Buffer.alloc(32, 1));
+    await ctx.deps.db.write(async (tx) => {
+      await previous.setFreshdeskDefault(tx, u.id, 'old-default');
+      await previous.mergeFreshdeskKeys(tx, u.id, { recC1: 'old-c1' });
+    });
+    const res = await login(u.key);
+    expect(res.status).toBe(200);
+    expect((await res.json()).user).toMatchObject({ name: 'Rita', has_freshdesk_key: false, freshdesk_company_keys: [] });
+    const cookie = (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    expect((await ctx.req('/api/me', { cookie })).status).toBe(200);
+    expect(ctx.logs.some((entry) => String(entry.secret ?? '').includes(u.id))).toBe(true);
+    expect(JSON.stringify(ctx.logs)).not.toMatch(/old-default|old-c1|v1:/);
   });
 
   it('rejects wrong keys, inactive users and missing keys', async () => {

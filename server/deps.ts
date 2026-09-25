@@ -43,18 +43,21 @@ export interface BuildDepsOptions {
 
 export function buildDeps(o: BuildDepsOptions): AppDeps {
   const now = o.now ?? Date.now;
+  const logger = o.logger ?? jsonLogger;
   const records = new RecordStore(o.db, now);
   return {
     config: o.config,
     db: o.db,
     // Resolve globalThis.fetch lazily so tests can replace it.
     fetch: o.fetch ?? ((input, init) => globalThis.fetch(input, init)),
-    logger: o.logger ?? jsonLogger,
+    logger,
     now,
     timeouts: { upstreamMs: 60_000, anthropicMs: 300_000, ...o.timeouts },
     records,
     sessions: new SessionStore(o.db, now),
-    secrets: new SecretStore(o.db, o.config.secretsKey),
+    secrets: new SecretStore(o.db, o.config.secretsKey, (ref) =>
+      logger.error({ message: 'stored secret cannot be decrypted (SECRETS_KEY changed?); treated as not set', secret: ref }),
+    ),
     limiter: new LoginRateLimiter({}, now),
     numbers: new NumberService(),
     locks: new LockService(o.db, records, now),

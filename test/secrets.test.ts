@@ -97,6 +97,34 @@ describe('SecretStore', () => {
     expect((await store.allUserInfo()).get('recU')?.freshdeskCompanyKeys).toEqual(['recC2', 'recC3']);
   });
 
+  it('treats values stored under a previous SECRETS_KEY as absent, reports each once, and lets admins overwrite them', async () => {
+    const previous = new SecretStore(db, Buffer.alloc(32, 1));
+    await db.write(async (tx) => {
+      await previous.setApiKeyHash(tx, 'recU', 'scrypt$hash');
+      await previous.setFreshdeskDefault(tx, 'recU', 'old-default');
+      await previous.mergeFreshdeskKeys(tx, 'recU', { recC1: 'old-c1' });
+      await previous.setMailchimpKey(tx, 'recC1', 'old-mc-us21');
+    });
+    const reported: string[] = [];
+    const current = new SecretStore(db, KEY, (ref) => reported.push(ref));
+    expect(await current.userInfo('recU')).toEqual({ hasApiKey: true, hasFreshdeskKey: false, freshdeskCompanyKeys: [] });
+    expect(await current.freshdeskKeyFor('recU', 'recC1')).toBeNull();
+    expect(await current.mailchimpKey('recC1')).toBeNull();
+    expect([...(await current.companiesWithMailchimpKey())]).toEqual([]);
+    expect((await current.allUserInfo()).get('recU')?.freshdeskCompanyKeys).toEqual([]);
+
+    await db.write((tx) => current.mergeFreshdeskKeys(tx, 'recU', { recC2: 'new-c2' }));
+    await db.write((tx) => current.setMailchimpKey(tx, 'recC1', 'new-mc-us21'));
+    expect(await current.freshdeskKeyFor('recU', 'recC2')).toBe('new-c2');
+    expect(await current.mailchimpKey('recC1')).toBe('new-mc-us21');
+
+    expect(reported.length).toBeGreaterThan(0);
+    expect(new Set(reported).size).toBe(reported.length);
+    expect(reported.join(' ')).toContain('recU');
+    expect(reported.join(' ')).toContain('recC1');
+    expect(reported.join(' ')).not.toMatch(/old-|v1:/);
+  });
+
   it('stores Mailchimp keys per company', async () => {
     await db.write((tx) => store.setMailchimpKey(tx, 'recC1', 'mc-key-us21'));
     expect(await store.mailchimpKey('recC1')).toBe('mc-key-us21');

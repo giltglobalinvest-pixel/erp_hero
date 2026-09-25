@@ -16,10 +16,31 @@ const present = (v: unknown): v is string => typeof v === 'string' && v !== '';
 
 /** Login-key hashes and encrypted third-party keys. Nothing here is ever sent to a browser. */
 export class SecretStore {
+  private readonly reported = new Set<string>();
+
   constructor(
     private readonly db: Database,
     private readonly key: Buffer,
+    /** Told once per stored value that no longer decrypts (SECRETS_KEY changed); gets a reference, never the value. */
+    private readonly onUndecryptable: (ref: string) => void = () => undefined,
   ) {}
+
+  /**
+   * A value encrypted under a previous SECRETS_KEY counts as not set, so logins keep working
+   * and admins can re-enter the key (spec §12).
+   */
+  private tryDecrypt(blob: unknown, ref: string): string | null {
+    if (!present(blob)) return null;
+    try {
+      return decryptSecret(this.key, blob);
+    } catch {
+      if (!this.reported.has(ref)) {
+        this.reported.add(ref);
+        this.onUndecryptable(ref);
+      }
+      return null;
+    }
+  }
 
   private async userRow(userId: string, exec: Executor = this.db.client): Promise<Row | undefined> {
     const rs = await exec.execute({
@@ -29,9 +50,10 @@ export class SecretStore {
     return rs.rows[0];
   }
 
-  private decryptMap(enc: unknown): Record<string, string> {
-    if (!present(enc)) return {};
-    const parsed: unknown = JSON.parse(decryptSecret(this.key, enc));
+  private decryptMap(enc: unknown, ref: string): Record<string, string> {
+    const json = this.tryDecrypt(enc, ref);
+    if (json === null) return {};
+    const parsed: unknown = JSON.parse(json);
     if (!isPlainObject(parsed)) return {};
     return Object.fromEntries(
       Object.entries(parsed).filter((entry): entry is [string, string] => present(entry[1])),
@@ -39,10 +61,11 @@ export class SecretStore {
   }
 
   private toInfo(row: Row | undefined): UserSecretInfo {
+    const userId = String(row?.user_id ?? '');
     return {
       hasApiKey: present(row?.api_key_hash),
-      hasFreshdeskKey: present(row?.freshdesk_api_key_enc),
-      freshdeskCompanyKeys: Object.keys(this.decryptMap(row?.freshdesk_keys_enc)).sort(),
+      hasFreshdeskKey: this.tryDecrypt(row?.freshdesk_api_key_enc, `user ${userId} freshdesk_api_key`) !== null,
+      freshdeskCompanyKeys: Object.keys(this.decryptMap(row?.freshdesk_keys_enc, `user ${userId} freshdesk_keys`)).sort(),
     };
   }
 
@@ -83,7 +106,7 @@ export class SecretStore {
 
   /** Merges per-company Freshdesk keys; null removes a company's key. */
   async mergeFreshdeskKeys(tx: Executor, userId: string, patch: Record<string, string | null>): Promise<void> {
-    const map = this.decryptMap((await this.userRow(userId, tx))?.freshdesk_keys_enc);
+    const map = this.decryptMap((await this.userRow(userId, tx))?.freshdesk_keys_enc, `user ${userId} freshdesk_keys`);
     for (const [companyId, apiKey] of Object.entries(patch)) {
       if (apiKey) map[companyId] = apiKey;
       else delete map[companyId];
@@ -96,25 +119,27 @@ export class SecretStore {
   async freshdeskKeyFor(userId: string, companyId: string | null): Promise<string | null> {
     const row = await this.userRow(userId);
     if (companyId) {
-      const companyKey = this.decryptMap(row?.freshdesk_keys_enc)[companyId];
+      const companyKey = this.decryptMap(row?.freshdesk_keys_enc, `user ${userId} freshdesk_keys`)[companyId];
       if (companyKey) return companyKey;
     }
-    return present(row?.freshdesk_api_key_enc) ? decryptSecret(this.key, row.freshdesk_api_key_enc) : null;
+    return this.tryDecrypt(row?.freshdesk_api_key_enc, `user ${userId} freshdesk_api_key`);
   }
 
   async companiesWithMailchimpKey(): Promise<Set<string>> {
     const rows = await this.db.query(
-      "SELECT company_id FROM company_secrets WHERE mailchimp_api_key_enc IS NOT NULL AND mailchimp_api_key_enc <> ''",
+      "SELECT company_id, mailchimp_api_key_enc FROM company_secrets WHERE mailchimp_api_key_enc IS NOT NULL AND mailchimp_api_key_enc <> ''",
     );
-    return new Set(rows.map((row) => String(row.company_id)));
+    const usable = rows.filter(
+      (row) => this.tryDecrypt(row.mailchimp_api_key_enc, `company ${String(row.company_id)} mailchimp_api_key`) !== null,
+    );
+    return new Set(usable.map((row) => String(row.company_id)));
   }
 
   async mailchimpKey(companyId: string): Promise<string | null> {
     const rows = await this.db.query('SELECT mailchimp_api_key_enc FROM company_secrets WHERE company_id = ?', [
       companyId,
     ]);
-    const enc = rows[0]?.mailchimp_api_key_enc;
-    return present(enc) ? decryptSecret(this.key, enc) : null;
+    return this.tryDecrypt(rows[0]?.mailchimp_api_key_enc, `company ${companyId} mailchimp_api_key`);
   }
 
   async setMailchimpKey(tx: Executor, companyId: string, apiKey: string | null): Promise<void> {

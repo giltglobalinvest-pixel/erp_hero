@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { verifyLoginKey } from '../server/auth/passwords.js';
+import { SecretStore } from '../server/secrets/store.js';
 import { createTestContext, type TestContext } from './helpers/context.js';
 
 let ctx: TestContext;
@@ -83,6 +84,17 @@ describe('admin: user secrets', () => {
     expect(res.has_freshdesk_key).toBe(false);
     expect(await ctx.deps.secrets.freshdeskKeyFor(user.id, 'recC3')).toBe('k3');
     expect((await patch(admin.cookie, user.id, { freshdesk_keys: 'x' })).status).toBe(400);
+  });
+
+  it('lets admins re-enter Freshdesk keys that were stored under a previous SECRETS_KEY', async () => {
+    const previous = new SecretStore(ctx.deps.db, Buffer.alloc(32, 1));
+    await ctx.deps.db.write((tx) => previous.mergeFreshdeskKeys(tx, user.id, { recC1: 'old-c1', recC2: 'old-c2' }));
+    const list = await ctx.req('/api/data/User', { cookie: admin.cookie });
+    expect(list.status).toBe(200);
+    const res = await patch(admin.cookie, user.id, { freshdesk_keys: { recC1: 'new-c1' } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).freshdesk_company_keys).toEqual(['recC1']);
+    expect(await ctx.deps.secrets.freshdeskKeyFor(user.id, 'recC1')).toBe('new-c1');
   });
 
   it('404s for unknown users', async () => {
