@@ -1,0 +1,36 @@
+{
+  "name": "erp-hero-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server/main.js",
+    "dev": "tsx watch server/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint server test vitest.config.ts",
+    "user:create": "node dist/server/cli/user-create.js",
+    "db:activate": "node dist/server/cli/db-activate.js",
+    "import:airtable": "node dist/server/cli/import-airtable.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "@libsql/client": "^0.18.0",
+    "hono": "^4.13.9",
+    "tar": "^7.5.22",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.4",
+    "eslint": "^10.11.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^5.0.2"
+  }
+}
