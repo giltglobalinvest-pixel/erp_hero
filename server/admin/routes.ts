@@ -1,3 +1,6 @@
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { requireAdmin } from '../auth/middleware.js';
 import { hashLoginKey, verifyLoginKey } from '../auth/passwords.js';
@@ -6,6 +9,7 @@ import { isPlainObject, readJsonBody } from '../http/body.js';
 import type { AppEnv } from '../types.js';
 import { ApiError } from '../util/errors.js';
 import { newLoginKey } from '../util/ids.js';
+import { createBackupArchive } from './backup.js';
 
 const optionalSecret = (value: unknown, name: string): string | null => {
   if (value === null) return null;
@@ -80,6 +84,21 @@ export function adminRoutes(deps: AppDeps): Hono<AppEnv> {
     const key = optionalSecret(body.mailchimp_api_key, 'mailchimp_api_key');
     await deps.db.write((tx) => deps.secrets.setMailchimpKey(tx, companyId, key));
     return c.json({ has_mailchimp_key: key !== null });
+  });
+
+  app.get('/backup', async () => {
+    const archive = await createBackupArchive(deps.db, deps.records, deps.config.dataDir, new Date(deps.now()));
+    const { size } = await stat(archive.file);
+    const stream = createReadStream(archive.file);
+    stream.on('close', () => void archive.cleanup());
+    return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, {
+      headers: {
+        'content-type': 'application/gzip',
+        'content-length': String(size),
+        'content-disposition': `attachment; filename="${archive.filename}"`,
+        'cache-control': 'no-store',
+      },
+    });
   });
 
   return app;
