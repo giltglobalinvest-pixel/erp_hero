@@ -105,7 +105,7 @@ Node server on Railway (Hono, single instance)
 | Unit | Responsibility | Depends on |
 |---|---|---|
 | `config` | Parse and validate env vars (zod). Fail fast on missing required values. | – |
-| `db` | Open the libsql client, run migrations, provide transactions (`BEGIN IMMEDIATE`). | config |
+| `db` | Open the libsql client, run migrations, provide write transactions. Writes are queued in-process, because libsql cannot hold two write transactions open at once. | config |
 | `records` | CRUD on ERP tables, Airtable emulation (IDs, empty-value dropping), sort/filter. | db, tables |
 | `tables` | Registry of the 30 tables: numbered field, lockable, attachment fields, permission class. | – |
 | `numbers` | Assign and peek document numbers; duplicate check. | records |
@@ -146,7 +146,7 @@ CREATE TABLE "Invoice" (
 | Table | Columns | Purpose |
 |---|---|---|
 | `schema_migrations` | `version`, `applied_at` | Migration bookkeeping |
-| `sessions` | `token_hash` (SHA-256 hex, PK), `user_id`, `created_at`, `expires_at`, `long_lived`, `last_seen_at`, `user_agent` (≤200 chars) | Login sessions |
+| `sessions` | `token_hash` (SHA-256 hex, PK), `user_id`, `created_at` and `expires_at` (epoch ms), `long_lived`, `user_agent` (≤200 chars) | Login sessions |
 | `user_secrets` | `user_id` PK, `api_key_hash` (scrypt string), `freshdesk_api_key_enc`, `freshdesk_keys_enc` (JSON `{companyId: key}` encrypted) | Login and Freshdesk keys |
 | `company_secrets` | `company_id` PK, `mailchimp_api_key_enc` | Mailchimp key per company |
 | `settings` | `key` PK, `value`, `updated_at`, `updated_by` | Non-secret settings |
@@ -292,7 +292,7 @@ Every record passes through `toPublicRecord(table, record, user)`:
 - A record belongs to company `C` if `fields.company_id` equals `C` (string) or contains `C` (array). Both forms exist in the data.
 - In SQL: `EXISTS (SELECT 1 FROM json_each(fields,'$.company_id') WHERE value = ?)`. This also covers plain strings.
 
-**Assignment on create (`assignNumber: true`)**, all inside one `BEGIN IMMEDIATE` transaction together with the insert:
+**Assignment on create (`assignNumber: true`)**, all inside one write transaction together with the insert:
 1. The table must be numbered, and `fields.company_id` must identify a company (the first ID if it is an array); otherwise 400.
 2. `n = max(floor, highest N among the company's records whose field matches ^PREFIX(\d+)$) + 1`, where floor is 1000 or 10000.
 3. The field is set and the record inserted. A client-supplied value for the numbered field is overwritten.
@@ -307,7 +307,7 @@ Every record passes through `toPublicRecord(table, record, user)`:
 - On create or update, if the numbered field is present and differs from the stored value, and another record of the same table and company already has that value → 409 `DUPLICATE_NUMBER` "Nummer bereits vergeben".
 - Existing legacy duplicates stay untouched unless the number is changed.
 
-**Why it's race-free:** SQLite allows one writer at a time, `BEGIN IMMEDIATE` takes the write lock before reading the maximum, and there is a single process (D3). A test creates 20 invoices concurrently and expects 20 distinct consecutive numbers.
+**Why it's race-free:** the server queues all write transactions in-process, and there is a single process (D3). The highest existing number is read inside the same write transaction as the insert, so no other write can happen in between. A test creates 20 invoices concurrently and expects 20 distinct consecutive numbers.
 
 ## 9. Record locks
 
@@ -352,6 +352,8 @@ Every record passes through `toPublicRecord(table, record, user)`:
 **Endpoints:**
 - `GET /api/settings` → `{settings:{key:value}}` for any logged-in user.
 - `PUT /api/settings/:key` with `{value}` and `DELETE /api/settings/:key` are admin-only. An unknown key → 400.
+- An empty `value` deletes the setting.
+- Both return the full `{settings}` map.
 
 **Where the rest of the old Keys data goes:**
 - Secrets move to Railway variables: `anthropicKey` → `ANTHROPIC_API_KEY`, `freshdeskProxyToken` (unused) and the Freshsales key. `airtableWriteKey` and `valtownKey` are dropped.
@@ -361,7 +363,7 @@ Every record passes through `toPublicRecord(table, record, user)`:
 
 **`PATCH /api/admin/users/:id/secrets`** with `{api_key?, generate_api_key?, freshdesk_api_key?, freshdesk_keys?}`:
 - `generate_api_key: true` creates 24 characters `[a-z0-9]` with an unbiased random generator and returns it **once** as `api_key`.
-- `api_key: "<string>"` sets a manual key of at least 12 chars.
+- `api_key: "<string>"` sets a manual key of at least 12 chars. It is not echoed back.
 - `api_key: null` removes the key.
 - If the new key already matches another user's key → 409 `KEY_IN_USE`.
 - `freshdesk_api_key: string | null` sets or clears the default key.
@@ -509,6 +511,7 @@ Every record passes through `toPublicRecord(table, record, user)`:
 | `VALIDATION_FAILED` | 422 |
 | `RATE_LIMITED` | 429 |
 | `NOT_CONFIGURED`, `INTERNAL` | 500 |
+| `UPSTREAM_ERROR` | the upstream status (attachment proxy) |
 | `UPSTREAM_UNAVAILABLE` | 502 |
 | `UPSTREAM_TIMEOUT` | 504 |
 
@@ -557,7 +560,7 @@ Every record passes through `toPublicRecord(table, record, user)`:
 
 ## 16. Airtable → SQLite importer
 
-**Invocation:** `npm run import:airtable -- --staging <dir>`, e.g. in the Railway shell via `railway ssh`.
+**Invocation:** `npm run import:airtable [-- --staging <dir>]`, e.g. in the Railway shell via `railway ssh`. Without `--staging`, the target is `$DATA_DIR/import-<timestamp>`.
 - It writes `<dir>/erp.db`, `<dir>/files/` and `<dir>/import-report.json`.
 - It refuses to run if `<dir>` already exists.
 - **Env:** `AIRTABLE_TOKEN` (read-only scopes: `data.records:read` and `schema.bases:read` on both bases), `AIRTABLE_BASE_ID`, `AIRTABLE_MASTER_BASE_ID`, `ERP_PROJECT_ID`, `SECRETS_KEY`.
