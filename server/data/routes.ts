@@ -66,7 +66,10 @@ export function dataRoutes(deps: AppDeps): Hono<AppEnv> {
     assertCanWrite(table, c.get('user'), 'create');
     const body = await readJsonBody(c);
     const { set } = prepareWriteFields(body.fields ?? {});
-    const record = await deps.db.write((tx) => deps.records.insert(tx, table, set));
+    const record = await deps.db.write(async (tx) => {
+      await deps.numbers.applyOnCreate(tx, table, set, { assignNumber: body.assignNumber === true, variantOf: body.variantOf });
+      return deps.records.insert(tx, table, set);
+    });
     return c.json(await present(c, table, record));
   });
 
@@ -76,7 +79,12 @@ export function dataRoutes(deps: AppDeps): Hono<AppEnv> {
     const id = c.req.param('id');
     const body = await readJsonBody(c);
     const { set, clear } = prepareWriteFields(body.fields ?? {});
-    const record = await deps.db.write((tx) => deps.records.update(tx, table, id, set, clear));
+    const record = await deps.db.write(async (tx) => {
+      const existing = await deps.records.get(table, id, tx);
+      if (!existing) return null;
+      await deps.numbers.checkOnUpdate(tx, table, existing, set);
+      return deps.records.update(tx, table, id, set, clear);
+    });
     if (!record) throw new ApiError('NOT_FOUND', 'Datensatz nicht gefunden');
     return c.json(await present(c, table, record));
   });

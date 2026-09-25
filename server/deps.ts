@@ -1,6 +1,7 @@
 import { LoginRateLimiter } from './auth/rateLimit.js';
 import { SessionStore } from './auth/sessions.js';
 import type { Config } from './config.js';
+import { NumberService } from './data/numbers.js';
 import { RecordStore } from './data/records.js';
 import type { Database } from './db/database.js';
 import { jsonLogger, type Logger } from './http/logger.js';
@@ -24,6 +25,7 @@ export interface AppDeps {
   sessions: SessionStore;
   secrets: SecretStore;
   limiter: LoginRateLimiter;
+  numbers: NumberService;
 }
 
 export interface BuildDepsOptions {
@@ -50,5 +52,6 @@ export function buildDeps(o: BuildDepsOptions): AppDeps {
     sessions: new SessionStore(o.db, now),
     secrets: new SecretStore(o.db, o.config.secretsKey),
     limiter: new LoginRateLimiter({}, now),
+    numbers: new NumberService(),
   };
 }

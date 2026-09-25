@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { originCheck, requireAuth } from './auth/middleware.js';
 import { publicAuthRoutes, sessionRoutes } from './auth/routes.js';
+import { numberRoutes } from './data/numbers.js';
 import { dataRoutes } from './data/routes.js';
 import type { AppDeps } from './deps.js';
 import { healthRoutes } from './http/health.js';
@@ -31,6 +32,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   api.use('*', requireAuth(deps));
   api.route('/', sessionRoutes(deps));
   api.route('/', dataRoutes(deps));
+  api.route('/', numberRoutes(deps));
   app.route('/api', api);
   return app;
 }
