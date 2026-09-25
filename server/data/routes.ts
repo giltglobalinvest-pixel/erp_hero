@@ -68,6 +68,7 @@ export function dataRoutes(deps: AppDeps): Hono<AppEnv> {
     const { set } = prepareWriteFields(body.fields ?? {});
     const record = await deps.db.write(async (tx) => {
       await deps.numbers.applyOnCreate(tx, table, set, { assignNumber: body.assignNumber === true, variantOf: body.variantOf });
+      await deps.files.normalizeAttachmentFields(tx, table, null, set);
       return deps.records.insert(tx, table, set);
     });
     return c.json(await present(c, table, record));
@@ -83,6 +84,7 @@ export function dataRoutes(deps: AppDeps): Hono<AppEnv> {
       const existing = await deps.records.get(table, id, tx);
       if (!existing) return null;
       await deps.numbers.checkOnUpdate(tx, table, existing, set);
+      await deps.files.normalizeAttachmentFields(tx, table, id, set);
       return deps.records.update(tx, table, id, set, clear);
     });
     if (!record) throw new ApiError('NOT_FOUND', 'Datensatz nicht gefunden');

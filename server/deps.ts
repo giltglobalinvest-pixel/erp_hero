@@ -1,6 +1,7 @@
 import { LoginRateLimiter } from './auth/rateLimit.js';
 import { SessionStore } from './auth/sessions.js';
 import type { Config } from './config.js';
+import { FileStore } from './data/files.js';
 import { LockService } from './data/locks.js';
 import { NumberService } from './data/numbers.js';
 import { RecordStore } from './data/records.js';
@@ -28,6 +29,7 @@ export interface AppDeps {
   limiter: LoginRateLimiter;
   numbers: NumberService;
   locks: LockService;
+  files: FileStore;
 }
 
 export interface BuildDepsOptions {
@@ -56,5 +58,6 @@ export function buildDeps(o: BuildDepsOptions): AppDeps {
     limiter: new LoginRateLimiter({}, now),
     numbers: new NumberService(),
     locks: new LockService(o.db, records, now),
+    files: new FileStore(o.db, o.config.dataDir, now),
   };
 }
