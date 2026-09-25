@@ -11,6 +11,7 @@ import { healthRoutes } from './http/health.js';
 import { errorHandler, requestContext } from './http/requestContext.js';
 import { securityHeaders } from './http/securityHeaders.js';
 import { anthropicRoutes } from './proxy/anthropic.js';
+import { attachmentProxyRoutes } from './proxy/attachmentProxy.js';
 import { freshdeskRoutes } from './proxy/freshdesk.js';
 import { freshsalesRoutes } from './proxy/freshsales.js';
 import { mailchimpRoutes } from './proxy/mailchimp.js';
@@ -49,6 +50,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   api.route('/', freshsalesRoutes(deps));
   api.route('/', mailchimpRoutes(deps));
   api.route('/', anthropicRoutes(deps));
+  api.route('/', attachmentProxyRoutes(deps));
   app.route('/api', api);
   return app;
 }
