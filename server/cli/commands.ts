@@ -66,7 +66,13 @@ export async function runDbActivateCli(argv: string[], env: NodeJS.ProcessEnv, o
     return 1;
   }
   const config = loadConfig(env, process.cwd());
-  const staging = await scheduleActivation(config.dataDir, stagingDir);
+  let staging: string;
+  try {
+    staging = await scheduleActivation(config.dataDir, stagingDir);
+  } catch (err) {
+    out(`Fehler: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
   out(`Aktivierung vorgemerkt: ${staging}`);
   out('Jetzt den Service im Railway-Dashboard neu starten (Restart). Die bisherige Datenbank wird dabei in backup-<Zeitstempel>/ verschoben.');
   return 0;

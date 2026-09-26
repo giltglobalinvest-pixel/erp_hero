@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -15,6 +15,12 @@ let dataDir: string;
 let out: string[];
 const print = (line: string) => out.push(line);
 const silent = { info: () => undefined, error: () => undefined };
+
+// The cross-filesystem tests need a second filesystem: /dev/shm (tmpfs) is separate from os.tmpdir() on most Linux hosts.
+const otherFs = await stat('/dev/shm').then(
+  async (s) => (s.dev !== (await stat(os.tmpdir())).dev ? '/dev/shm' : null),
+  () => null,
+);
 
 beforeEach(async () => {
   dataDir = await mkdtemp(path.join(os.tmpdir(), 'erp-cli-'));
@@ -69,6 +75,69 @@ describe('activation', () => {
     await writeFile(path.join(dataDir, ACTIVATION_MARKER), path.join(dataDir, 'gone'));
     expect(await applyPendingActivation(dataDir, silent)).toEqual({ activated: false });
     expect(await runDbActivateCli([], testEnv(dataDir), print)).toBe(1);
+    // The CLI reports a refused directory as an error line, not as a stack trace.
+    expect(await runDbActivateCli([path.join(dataDir, 'nope')], testEnv(dataDir), print)).toBe(1);
+    expect(out.at(-1)).toMatch(/^Fehler: .*erp\.db/);
+  });
+
+  it.skipIf(!otherFs)('refuses to schedule a staging dir on another filesystem and names where to stage instead', async () => {
+    const staging = await mkdtemp(path.join(otherFs ?? '', 'erp-cli-staging-'));
+    try {
+      await writeFile(path.join(staging, 'erp.db'), 'NEW');
+      const code = await runDbActivateCli([staging], testEnv(dataDir), print);
+      expect((await readdir(dataDir)).includes(ACTIVATION_MARKER)).toBe(false);
+      expect(code).toBe(1);
+      expect(out.join('\n')).toMatch(/^Fehler: /);
+      expect(out.join('\n')).toContain(dataDir);
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!otherFs)('skips a marker that points across filesystems and keeps the previous database', async () => {
+    const staging = await mkdtemp(path.join(otherFs ?? '', 'erp-cli-staging-'));
+    try {
+      await writeFile(path.join(staging, 'erp.db'), 'NEW');
+      await writeFile(path.join(dataDir, 'erp.db'), 'OLD');
+      await mkdir(path.join(dataDir, 'files', 'attOLD'), { recursive: true });
+      await writeFile(path.join(dataDir, ACTIVATION_MARKER), staging);
+
+      expect(await applyPendingActivation(dataDir, silent)).toEqual({ activated: false });
+      expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('OLD');
+      expect(await readdir(path.join(dataDir, 'files'))).toEqual(['attOLD']);
+      expect((await readdir(dataDir)).sort()).toEqual(['erp.db', 'files']);
+      expect(await readdir(staging)).toEqual(['erp.db']);
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  });
+
+  it('puts everything back when a rename fails mid-swap and keeps the previous database', async () => {
+    await writeFile(path.join(dataDir, 'erp.db'), 'OLD');
+    await writeFile(path.join(dataDir, 'erp.db-wal'), 'OLD-WAL');
+    await mkdir(path.join(dataDir, 'files', 'attOLD'), { recursive: true });
+    const staging = path.join(dataDir, 'import-1');
+    await mkdir(path.join(staging, 'files', 'attNEW'), { recursive: true });
+    await writeFile(path.join(staging, 'erp.db'), 'NEW');
+    await writeFile(path.join(dataDir, ACTIVATION_MARKER), staging);
+    const errors: Record<string, unknown>[] = [];
+    const logger = { info: () => undefined, error: (e: Record<string, unknown>) => errors.push(e) };
+    // As with EXDEV: the previous database is already in the backup dir when the staged one cannot be moved into place.
+    const failing = {
+      rename: (from: string, to: string) =>
+        from === path.join(staging, 'erp.db') ? Promise.reject(new Error('EXDEV: cross-device link not permitted')) : rename(from, to),
+    };
+
+    const result = await applyPendingActivation(dataDir, logger, new Date('2026-03-01T12:00:00.000Z'), failing);
+    expect(result).toEqual({ activated: false });
+    expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('OLD');
+    expect(await readFile(path.join(dataDir, 'erp.db-wal'), 'utf8')).toBe('OLD-WAL');
+    expect(await readdir(path.join(dataDir, 'files'))).toEqual(['attOLD']);
+    expect(await readFile(path.join(staging, 'erp.db'), 'utf8')).toBe('NEW');
+    expect(await readdir(path.join(staging, 'files'))).toEqual(['attNEW']);
+    // Marker gone, no (empty) backup dir left behind.
+    expect((await readdir(dataDir)).sort()).toEqual(['erp.db', 'erp.db-wal', 'files', 'import-1']);
+    expect(errors.map((e) => e.message)).toEqual([expect.stringContaining('activation failed')]);
   });
 });
 
