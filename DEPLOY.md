@@ -100,6 +100,17 @@ Use this admin to smoke-test the deployment. The import in section 9 replaces al
 
 After the frontend switch, or with a REST client and the session cookie:
 
+> **REST clients must send `Origin`.** Every `POST`, `PUT`, `PATCH` and `DELETE`, including the login
+> `POST /api/auth`, must carry `Origin: https://<domain>` (exactly `PUBLIC_ORIGIN`); otherwise the
+> server answers `403 FORBIDDEN "Anfrage von fremder Herkunft abgelehnt"`. Browsers add the header by
+> themselves; curl and Postman do not, so add it to every such request. `GET` requests only need the cookie:
+>
+> ```
+> curl -c jar.txt -H "Origin: https://<domain>" -H "Content-Type: application/json" \
+>   -d '{"user_key":"<login key>"}' https://<domain>/api/auth
+> curl -b jar.txt https://<domain>/api/me
+> ```
+
 - **Freshdesk:** open a ticket in the app. Check that `GET /api/freshdesk/api/v2/tickets/<id>` works.
 - **Attachment proxy:** open a ticket with an image attachment and use an AI summary that needs
   the image. If the server answers `403 Domain nicht erlaubt: <host>`, add that host to
@@ -148,7 +159,13 @@ After the frontend switch, or with a REST client and the session cookie:
      a new key for each user, yourself included, under Admin → Benutzer
      (`PATCH /api/admin/users/<id>/secrets` with `{"generate_api_key": true}`), then end that
      user's sessions (`POST /api/sessions/revoke-user` with `{"user_id": "<id>"}`). Hand each new
-     key over in person or by phone.
+     key over in person or by phone. From a REST client, both calls need the session cookie and the
+     `Origin: https://<domain>` header (see section 8), for example:
+
+     ```
+     curl -b jar.txt -X PATCH -H "Origin: https://<domain>" -H "Content-Type: application/json" \
+       -d '{"generate_api_key":true}' https://<domain>/api/admin/users/<id>/secrets
+     ```
 9. Keep the Airtable bases untouched as an archive.
 
 ## Local development
