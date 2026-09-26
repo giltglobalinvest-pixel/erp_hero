@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -56,19 +56,21 @@ const tableData: Record<string, AirtableApiRecord[]> = {
     { id: rid(700), createdTime: '2025-01-01T00:00:00.000Z', fields: { invoice_no: 'R-1001', company_id: rid(900), customer_id: rid(999) } },
     { id: rid(701), createdTime: '2025-01-02T00:00:00.000Z', fields: { invoice_no: 'R-1001', company_id: rid(900) } },
   ],
-  Attachment: [
-    {
-      id: rid(600),
-      createdTime: '2025-01-01T00:00:00.000Z',
-      fields: {
-        name: 'Datenblatt',
-        file: [{ id: 'attAAAAAAAAAAAAAA', url: 'https://v5.airtableusercontent.com/ok', filename: 'blatt.pdf', size: 3, type: 'application/pdf' }],
-      },
-    },
-  ],
+  Attachment: [attachmentRecord('attAAAAAAAAAAAAAA')],
 };
 
-function fakeAirtable(options: { failDownload?: boolean } = {}) {
+function attachmentRecord(attachmentId: string): AirtableApiRecord {
+  return {
+    id: rid(600),
+    createdTime: '2025-01-01T00:00:00.000Z',
+    fields: {
+      name: 'Datenblatt',
+      file: [{ id: attachmentId, url: 'https://v5.airtableusercontent.com/ok', filename: 'blatt.pdf', size: 3, type: 'application/pdf' }],
+    },
+  };
+}
+
+function fakeAirtable(options: { failDownload?: boolean; attachmentId?: string } = {}) {
   const fake = new FakeFetch();
   fake.on('GET', `https://api.airtable.com/v0/meta/bases/${APP}/tables`, () =>
     jsonResponse({
@@ -81,7 +83,7 @@ function fakeAirtable(options: { failDownload?: boolean } = {}) {
   fake.on('GET', `https://api.airtable.com/v0/${APP}/`, (call) => {
     const url = new URL(call.url);
     const table = decodeURIComponent(url.pathname.split('/').pop() ?? '');
-    const rows = tableData[table] ?? [];
+    const rows = table === 'Attachment' && options.attachmentId ? [attachmentRecord(options.attachmentId)] : (tableData[table] ?? []);
     const start = Number(url.searchParams.get('offset') ?? '0');
     const page = rows.slice(start, start + 100);
     return jsonResponse({ records: page, ...(start + 100 < rows.length ? { offset: String(start + 100) } : {}) });
@@ -167,6 +169,22 @@ describe('runImport', () => {
       { id: 'attAAAAAAAAAAAAAA', url: '/api/files/attAAAAAAAAAAAAAA/blatt.pdf', filename: 'blatt.pdf', size: 3, type: 'application/pdf' },
     ]);
     expect((await readFile(path.join(staging, 'files', 'attAAAAAAAAAAAAAA', 'blatt.pdf'))).toString()).toBe('PDF');
+    db.close();
+  });
+
+  it('never uses an untrusted attachment id as a path segment', async () => {
+    // Airtable's id becomes files/<id>/<name>; a hostile one would otherwise write outside the staging dir.
+    const report = await run(fakeAirtable({ attachmentId: '../../escaped' }));
+    expect(await readdir(base)).toEqual(['import-1']);
+    expect(report.attachments).toEqual({ downloaded: 1, bytes: 3, failed: [] });
+    const db = await openDatabase(path.join(staging, 'erp.db'));
+    const [row] = await db.query('SELECT id, path FROM files');
+    expect(String(row?.path)).toMatch(/^files\/att[A-Za-z0-9]{14}\/blatt\.pdf$/);
+    expect((await readFile(path.join(staging, String(row?.path)))).toString()).toBe('PDF');
+    // The field value points at the file under its new id.
+    expect((await new RecordStore(db).get('Attachment', rid(600)))?.fields.file).toEqual([
+      { id: row?.id, url: `/api/files/${String(row?.id)}/blatt.pdf`, filename: 'blatt.pdf', size: 3, type: 'application/pdf' },
+    ]);
     db.close();
   });
 

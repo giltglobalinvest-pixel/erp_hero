@@ -10,7 +10,7 @@ import type { AppDeps } from '../deps.js';
 import { isPlainObject, limit, MB, readJsonBody } from '../http/body.js';
 import type { AppEnv } from '../types.js';
 import { ApiError } from '../util/errors.js';
-import { newAttachmentId } from '../util/ids.js';
+import { isAttachmentId, newAttachmentId } from '../util/ids.js';
 import { loadPublicExtras, toPublicRecord } from './public.js';
 import { attachmentFieldRule, isTableName, type TableName } from './tables.js';
 
@@ -83,7 +83,8 @@ export class FileStore {
   ) {}
 
   async save(tx: Executor, input: SaveFileInput): Promise<AttachmentValue> {
-    const id = input.id ?? newAttachmentId();
+    // The id becomes a path segment, so only a well-formed one is kept (Airtable ids come from outside).
+    const id = isAttachmentId(input.id) ? input.id : newAttachmentId();
     const filename = sanitizeFilename(input.filename);
     const relative = path.posix.join('files', id, filename);
     await mkdir(path.join(this.dataDir, 'files', id), { recursive: true });

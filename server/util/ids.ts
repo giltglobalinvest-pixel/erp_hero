@@ -20,3 +20,6 @@ export const newSessionToken = (): string => randomBytes(32).toString('base64url
 
 export const isRecordId = (value: unknown): value is string =>
   typeof value === 'string' && /^rec[A-Za-z0-9]{14}$/.test(value);
+
+export const isAttachmentId = (value: unknown): value is string =>
+  typeof value === 'string' && /^att[A-Za-z0-9]{14}$/.test(value);
