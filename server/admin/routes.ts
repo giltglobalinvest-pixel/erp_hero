@@ -86,11 +86,31 @@ export function adminRoutes(deps: AppDeps): Hono<AppEnv> {
     return c.json({ has_mailchimp_key: key !== null });
   });
 
-  app.get('/backup', async () => {
+  app.get('/backup', async (c) => {
+    // Aborts when the client disconnects before or during the response, never on normal completion.
+    const signal = c.req.raw.signal;
+    const requestId = c.get('requestId');
     const archive = await createBackupArchive(deps.db, deps.records, deps.config.dataDir, new Date(deps.now()));
     const { size } = await stat(archive.file);
+    if (signal.aborted) {
+      // Nobody will read the stream, so the server would never close it or remove the archive.
+      await archive.cleanup();
+      deps.logger.info({ requestId, message: 'backup abandoned: client disconnected while the archive was being prepared' });
+      return c.body(null, 204);
+    }
     const stream = createReadStream(archive.file);
     stream.on('close', () => void archive.cleanup());
+    // No await between the check above and this listener, or an abort in between would be missed.
+    signal.addEventListener(
+      'abort',
+      () => {
+        // Also fires when the client closes its connection after the complete response; the stream is done by then.
+        if (stream.destroyed) return;
+        deps.logger.info({ requestId, message: 'backup abandoned: client disconnected during the download' });
+        stream.destroy();
+      },
+      { once: true },
+    );
     return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, {
       headers: {
         'content-type': 'application/gzip',

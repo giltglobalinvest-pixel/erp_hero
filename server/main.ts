@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
 import { applyPendingActivation } from './activation.js';
+import { sweepStaleBackupDirs } from './admin/backup.js';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
@@ -14,6 +15,13 @@ async function main(): Promise<void> {
   const config = loadConfig(process.env, process.cwd());
   await mkdir(config.dataDir, { recursive: true });
   await applyPendingActivation(config.dataDir, jsonLogger);
+  // Safe only here: a service with a volume runs as a single instance, so no download is in progress.
+  await sweepStaleBackupDirs(config.dataDir).then(
+    (removed) => {
+      if (removed.length > 0) jsonLogger.info({ message: 'removed stale backup temp dirs', dirs: removed });
+    },
+    (err: unknown) => jsonLogger.error({ message: 'sweep of stale backup temp dirs failed', error: err instanceof Error ? err.message : String(err) }),
+  );
   const db = await openDatabase(path.join(config.dataDir, 'erp.db'));
   await runMigrations(db);
   const deps = buildDeps({ config, db });
