@@ -8,6 +8,7 @@ import { TABLE_NAMES } from '../server/data/tables.js';
 import { openDatabase } from '../server/db/database.js';
 import { AirtableReader, type AirtableApiRecord } from '../server/import/airtable.js';
 import { runImport } from '../server/import/importer.js';
+import { formatReport } from '../server/import/report.js';
 import { SecretStore } from '../server/secrets/store.js';
 import { readSettings } from '../server/settings/store.js';
 import { FakeFetch, jsonResponse } from './helpers/fakeFetch.js';
@@ -70,7 +71,7 @@ function attachmentRecord(attachmentId: string): AirtableApiRecord {
   };
 }
 
-function fakeAirtable(options: { failDownload?: boolean; attachmentId?: string } = {}) {
+function fakeAirtable(options: { failDownload?: boolean; attachmentId?: string; tables?: Record<string, AirtableApiRecord[]> } = {}) {
   const fake = new FakeFetch();
   fake.on('GET', `https://api.airtable.com/v0/meta/bases/${APP}/tables`, () =>
     jsonResponse({
@@ -83,7 +84,8 @@ function fakeAirtable(options: { failDownload?: boolean; attachmentId?: string }
   fake.on('GET', `https://api.airtable.com/v0/${APP}/`, (call) => {
     const url = new URL(call.url);
     const table = decodeURIComponent(url.pathname.split('/').pop() ?? '');
-    const rows = table === 'Attachment' && options.attachmentId ? [attachmentRecord(options.attachmentId)] : (tableData[table] ?? []);
+    const rows =
+      options.tables?.[table] ?? (table === 'Attachment' && options.attachmentId ? [attachmentRecord(options.attachmentId)] : (tableData[table] ?? []));
     const start = Number(url.searchParams.get('offset') ?? '0');
     const page = rows.slice(start, start + 100);
     return jsonResponse({ records: page, ...(start + 100 < rows.length ? { offset: String(start + 100) } : {}) });
@@ -208,6 +210,23 @@ describe('runImport', () => {
     expect(report.ok).toBe(true);
     const saved = JSON.parse(await readFile(path.join(staging, 'import-report.json'), 'utf8'));
     expect(saved.tables.Customer).toEqual({ airtable: 150, imported: 150 });
+  });
+
+  it('reports users sharing one login key in login precedence order, without the key itself', async () => {
+    const SHARED = 'sharedkey1234567890abcd';
+    // The older user (created earlier) wins at login, even though her id sorts later and Airtable lists her second.
+    const users: AirtableApiRecord[] = [
+      { id: rid(800), createdTime: '2024-06-01T00:00:00.000Z', fields: { name: 'Bernd', status: 'aktiv', api_key: SHARED } },
+      { id: rid(802), createdTime: '2023-01-01T00:00:00.000Z', fields: { name: 'Anna', status: 'aktiv', api_key: SHARED } },
+      { id: rid(801), createdTime: '2023-01-01T00:00:00.000Z', fields: { name: 'Carla', status: 'aktiv', api_key: 'carlasownkey1234567890ab' } },
+    ];
+    const report = await run(fakeAirtable({ tables: { User: users } }));
+    expect(report.duplicateLoginKeys).toEqual([[rid(802), rid(800)]]);
+    expect(report.ok).toBe(true);
+    expect(formatReport(report)).toContain('demselben Login-Key');
+    expect(formatReport(report)).toContain(`${rid(802)}, ${rid(800)}`);
+    expect(JSON.stringify(report)).not.toMatch(/sharedkey|carlasownkey/);
+    expect(await readFile(path.join(staging, 'import-report.json'), 'utf8')).not.toMatch(/sharedkey|carlasownkey/);
   });
 
   it('marks the import as not ok when an attachment cannot be downloaded', async () => {

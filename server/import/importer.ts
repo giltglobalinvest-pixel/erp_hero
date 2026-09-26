@@ -64,11 +64,15 @@ export async function runImport(o: ImportOptions): Promise<ImportReport> {
     const secrets = new SecretStore(db, o.secretsKey);
     const files = new FileStore(db, o.stagingDir, now);
     const stripped = new Set<string>();
+    // Plaintext login keys are only compared with each other here; they are never stored or reported.
+    const usersByKey = new Map<string, string[]>();
 
     const importUserSecrets = async (tx: Executor, userId: string, fields: Record<string, unknown>) => {
       const apiKey = fields.api_key;
       if (typeof apiKey === 'string' && apiKey.trim() !== '') {
-        await secrets.setApiKeyHash(tx, userId, await hashLoginKey(apiKey.trim()));
+        const key = apiKey.trim();
+        await secrets.setApiKeyHash(tx, userId, await hashLoginKey(key));
+        usersByKey.set(key, [...(usersByKey.get(key) ?? []), userId]);
       }
       const fdDefault = fields.freshdesk_api_key;
       if (typeof fdDefault === 'string' && fdDefault.trim() !== '') {
@@ -230,7 +234,13 @@ export async function runImport(o: ImportOptions): Promise<ImportReport> {
       }
     }
     const hashes = await secrets.apiKeyHashes();
-    report.usersWithoutKey = (all.get('User') ?? []).filter((u) => !hashes.has(u.id)).map((u) => u.id);
+    const users = all.get('User') ?? [];
+    report.usersWithoutKey = users.filter((u) => !hashes.has(u.id)).map((u) => u.id);
+    // Login picks the first match in list order (created_time, id), so with a shared key only the oldest user gets in.
+    const precedence = new Map(users.map((u, i) => [u.id, i]));
+    report.duplicateLoginKeys = [...usersByKey.values()]
+      .filter((ids) => ids.length > 1)
+      .map((ids) => [...ids].sort((a, b) => (precedence.get(a) ?? 0) - (precedence.get(b) ?? 0)));
 
     report.finishedAt = new Date(now()).toISOString();
     report.ok = report.countMismatches.length === 0 && report.attachments.failed.length === 0;

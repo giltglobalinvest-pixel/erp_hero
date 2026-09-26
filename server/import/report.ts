@@ -26,6 +26,8 @@ export interface ImportReport {
   danglingLinks: Record<string, { count: number; sample: string[] }>;
   duplicateNumbers: DuplicateNumber[];
   usersWithoutKey: string[];
+  /** Users that share one login key (ids only, never keys), each group in login precedence order: oldest first. */
+  duplicateLoginKeys: string[][];
   strippedSecretFields: string[];
   importedSettings: string[];
   skippedSettingKeys: string[];
@@ -47,6 +49,7 @@ export function emptyReport(startedAt: string): ImportReport {
     danglingLinks: {},
     duplicateNumbers: [],
     usersWithoutKey: [],
+    duplicateLoginKeys: [],
     strippedSecretFields: [],
     importedSettings: [],
     skippedSettingKeys: [],
@@ -81,6 +84,10 @@ export function formatReport(r: ImportReport): string {
     r.duplicateNumbers.map((d) => `${d.type} ${d.number} (Firma ${d.companyId}): ${d.recordIds.join(', ')}`),
   );
   section('Benutzer ohne Login-Key', r.usersWithoutKey);
+  section(
+    'Mehrere Benutzer mit demselben Login-Key (nur der älteste kann sich anmelden)',
+    r.duplicateLoginKeys.map((ids) => ids.join(', ')),
+  );
   section('Entfernte geheime Felder', r.strippedSecretFields);
   section('Übernommene Einstellungen', r.importedSettings);
   section('Nicht übernommene Keys (Secrets → Railway-Variablen bzw. entfallen)', r.skippedSettingKeys);

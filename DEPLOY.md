@@ -138,7 +138,9 @@ After the frontend switch, or with a REST client and the session cookie:
    - record counts must match;
    - failed attachments must be zero;
    - review duplicate document numbers, links to missing records, and calculated Airtable fields
-     (copied as fixed values).
+     (copied as fixed values);
+   - users listed under "Mehrere Benutzer mit demselben Login-Key" share one login key, and only the
+     oldest of them can log in. Give each of them a separate key in step 8.
 5. Activate the import. The old database is kept in `/data/backup-<timestamp>/`.
 
    ```
