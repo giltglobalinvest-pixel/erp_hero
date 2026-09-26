@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AirtableReader } from '../server/import/airtable.js';
-import { FakeFetch, jsonResponse } from './helpers/fakeFetch.js';
+import { FakeFetch, hang, jsonResponse } from './helpers/fakeFetch.js';
 
 function setup() {
   const fake = new FakeFetch();
@@ -81,5 +81,17 @@ describe('AirtableReader', () => {
     expect(file.data.toString()).toBe('PNG');
     expect(file.contentType).toBe('image/png');
     await expect(reader.download('https://v5.airtableusercontent.com/expired')).rejects.toThrow('HTTP 410');
+  });
+
+  it('gives up on a download that stalls', async () => {
+    const fake = new FakeFetch().on('GET', 'https://v5.airtableusercontent.com/stalled', hang);
+    const reader = new AirtableReader({ token: 'pat-read-only', fetch: fake.fetch, downloadTimeoutMs: 10 });
+    await expect(reader.download('https://v5.airtableusercontent.com/stalled')).rejects.toThrow(/timeout/i);
+  });
+
+  it('gives up on an API request that stalls', async () => {
+    const fake = new FakeFetch().on('GET', 'https://api.airtable.com/v0/appX/Stalled', hang);
+    const reader = new AirtableReader({ token: 'pat-read-only', fetch: fake.fetch, minIntervalMs: 0, requestTimeoutMs: 10 });
+    await expect(reader.listRecords('appX', 'Stalled')).rejects.toThrow(/timeout/i);
   });
 });

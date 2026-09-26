@@ -29,9 +29,15 @@ export interface AirtableReaderOptions {
   /** Airtable asks clients to wait 30 s after a 429. */
   retryWaitMs?: number;
   maxRetries?: number;
+  /** Give up on one API request (headers and body) after this long. */
+  requestTimeoutMs?: number;
+  /** Give up on one attachment download (headers and body) after this long. */
+  downloadTimeoutMs?: number;
 }
 
 const API = 'https://api.airtable.com/v0';
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 600_000;
 
 /** Read-only Airtable client for the one-time import. It only ever sends GET requests. */
 export class AirtableReader {
@@ -54,7 +60,9 @@ export class AirtableReader {
     const maxRetries = this.o.maxRetries ?? 3;
     for (let attempt = 0; ; attempt++) {
       await this.throttle();
-      const res = await this.o.fetch(url, { method: 'GET', headers: { authorization: `Bearer ${this.o.token}` } });
+      // A peer that trickles bytes would otherwise stall the import forever; the signal also covers reading the body.
+      const signal = AbortSignal.timeout(this.o.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+      const res = await this.o.fetch(url, { method: 'GET', headers: { authorization: `Bearer ${this.o.token}` }, signal });
       if (res.status === 429 && attempt < maxRetries) {
         await this.sleep(this.o.retryWaitMs ?? 30_000);
         continue;
@@ -90,7 +98,8 @@ export class AirtableReader {
 
   /** Downloads an attachment from its (expiring) Airtable URL. */
   async download(url: string): Promise<{ data: Buffer; contentType: string }> {
-    const res = await this.o.fetch(url, { method: 'GET' });
+    const signal = AbortSignal.timeout(this.o.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS);
+    const res = await this.o.fetch(url, { method: 'GET', signal });
     if (!res.ok) throw new Error(`Download failed with HTTP ${res.status}`);
     return {
       data: Buffer.from(await res.arrayBuffer()),
