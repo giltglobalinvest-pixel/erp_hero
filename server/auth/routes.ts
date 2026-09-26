@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import type { StoredRecord } from '../data/records.js';
 import type { AppDeps } from '../deps.js';
 import { limit, readJsonBody } from '../http/body.js';
 import type { AppEnv } from '../types.js';
@@ -29,17 +30,23 @@ export function publicAuthRoutes(deps: AppDeps): Hono<AppEnv> {
   // The only route that reads a body before authentication: keep it small ({user_key, long_lived}).
   app.post('/auth', limit(16 * 1024), async (c) => {
     const ip = clientIp(c);
-    if (deps.limiter.isBlocked(ip)) {
-      throw new ApiError('RATE_LIMITED', 'Zu viele Fehlversuche. Bitte in einigen Minuten erneut versuchen.');
-    }
     const body = await readJsonBody(c);
     const key = typeof body.user_key === 'string' ? body.user_key.trim() : '';
     if (!key) throw new ApiError('INVALID_REQUEST', 'user_key fehlt');
-    const userId = await findUserIdByKey(deps, key);
-    const record = userId ? await deps.records.get('User', userId) : null;
-    if (!record) {
-      deps.limiter.recordFailure(ip);
-      throw new ApiError('UNAUTHENTICATED', 'Ungültiger Login-Key oder Account inaktiv');
+    // Reserved only for well-formed attempts (a 400 does not count) and held while the key is verified,
+    // so a burst of concurrent attempts cannot get around the limit.
+    const end = deps.limiter.begin(ip);
+    if (!end) throw new ApiError('RATE_LIMITED', 'Zu viele Fehlversuche. Bitte in einigen Minuten erneut versuchen.');
+    let record: StoredRecord | null;
+    try {
+      const userId = await findUserIdByKey(deps, key);
+      record = userId ? await deps.records.get('User', userId) : null;
+      if (!record) {
+        deps.limiter.recordFailure(ip);
+        throw new ApiError('UNAUTHENTICATED', 'Ungültiger Login-Key oder Account inaktiv');
+      }
+    } finally {
+      end();
     }
     const longLived = body.long_lived === true;
     const session = await deps.sessions.create(record.id, longLived, c.req.header('user-agent') ?? '');

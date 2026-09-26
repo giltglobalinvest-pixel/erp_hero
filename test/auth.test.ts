@@ -117,6 +117,32 @@ describe('POST /api/auth', () => {
     expect((await login(u.key, {}, { 'x-forwarded-for': '10.9.9.9' })).status).toBe(429);
   });
 
+  const tally = (statuses: number[]) => statuses.reduce<Record<number, number>>((acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }), {});
+
+  it('counts attempts in flight per IP: 20 concurrent wrong keys get 5 × 401 and 15 × 429', async () => {
+    await ctx.createUser();
+    const ip = { 'x-forwarded-for': '198.51.100.7' };
+    const statuses = await Promise.all(Array.from({ length: 20 }, (_, i) => login(`guess-${i}-xxxxxxxxxx`, {}, ip).then((r) => r.status)));
+    expect(tally(statuses)).toEqual({ 401: 5, 429: 15 });
+  });
+
+  it('counts attempts in flight globally: 40 concurrent wrong keys from 40 IPs get 30 × 401 and 10 × 429', async () => {
+    await ctx.createUser();
+    const statuses = await Promise.all(
+      Array.from({ length: 40 }, (_, i) => login(`guess-${i}-yyyyyyyyyy`, {}, { 'x-forwarded-for': `203.0.113.${i}` }).then((r) => r.status)),
+    );
+    expect(tally(statuses)).toEqual({ 401: 30, 429: 10 });
+  });
+
+  it('lets a correct key through after 4 failures but not after 5, and never counts successful logins', async () => {
+    const u = await ctx.createUser();
+    const ip = { 'x-forwarded-for': '198.51.100.99' };
+    for (let i = 0; i < 4; i++) expect((await login('bad-bad-bad-bad', {}, ip)).status).toBe(401);
+    expect((await login(u.key, {}, ip)).status).toBe(200);
+    expect((await login('bad-bad-bad-bad', {}, ip)).status).toBe(401);
+    expect((await login(u.key, {}, ip)).status).toBe(429);
+  });
+
   it('rejects requests from a foreign origin', async () => {
     const u = await ctx.createUser();
     expect((await login(u.key, {}, { origin: 'https://evil.example' })).status).toBe(403);
