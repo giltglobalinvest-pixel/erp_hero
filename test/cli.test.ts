@@ -225,6 +225,51 @@ describe('activation', () => {
     expect(retry).toEqual({ activated: true, backupDir: path.join(dataDir, 'backup-2026-03-02T12-00-00-000Z') });
     expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('NEW');
   });
+
+  // Two independent faults: the staged files/ dir cannot be moved into place (as with EXDEV) AND the staged database, by then
+  // in DATA_DIR, cannot be moved back out. The old database must not be renamed onto it: rename(2) would replace it silently.
+  it('keeps a stranded staged database instead of renaming the old one over it, and lists both moves in the order to make them', async () => {
+    const { staging, backupDir, sentinel } = await seedSwap();
+    const errors: Record<string, unknown>[] = [];
+    const logger = { info: () => undefined, error: (e: Record<string, unknown>) => errors.push(e) };
+    const twoFaults = {
+      rename: (from: string, to: string) => {
+        if (from === path.join(staging, 'files')) return Promise.reject(new Error('EXDEV: cross-device link not permitted'));
+        if (from === path.join(dataDir, 'erp.db') && to === path.join(staging, 'erp.db')) return Promise.reject(new Error('EBUSY: resource busy or locked'));
+        return rename(from, to);
+      },
+    };
+
+    await expect(applyPendingActivation(dataDir, logger, at, twoFaults)).rejects.toThrow(sentinel);
+    // The staged database is still where the swap left it and the old one still in the backup dir: nothing was replaced.
+    expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('NEW');
+    expect(await readFile(path.join(backupDir, 'erp.db'), 'utf8')).toBe('OLD');
+    expect(await readFile(path.join(dataDir, 'erp.db-wal'), 'utf8')).toBe('OLD-WAL');
+    expect(await readdir(path.join(dataDir, 'files'))).toEqual(['attOLD']);
+    expect(await readdir(path.join(staging, 'files'))).toEqual(['attNEW']);
+    expect((await readdir(dataDir)).sort()).toEqual([ACTIVATION_FAILED_MARKER, 'backup-2026-03-01T12-00-00-000Z', 'erp.db', 'erp.db-wal', 'files', 'import-1']);
+    // The sentinel lists the stranded staged entry first and the old one second: made in that order, the moves restore everything.
+    const moves: [from: string, to: string, error: string][] = [
+      [path.join(dataDir, 'erp.db'), path.join(staging, 'erp.db'), 'EBUSY: resource busy or locked'],
+      [path.join(backupDir, 'erp.db'), path.join(dataDir, 'erp.db'), 'destination already exists'],
+    ];
+    const note = await readFile(sentinel, 'utf8');
+    expect([...note.matchAll(/^ {2}(.+) -> (.+) \((.+)\)$/gm)].map((m) => m.slice(1))).toEqual(moves);
+    expect(note).toMatch(/in the listed order/);
+    expect(errors.filter((e) => e.message === 'activation rollback: entry could not be moved back, restore it by hand').map((e) => e.error)).toEqual(moves.map((m) => m[2]));
+
+    // What the sentinel tells the operator to do, in the listed order: the staged database out of the way, then the old one back.
+    for (const [from, to] of moves) await rename(from, to);
+    await rm(sentinel);
+
+    expect(await applyPendingActivation(dataDir, silent, at)).toEqual({ activated: false });
+    expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('OLD');
+    expect(await readFile(path.join(dataDir, 'erp.db-wal'), 'utf8')).toBe('OLD-WAL');
+    expect(await readdir(path.join(dataDir, 'files'))).toEqual(['attOLD']);
+    expect(await readFile(path.join(staging, 'erp.db'), 'utf8')).toBe('NEW');
+    expect(await readdir(path.join(staging, 'files'))).toEqual(['attNEW']);
+    expect(await readdir(backupDir)).toEqual([]);
+  });
 });
 
 describe('import:airtable', () => {

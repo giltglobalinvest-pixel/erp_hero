@@ -91,11 +91,15 @@ export async function applyPendingActivation(
   } catch (err) {
     // Undo in reverse order and carry on past a failed step: the data stays where it is, never deleted.
     const stuck: { from: string; to: string; error: string }[] = [];
+    const leave = (from: string, to: string, error: string) => {
+      stuck.push({ from, to, error });
+      logger.error({ message: 'activation rollback: entry could not be moved back, restore it by hand', from, to, error });
+    };
     for (const [from, to] of moved.reverse()) {
-      await fs.rename(to, from).catch((e: unknown) => {
-        stuck.push({ from: to, to: from, error: errorMessage(e) });
-        logger.error({ message: 'activation rollback: entry could not be moved back, restore it by hand', from: to, to: from, error: errorMessage(e) });
-      });
+      // rename(2) silently replaces an existing destination, and the only thing that can be there is a staged entry that an
+      // earlier step of this loop failed to move back. Both are listed instead: moved in that order, they restore everything.
+      if (await exists(from)) leave(to, from, 'destination already exists');
+      else await fs.rename(to, from).catch((e: unknown) => leave(to, from, errorMessage(e)));
     }
     if (stuck.length > 0) {
       // The database is incomplete (missing, or without its WAL). Booting on it would create an empty one or lose the
@@ -107,7 +111,7 @@ export async function applyPendingActivation(
         `Backup dir: ${backupDir}`,
         'Entries that could not be moved back (current location -> where they belong):',
         ...stuck.map((s) => `  ${s.from} -> ${s.to} (${s.error})`),
-        `Move them back by hand, then delete this file (${failedMarker}) and restart the server.`,
+        `Move them back by hand, in the listed order, then delete this file (${failedMarker}) and restart the server.`,
         '',
       ].join('\n');
       logger.error({ message: 'activation failed and could not be rolled back, refusing to start', staging, backupDir, sentinel: failedMarker, stuck, error: errorMessage(err) });
