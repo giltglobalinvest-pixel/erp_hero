@@ -3,6 +3,8 @@ import path from 'node:path';
 import type { Logger } from './http/logger.js';
 
 export const ACTIVATION_MARKER = 'activate-pending';
+/** Left behind when a failed swap could not be rolled back completely; the server refuses to start while it exists. */
+export const ACTIVATION_FAILED_MARKER = 'activation-failed';
 const DB_FILES = ['erp.db', 'erp.db-wal', 'erp.db-shm'];
 
 /** The file operations the swap uses; injectable so tests can make one of them fail. */
@@ -40,6 +42,8 @@ export async function scheduleActivation(dataDir: string, stagingDir: string): P
  * Runs at startup BEFORE the database is opened: moves the current database and files
  * into backup-<timestamp>/ and the staged import into place. Never deletes anything.
  * If any step fails, everything already moved is put back and the previous database is kept.
+ * If that rollback fails as well, the function throws and leaves a sentinel file that makes every
+ * later start throw too, until an operator has moved the listed entries back and deleted the file.
  */
 export async function applyPendingActivation(
   dataDir: string,
@@ -47,6 +51,14 @@ export async function applyPendingActivation(
   now: Date = new Date(),
   fs: ActivationFs = { rename },
 ): Promise<{ activated: boolean; backupDir?: string }> {
+  // Checked first, marker or not: opening the database now would create an empty one or drop the WAL.
+  const failedMarker = path.join(dataDir, ACTIVATION_FAILED_MARKER);
+  if (await exists(failedMarker)) {
+    throw new Error(
+      `A previous activation could not be rolled back, so the database in ${dataDir} may be incomplete. ` +
+        `Read ${failedMarker}, move the entries listed there back by hand, then delete that file and restart.`,
+    );
+  }
   const marker = path.join(dataDir, ACTIVATION_MARKER);
   const staging = (await readFile(marker, 'utf8').catch(() => '')).trim();
   if (!staging) return { activated: false };
@@ -77,13 +89,38 @@ export async function applyPendingActivation(
       if (await exists(path.join(staging, name))) await move(path.join(staging, name), path.join(dataDir, name));
     }
   } catch (err) {
-    // Undo in reverse order. A rollback step that fails is only logged: the data stays where it is, never deleted.
+    // Undo in reverse order and carry on past a failed step: the data stays where it is, never deleted.
+    const stuck: { from: string; to: string; error: string }[] = [];
     for (const [from, to] of moved.reverse()) {
       await fs.rename(to, from).catch((e: unknown) => {
+        stuck.push({ from: to, to: from, error: errorMessage(e) });
         logger.error({ message: 'activation rollback: entry could not be moved back, restore it by hand', from: to, to: from, error: errorMessage(e) });
       });
     }
-    // Only an empty backup dir is removed; a failed rollback step may have left data in it.
+    if (stuck.length > 0) {
+      // The database is incomplete (missing, or without its WAL). Booting on it would create an empty one or lose the
+      // last transactions, so the server refuses to start now and on every later start until the sentinel is deleted.
+      const note = [
+        `Activation of ${staging} failed at ${now.toISOString()} and could not be rolled back completely.`,
+        `Swap error: ${errorMessage(err)}`,
+        `Staging dir: ${staging}`,
+        `Backup dir: ${backupDir}`,
+        'Entries that could not be moved back (current location -> where they belong):',
+        ...stuck.map((s) => `  ${s.from} -> ${s.to} (${s.error})`),
+        `Move them back by hand, then delete this file (${failedMarker}) and restart the server.`,
+        '',
+      ].join('\n');
+      logger.error({ message: 'activation failed and could not be rolled back, refusing to start', staging, backupDir, sentinel: failedMarker, stuck, error: errorMessage(err) });
+      await writeFile(failedMarker, note);
+      // Without the marker the next start (after the manual restore) boots the restored database instead of retrying the swap.
+      await rm(marker, { force: true });
+      throw new Error(
+        `Activation failed and ${stuck.length} ${stuck.length === 1 ? 'entry' : 'entries'} could not be moved back, so the database in ${dataDir} is incomplete. ` +
+          `See ${failedMarker} for what to restore by hand, then delete that file and restart.`,
+        { cause: err },
+      );
+    }
+    // Everything is back, so the backup dir is empty; rmdir never removes data.
     await rmdir(backupDir).catch(() => undefined);
     await rm(marker, { force: true });
     logger.error({ message: 'activation failed, previous database kept', staging, error: errorMessage(err) });

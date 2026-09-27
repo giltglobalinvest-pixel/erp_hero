@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from '
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ACTIVATION_MARKER, applyPendingActivation, scheduleActivation } from '../server/activation.js';
+import { ACTIVATION_FAILED_MARKER, ACTIVATION_MARKER, applyPendingActivation, scheduleActivation } from '../server/activation.js';
 import { verifyLoginKey } from '../server/auth/passwords.js';
 import { runDbActivateCli, runImportCli, runUserCreateCli } from '../server/cli/commands.js';
 import { RecordStore } from '../server/data/records.js';
@@ -138,6 +138,92 @@ describe('activation', () => {
     // Marker gone, no (empty) backup dir left behind.
     expect((await readdir(dataDir)).sort()).toEqual(['erp.db', 'erp.db-wal', 'files', 'import-1']);
     expect(errors.map((e) => e.message)).toEqual([expect.stringContaining('activation failed')]);
+  });
+
+  // Double fault: the staged database cannot be moved into place (as with EXDEV) AND one entry cannot leave the backup dir again.
+  const at = new Date('2026-03-01T12:00:00.000Z');
+  const seedSwap = async () => {
+    await writeFile(path.join(dataDir, 'erp.db'), 'OLD');
+    await writeFile(path.join(dataDir, 'erp.db-wal'), 'OLD-WAL');
+    await mkdir(path.join(dataDir, 'files', 'attOLD'), { recursive: true });
+    const staging = path.join(dataDir, 'import-1');
+    await mkdir(path.join(staging, 'files', 'attNEW'), { recursive: true });
+    await writeFile(path.join(staging, 'erp.db'), 'NEW');
+    await writeFile(path.join(dataDir, ACTIVATION_MARKER), staging);
+    const backupDir = path.join(dataDir, 'backup-2026-03-01T12-00-00-000Z');
+    const sentinel = path.join(dataDir, ACTIVATION_FAILED_MARKER);
+    const doubleFault = (stuckInBackup: string) => ({
+      rename: (from: string, to: string) => {
+        if (from === path.join(staging, 'erp.db')) return Promise.reject(new Error('EXDEV: cross-device link not permitted'));
+        if (from === path.join(backupDir, stuckInBackup)) return Promise.reject(new Error('EBUSY: resource busy or locked'));
+        return rename(from, to);
+      },
+    });
+    return { staging, backupDir, sentinel, doubleFault };
+  };
+
+  it('refuses to start, now and on every next start, when the live database cannot be moved back after a failed swap', async () => {
+    const { staging, backupDir, sentinel, doubleFault } = await seedSwap();
+    const errors: Record<string, unknown>[] = [];
+    const logger = { info: () => undefined, error: (e: Record<string, unknown>) => errors.push(e) };
+
+    await expect(applyPendingActivation(dataDir, logger, at, doubleFault('erp.db'))).rejects.toThrow(sentinel);
+    // Nothing deleted: the live database is still in the backup dir, the staged import is untouched, only the marker is gone.
+    expect(await readFile(path.join(backupDir, 'erp.db'), 'utf8')).toBe('OLD');
+    expect(await readFile(path.join(dataDir, 'erp.db-wal'), 'utf8')).toBe('OLD-WAL');
+    expect(await readdir(path.join(dataDir, 'files'))).toEqual(['attOLD']);
+    expect(await readFile(path.join(staging, 'erp.db'), 'utf8')).toBe('NEW');
+    expect((await readdir(dataDir)).sort()).toEqual([ACTIVATION_FAILED_MARKER, 'backup-2026-03-01T12-00-00-000Z', 'erp.db-wal', 'files', 'import-1']);
+    const note = await readFile(sentinel, 'utf8');
+    expect(note).toContain('2026-03-01T12:00:00.000Z');
+    expect(note).toContain(staging);
+    expect(note).toContain(backupDir);
+    expect(note).toContain(`${path.join(backupDir, 'erp.db')} -> ${path.join(dataDir, 'erp.db')}`);
+    expect(note).toMatch(/by hand.*delete this file.*restart/s);
+    expect(errors.at(-1)).toMatchObject({ message: expect.stringContaining('could not be rolled back'), sentinel });
+
+    // The next start (real rename, no marker) must not boot on the incomplete database either, and must not touch anything.
+    await expect(applyPendingActivation(dataDir, silent, at)).rejects.toThrow(sentinel);
+    expect((await readdir(dataDir)).sort()).toEqual([ACTIVATION_FAILED_MARKER, 'backup-2026-03-01T12-00-00-000Z', 'erp.db-wal', 'files', 'import-1']);
+    expect(await readFile(path.join(backupDir, 'erp.db'), 'utf8')).toBe('OLD');
+  });
+
+  it('refuses to start when only the WAL cannot be moved back after a failed swap', async () => {
+    const { backupDir, sentinel, doubleFault } = await seedSwap();
+
+    await expect(applyPendingActivation(dataDir, silent, at, doubleFault('erp.db-wal'))).rejects.toThrow(sentinel);
+    // The database itself came back, but without its WAL the last transactions would be lost: still no start.
+    expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('OLD');
+    expect(await readFile(path.join(backupDir, 'erp.db-wal'), 'utf8')).toBe('OLD-WAL');
+    expect(await readdir(path.join(dataDir, 'files'))).toEqual(['attOLD']);
+    expect((await readdir(dataDir)).sort()).toEqual([ACTIVATION_FAILED_MARKER, 'backup-2026-03-01T12-00-00-000Z', 'erp.db', 'files', 'import-1']);
+    const note = await readFile(sentinel, 'utf8');
+    expect(note).toContain(`${path.join(backupDir, 'erp.db-wal')} -> ${path.join(dataDir, 'erp.db-wal')}`);
+    expect(note).not.toContain(`${path.join(backupDir, 'erp.db')} -> `);
+    await expect(applyPendingActivation(dataDir, silent, at)).rejects.toThrow(/could not be rolled back/);
+  });
+
+  it('starts again on the restored database once the entries are moved back by hand and the sentinel is deleted', async () => {
+    const { staging, backupDir, sentinel, doubleFault } = await seedSwap();
+    await expect(applyPendingActivation(dataDir, silent, at, doubleFault('erp.db'))).rejects.toThrow(sentinel);
+
+    // What the sentinel tells the operator to do.
+    await rename(path.join(backupDir, 'erp.db'), path.join(dataDir, 'erp.db'));
+    await rm(sentinel);
+
+    expect(await applyPendingActivation(dataDir, silent, at)).toEqual({ activated: false });
+    expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('OLD');
+    expect(await readFile(path.join(dataDir, 'erp.db-wal'), 'utf8')).toBe('OLD-WAL');
+    expect(await readdir(path.join(dataDir, 'files'))).toEqual(['attOLD']);
+    // The swap was not retried (marker gone); the import is still there and the emptied backup dir is left for the operator.
+    expect(await readFile(path.join(staging, 'erp.db'), 'utf8')).toBe('NEW');
+    expect(await readdir(backupDir)).toEqual([]);
+
+    // db:activate can be run again if the import is still wanted.
+    await scheduleActivation(dataDir, staging);
+    const retry = await applyPendingActivation(dataDir, silent, new Date('2026-03-02T12:00:00.000Z'));
+    expect(retry).toEqual({ activated: true, backupDir: path.join(dataDir, 'backup-2026-03-02T12-00-00-000Z') });
+    expect(await readFile(path.join(dataDir, 'erp.db'), 'utf8')).toBe('NEW');
   });
 });
 

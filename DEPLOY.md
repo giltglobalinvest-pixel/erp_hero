@@ -148,6 +148,11 @@ After the frontend switch, or with a REST client and the session cookie:
    ```
 
    Then **Restart** the service in the dashboard.
+
+   If the service does not start after the restart and the log says the activation could not be
+   rolled back, run `railway ssh`, read `/data/activation-failed`, move the entries listed there back
+   as described in that file, delete the file, and restart again. The service then runs on the
+   previous database; run `db:activate` again if you still want the import.
 6. Everyone logs in at the new address with their existing login key (replaced in step 8).
 7. Remove the four import variables again, and delete the read-only Airtable token.
 8. **Rotate every key the old setup exposed.** The old `index.html` is public, including in the git history:
