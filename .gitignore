@@ -1,2 +1,11 @@
 # Superpowers skill working files (brainstorm server session tokens, plan workspaces)
 .superpowers/
+
+# Backend
+node_modules/
+dist/
+.data/
+.env
+.env.*
+!.env.example
+*.log
