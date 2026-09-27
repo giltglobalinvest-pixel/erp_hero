@@ -104,7 +104,7 @@ export function adminRoutes(deps: AppDeps): Hono<AppEnv> {
     signal.addEventListener(
       'abort',
       () => {
-        // Also fires when the client closes its connection after the complete response; the stream is done by then.
+        // Defensive: a stream that has already finished or been destroyed has nothing left to abandon.
         if (stream.destroyed) return;
         deps.logger.info({ requestId, message: 'backup abandoned: client disconnected during the download' });
         stream.destroy();

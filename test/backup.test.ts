@@ -109,8 +109,8 @@ describe('GET /api/admin/backup when the client disconnects', () => {
   });
 
   it('does not report a completed download as abandoned when the connection closes afterwards', async () => {
-    // @hono/node-server also aborts the request signal when a client closes its connection after the
-    // complete response (curl does; browsers may, once the connection goes idle).
+    // Pins that a completed download is never logged as abandoned, whatever happens to the request signal
+    // afterwards: here the client aborts it once the whole body has been read.
     const client = new AbortController();
     const res = await request(client.signal);
     expect((await res.arrayBuffer()).byteLength).toBe(Number(res.headers.get('content-length')));
