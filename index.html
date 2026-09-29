@@ -14303,13 +14303,22 @@ async function openCompanyModal(id) {
   `);
 }
 
+// Ein Logo-Feld der Firma hält genau eine Datei. Der Server hängt eine hochgeladene Datei hinten an
+// (die Antwort ist der ganze Datensatz, die neue Datei ist darin der letzte Eintrag). Formular und PDFs
+// zeigen aber den ersten Eintrag: darum bleibt nach dem Upload nur die neue Datei im Feld.
+async function _keepOnlyUploadedLogo(id, field, rec) {
+  const list = (rec && rec.fields && rec.fields[field]) || [];
+  if (list.length > 1) await updateData('Company', id, { [field]: [{ id: list[list.length - 1].id }] });
+}
+
 async function uploadCompanyLogo(id, inputEl) {
   const file = inputEl?.files?.[0];
   if (!file) return;
   if (file.size > 5 * 1024 * 1024) { toast('Datei zu groß (max 5 MB)', 'error'); return; }
   toast('Logo wird hochgeladen …', 'info', 1500);
   try {
-    await uploadFileToRecord('Company', id, 'logo', file);
+    const rec = await uploadFileToRecord('Company', id, 'logo', file);
+    await _keepOnlyUploadedLogo(id, 'logo', rec);
     toast('Logo hochgeladen', 'success');
     // Form neu laden, damit das Preview aktualisiert
     closeModal();
@@ -14337,7 +14346,8 @@ async function uploadCompanySecondaryLogo(id, inputEl) {
   if (file.size > 5 * 1024 * 1024) { toast('Datei zu groß (max 5 MB)', 'error'); return; }
   toast('2. Logo wird hochgeladen …', 'info', 1500);
   try {
-    await uploadFileToRecord('Company', id, 'secondary_logo', file);
+    const rec = await uploadFileToRecord('Company', id, 'secondary_logo', file);
+    await _keepOnlyUploadedLogo(id, 'secondary_logo', rec);
     toast('2. Logo hochgeladen', 'success');
     closeModal();
     setTimeout(() => openCompanyModal(id), 80);
@@ -14364,7 +14374,8 @@ async function uploadCompanySubLogo(id, inputEl) {
   if (file.size > 5 * 1024 * 1024) { toast('Datei zu groß (max 5 MB)', 'error'); return; }
   toast('Sub-Logo wird hochgeladen …', 'info', 1500);
   try {
-    await uploadFileToRecord('Company', id, 'sub_logo', file);
+    const rec = await uploadFileToRecord('Company', id, 'sub_logo', file);
+    await _keepOnlyUploadedLogo(id, 'sub_logo', rec);
     toast('Sub-Logo hochgeladen', 'success');
     closeModal();
     setTimeout(() => openCompanyModal(id), 80);

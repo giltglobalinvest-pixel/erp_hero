@@ -1,3 +1,4 @@
+import type { Page } from 'playwright-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { startHarness, type Harness } from './harness.js';
 
@@ -17,6 +18,26 @@ const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
   'base64',
 );
+
+// The Company form's logo fields: file input and preview image.
+const LOGO_FIELDS = [
+  { field: 'logo', input: '#logoUpload', alt: 'Logo' },
+  { field: 'secondary_logo', input: '#secondaryLogoUpload', alt: '2. Logo' },
+  { field: 'sub_logo', input: '#subLogoUpload', alt: 'Sub-Logo' },
+] as const;
+
+// The upload handlers close the form and reopen it after 80 ms: wait for the fresh, empty file input and a loaded preview.
+const uploadAndWaitForReopen = async (page: Page, input: string, alt: string, name: string): Promise<void> => {
+  await page.setInputFiles(input, { name, mimeType: 'image/png', buffer: PNG });
+  await page.waitForFunction(
+    ([input, alt]) => {
+      const el = document.querySelector<HTMLInputElement>('#modalBox ' + input);
+      const img = document.querySelector<HTMLImageElement>(`#modalBox img[alt="${alt}"]`);
+      return !!el && el.files?.length === 0 && !!img && img.complete && img.naturalWidth > 0;
+    },
+    [input, alt],
+  );
+};
 
 describe('files', () => {
   it('an admin uploads a company logo through the form, its URL serves the image, and removing it works', async () => {
@@ -45,6 +66,38 @@ describe('files', () => {
     await page.waitForFunction(
       () => !!document.querySelector('#modalBox #logoUpload') && !document.querySelector('#modalBox img[alt="Logo"]'),
     );
+    await h.assertClean(page);
+  });
+
+  it('a replacement logo replaces the old one: form preview, quote PDF and the stored field show only the new file', async () => {
+    const id = h.companies.beta;
+    const page = await h.newPage();
+    await h.openApp(page, 'admin');
+    await h.run(page, `await openCompanyModal(${JSON.stringify(id)});`);
+    // For each field, the admin uploads alt.png and then picks neu.png in the same form, as the form offers.
+    for (const { input, alt } of LOGO_FIELDS) {
+      await uploadAndWaitForReopen(page, input, alt, 'alt.png');
+      await uploadAndWaitForReopen(page, input, alt, 'neu.png');
+    }
+    const previews: Record<string, string | undefined> = {};
+    for (const { field, alt } of LOGO_FIELDS) {
+      previews[field] = (await page.getAttribute(`#modalBox img[alt="${alt}"]`, 'src'))?.split('/').pop();
+    }
+    // What a quote PDF opened now would render as its logo (the quote editor reads the Company record fresh).
+    const pdfLogo = await h.run<string | undefined>(
+      page,
+      `const c = (await readData('Company')).find((r) => r.id === ${JSON.stringify(id)}).fields;
+       return (buildQuoteLogoHtml(c, 40).match(/src="([^"]*)"/) || [])[1]?.split('/').pop();`,
+    );
+    const record = (await h.deps.records.get('Company', id))?.fields ?? {};
+    const stored: Record<string, string[]> = {};
+    for (const { field } of LOGO_FIELDS) stored[field] = ((record[field] ?? []) as { filename: string }[]).map((a) => a.filename);
+
+    expect({ previews, pdfLogo, stored }).toEqual({
+      previews: { logo: 'neu.png', secondary_logo: 'neu.png', sub_logo: 'neu.png' },
+      pdfLogo: 'neu.png',
+      stored: { logo: ['neu.png'], secondary_logo: ['neu.png'], sub_logo: ['neu.png'] },
+    });
     await h.assertClean(page);
   });
 
