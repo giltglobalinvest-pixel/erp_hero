@@ -1410,7 +1410,7 @@ const API_BASE = '/api';
 const NETWORK_ERROR_TEXT = 'Server nicht erreichbar – bitte Verbindung prüfen';
 
 // Fehlertext aus einer Server- oder Upstream-Antwort, in dieser Reihenfolge:
-// {error:{message}} (unser Server) · {error:"…"} · {message} · {description} (Freshdesk) · Rohtext · HTTP-Status
+// {error:{message}} (unser Server) · {error:"…"} · {message} · {description} (Freshdesk) · Rohtext (kein HTML) · HTTP-Status
 function _errorMessageFrom(data, text, status) {
   if (data && typeof data === 'object') {
     if (data.error && typeof data.error === 'object' && data.error.message) return String(data.error.message);
@@ -1418,7 +1418,8 @@ function _errorMessageFrom(data, text, status) {
     if (typeof data.message === 'string' && data.message) return data.message;
     if (typeof data.description === 'string' && data.description) return data.description;
   }
-  if (text) return text.slice(0, 200);
+  // HTML (z.B. die 502-Seite eines Proxys) gehört nicht in eine Fehlermeldung.
+  if (text && !text.trim().startsWith('<')) return text.slice(0, 200);
   return 'HTTP ' + status;
 }
 
@@ -1446,9 +1447,16 @@ async function _api(method, path, { body, headers, keepalive, reauth = true } = 
     throw new Error(NETWORK_ERROR_TEXT);
   }
   const ct = res.headers.get('content-type') || '';
-  const text = await res.text().catch(() => '');
+  // Body nicht lesbar: bei 2xx ein Verbindungsfehler, sonst zählt der Status.
+  let text = '';
+  try {
+    text = await res.text();
+  } catch (_) {
+    if (res.ok) throw new Error(NETWORK_ERROR_TEXT);
+  }
   let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
+  let invalidJson = false;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { invalidJson = true; }
   if (!res.ok) {
     const type = data && data.error && typeof data.error === 'object' ? data.error.type : undefined;
     // Sitzung abgelaufen: neu anmelden (Overlay) und den Aufruf genau einmal wiederholen.
@@ -1464,7 +1472,10 @@ async function _api(method, path, { body, headers, keepalive, reauth = true } = 
     err.text = text;
     throw err;
   }
-  return ct.includes('application/json') ? data : text;
+  const isJson = ct.includes('application/json');
+  // Kaputtes JSON in einer 2xx-Antwort ist ein Fehler, keine leere Antwort.
+  if (isJson && invalidJson) throw new Error('Ungültige Antwort vom Server');
+  return isJson ? data : text;
 }
 
 // Platzhalter bis zum Re-Login-Overlay: eine abgelaufene Sitzung ist ein normaler Fehler.

@@ -72,6 +72,28 @@ describe('data helpers', () => {
     await h.assertClean(page);
   });
 
+  it('rejects a 2xx response whose JSON body cannot be parsed', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    await page.route('**/api/data/Bad', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '<<not json>>' }),
+    );
+    const err = await h.runError(page, `await readData('Bad')`);
+    expect(err.message).toBe('Lesen fehlgeschlagen: Ungültige Antwort vom Server');
+    await h.assertClean(page);
+  });
+
+  it('shows the HTTP status instead of an HTML error page', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    await page.route('**/api/data/Bad', (route) =>
+      route.fulfill({ status: 502, contentType: 'text/html', body: '<!DOCTYPE html><html><body>Bad Gateway</body></html>' }),
+    );
+    const err = await h.runError(page, `await readData('Bad')`);
+    expect(err).toEqual({ message: 'Lesen fehlgeschlagen: HTTP 502', status: 502 });
+    await h.assertClean(page);
+  });
+
   it('loadCompanies exposes has_mailchimp_key instead of the key', async () => {
     await h.apiAs('admin', 'PATCH', `/api/admin/companies/${h.companies.beta}/secrets`, { mailchimp_api_key: 'mc-key-beta-us21' });
     const page = await h.newPage();
