@@ -14239,7 +14239,7 @@ async function renderAdminUsers() {
   let all = [];
   try {
     all = await readData('User', null, { sort: [{ field: 'name', direction: 'asc' }] });
-  } catch (e) { toast(e.message, 'error'); }
+  } catch (e) { toast(escapeHtml(e.message), 'error'); }
   const html = `
     <div class="max-w-3xl mx-auto">
       <div class="flex items-center justify-between mb-4">
@@ -14262,27 +14262,23 @@ function userRow(rec) {
   const inactive = f.status !== 'aktiv';
   const isAdmin = !!f.is_admin;
   const cnt = (f.allowed_companies || []).length;
-  const hasFreshdeskDefault = !!(f.freshdesk_api_key || '').trim();
-  let fdCompanyCount = 0;
-  try {
-    const raw = (f.freshdesk_keys_json || '').toString().trim();
-    if (raw) {
-      const p = JSON.parse(raw);
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        fdCompanyCount = Object.values(p).filter(v => (v || '').toString().trim()).length;
-      }
-    }
-  } catch (_) {}
+  // Der Server schickt keine Keys, nur ob sie gesetzt sind.
+  const hasFreshdeskDefault = !!f.has_freshdesk_key;
+  const fdCompanyCount = (f.freshdesk_company_keys || []).length;
   const fdBadge = (fdCompanyCount > 0 || hasFreshdeskDefault)
     ? `<span class="text-[10px] uppercase font-bold tracking-wider bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded inline-flex items-center gap-0.5" title="Freshdesk-Keys: ${fdCompanyCount} pro Firma${hasFreshdeskDefault ? ' + Default' : ''}"><i data-lucide="headphones" class="w-2.5 h-2.5"></i> FD${fdCompanyCount > 0 ? ' ' + fdCompanyCount + '×' : ''}${hasFreshdeskDefault ? '+D' : ''}</span>`
     : '';
+  const keyBadge = f.has_api_key
+    ? ''
+    : '<span class="text-[10px] uppercase font-bold tracking-wider bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded" title="Ohne Login-Key kann sich dieser Benutzer nicht anmelden">kein Login-Key</span>';
   return `
-    <div class="flex items-center justify-between p-4">
+    <div class="flex items-center justify-between p-4" data-user-row="${rec.id}">
       <div class="min-w-0">
         <div class="flex items-center gap-2 flex-wrap">
           <p class="font-medium ${inactive ? 'text-ink-500' : 'text-ink-900'} truncate">${escapeHtml(f.name || '–')}</p>
           ${isAdmin ? '<span class="text-[10px] uppercase font-bold tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded">admin</span>' : ''}
           ${fdBadge}
+          ${keyBadge}
         </div>
         <p class="text-xs text-ink-500 mt-0.5 truncate">
           ${escapeHtml(f.role || '—')} · ${cnt} Firma${cnt===1?'':'n'} · ${escapeHtml(f.status || '—')}
@@ -14310,13 +14306,6 @@ function generateApiKey() {
 }
 
 async function openUserModal(id) {
-  // Sicherstellen, dass die FD-Key-Felder in der User-Tabelle existieren
-  // (idempotent — legt nur an, wenn nicht vorhanden)
-  await ensureFields('User', [
-    { name: 'freshdesk_api_key',   type: 'singleLineText' },
-    { name: 'freshdesk_keys_json', type: 'multilineText'  }
-  ]).catch(()=>{});
-
   let f = {};
   if (id) {
     const all = await readData('User');
@@ -14328,16 +14317,10 @@ async function openUserModal(id) {
   } catch (e) {}
   const allowedSet = new Set(f.allowed_companies || []);
 
-  // Per-Firma-Keys aus JSON parsen (robust gegen leeren / kaputten String)
-  let fdKeysByCompany = {};
-  try {
-    const raw = (f.freshdesk_keys_json || '').toString().trim();
-    if (raw) {
-      const p = JSON.parse(raw);
-      if (p && typeof p === 'object' && !Array.isArray(p)) fdKeysByCompany = p;
-    }
-  } catch (_) { /* ignorieren */ }
-  const apiKey = id ? (f.api_key || '') : generateApiKey();
+  // Der Server schickt keine Keys, nur ob sie gesetzt sind (Firmen-IDs mit eigenem Freshdesk-Key).
+  const fdCompanyKeys = new Set(f.freshdesk_company_keys || []);
+  // Neuer Benutzer: Key vorbelegen. Bestehender Benutzer: Feld leer = Key bleibt.
+  const apiKey = id ? '' : generateApiKey();
   const companiesHtml = companies.length === 0
     ? '<p class="text-xs text-ink-500">Keine aktiven Firmen verfügbar.</p>'
     : companies.map(c => `
@@ -14356,11 +14339,13 @@ async function openUserModal(id) {
       <label class="block text-sm font-medium text-ink-700 mb-1">Rolle</label>
       <input name="role" value="${escapeHtml(f.role || '')}" placeholder="z.B. Buchhaltung" class="w-full mb-3 px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
 
-      <label class="block text-sm font-medium text-ink-700 mb-1">API-Key <span class="text-ink-500 font-normal text-xs">(für Login in der App)</span></label>
-      <div class="flex gap-2 mb-3">
-        <input id="userApiKey" name="api_key" required value="${escapeHtml(apiKey)}" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs">
-        <button type="button" onclick="document.getElementById('userApiKey').value=generateApiKey()" class="px-3 py-2 text-xs rounded-lg border border-ink-200 hover:bg-ink-50">Neu</button>
+      <label class="block text-sm font-medium text-ink-700 mb-1">Login-Key <span id="userApiKeyState" class="text-ink-500 font-normal text-xs">${id ? (f.has_api_key ? '· gespeichert' : '· keiner hinterlegt') : '(für Login in der App)'}</span></label>
+      <div class="flex gap-2 mb-1">
+        <input id="userApiKey" name="api_key" ${id ? '' : 'required'} value="${escapeHtml(apiKey)}" placeholder="${id ? 'leer = unverändert' : ''}" autocomplete="off" class="flex-1 px-3 py-2 border border-ink-200 rounded-lg font-mono text-xs">
+        <button type="button" id="userApiKeyNew" onclick="document.getElementById('userApiKey').value=generateApiKey()" class="px-3 py-2 text-xs rounded-lg border border-ink-200 hover:bg-ink-50">Neu</button>
+        <button type="button" id="userApiKeyCopy" onclick="copyToClipboard(document.getElementById('userApiKey').value, this)" class="px-3 py-2 text-xs rounded-lg border border-ink-200 hover:bg-ink-50">Kopieren</button>
       </div>
+      <p class="text-[11px] text-ink-500 mb-3 leading-snug">Der Server speichert nur einen Hash. Den Key jetzt kopieren und dem Benutzer geben — nach dem Speichern ist er nicht mehr zu sehen. Mindestens 12 Zeichen.</p>
 
       <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 mb-3">
         <label class="block text-sm font-medium text-ink-900 mb-1 flex items-center gap-1.5"><i data-lucide="headphones" class="w-3.5 h-3.5 text-emerald-700"></i> Freshdesk API-Keys <span class="text-ink-500 font-normal text-xs">(persönlich · pro Firma)</span></label>
@@ -14373,12 +14358,11 @@ async function openUserModal(id) {
         <!-- Per-Firma-Keys (alle aktiven Firmen, damit Admin Keys auch
              vor Firma-Zuweisung eintragen kann) -->
         ${companies.length === 0 ? '<p class="text-[11px] text-ink-500 italic mb-2">Keine aktiven Firmen vorhanden.</p>' : companies.map(c => {
-          const existing = (fdKeysByCompany[c.id] || '').toString().trim();
-          const masked = existing ? _maskSecret(existing) : '';
+          const existing = fdCompanyKeys.has(c.id);
           return `
-            <div class="mb-2">
+            <div class="mb-2" data-fd-company="${c.id}">
               <label class="block text-[11px] font-medium text-ink-700 mb-0.5">${escapeHtml(c.fields.name || '–')}</label>
-              ${existing ? `<p class="text-[10px] text-ink-500 font-mono mb-1">aktuell: ${escapeHtml(masked)}</p>` : ''}
+              ${existing ? '<p class="text-[10px] text-emerald-700 mb-1">Key gespeichert</p>' : ''}
               <input type="password" name="fd_key__${c.id}" value="" placeholder="${existing ? 'leer = beibehalten · neuer Wert überschreibt' : 'leer = Default-Key verwenden'}" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
               ${existing ? `<button type="button" onclick="this.closest('div').querySelector('input').value='__CLEAR__'; this.textContent='✓ wird beim Speichern gelöscht'; this.disabled=true;" class="text-[10px] text-red-600 hover:text-red-700 mt-0.5 underline">Diesen Key entfernen</button>` : ''}
             </div>`;
@@ -14387,9 +14371,12 @@ async function openUserModal(id) {
         <!-- Default-Key (Fallback) -->
         <div class="mt-2 pt-2 border-t border-emerald-200">
           <label class="block text-[11px] font-medium text-ink-700 mb-0.5">Default-Key (Fallback) <span class="text-ink-500 font-normal">— wird genutzt, wenn kein firmenspezifischer Key existiert</span></label>
-          ${id && (f.freshdesk_api_key || '').trim() ? `
-            <p class="text-[10px] text-ink-500 font-mono mb-1">aktuell: ${escapeHtml(_maskSecret(f.freshdesk_api_key))}</p>
-            <input type="password" name="freshdesk_api_key" value="" placeholder="leer = beibehalten" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+          ${id && f.has_freshdesk_key ? `
+            <div data-fd-default>
+              <p class="text-[10px] text-emerald-700 mb-1">Key gespeichert</p>
+              <input type="password" name="freshdesk_api_key" value="" placeholder="leer = beibehalten · neuer Wert überschreibt" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+              <button type="button" onclick="this.closest('div').querySelector('input').value='__CLEAR__'; this.textContent='✓ wird beim Speichern gelöscht'; this.disabled=true;" class="text-[10px] text-red-600 hover:text-red-700 mt-0.5 underline">Diesen Key entfernen</button>
+            </div>
           ` : `
             <input type="password" name="freshdesk_api_key" value="" placeholder="optional — z.B. aBcDeFgHiJ123456" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
           `}
@@ -14414,7 +14401,7 @@ async function openUserModal(id) {
 
       <div class="flex justify-between items-center gap-2 flex-wrap">
         <div>
-          ${id ? `<button type="button" onclick="revokeAllSessions('${id}', '${escapeHtml((f.name || '').replace(/'/g, ''))}')" class="text-xs text-red-600 hover:text-red-800 flex items-center gap-1" title="Alle aktiven Browser-Sessions dieses Users im Val.town-Proxy invalidieren"><i data-lucide="log-out" class="w-3.5 h-3.5"></i> Alle Sessions abmelden</button>` : ''}
+          ${id ? `<button type="button" id="userRevokeSessions" onclick="revokeAllSessions('${id}', '${escapeHtml((f.name || '').replace(/'/g, ''))}')" class="text-xs text-red-600 hover:text-red-800 flex items-center gap-1" title="Alle Sitzungen dieses Benutzers auf dem Server beenden"><i data-lucide="log-out" class="w-3.5 h-3.5"></i> Alle Sitzungen abmelden</button>` : ''}
         </div>
         <div class="flex gap-2">
           <button type="button" onclick="closeModal()" class="px-3 py-2 text-sm rounded-lg border border-ink-200 hover:bg-ink-50">Abbrechen</button>
@@ -14428,62 +14415,56 @@ async function openUserModal(id) {
 async function saveUser(e, id) {
   e.preventDefault();
   const fd = new FormData(e.target);
+  // Nicht geheime Felder: normaler Datensatz über /api/data.
   const fields = {
     name:      (fd.get('name') || '').trim(),
     role:      (fd.get('role') || '').trim(),
-    api_key:   (fd.get('api_key') || '').trim(),
     status:    fd.get('status') || 'aktiv',
     is_admin:  fd.get('is_admin') === 'on',
     allowed_companies: fd.getAll('allowed_companies')
   };
-  // Freshdesk Default-Key: leer = nicht ändern (beim Edit), beim Anlegen = nur setzen wenn gefüllt
-  const freshdeskKey = (fd.get('freshdesk_api_key') || '').trim();
-  if (freshdeskKey) fields.freshdesk_api_key = freshdeskKey;
+  if (!fields.name) return toast('Name fehlt', 'error');
 
-  // Per-Firma-Keys einsammeln: alle Form-Inputs mit name="fd_key__<companyId>"
-  // 1) Wenn id vorhanden → bestehendes JSON laden, dann mergen
-  // 2) Wenn input leer → Wert beibehalten
-  // 3) Wenn input == "__CLEAR__" → Key entfernen
-  // 4) Sonst → setzen / überschreiben
-  let existingFdKeys = {};
-  if (id) {
-    try {
-      const all = await readData('User');
-      const cur = all.find(r => r.id === id)?.fields || {};
-      const raw = (cur.freshdesk_keys_json || '').toString().trim();
-      if (raw) existingFdKeys = JSON.parse(raw) || {};
-      if (typeof existingFdKeys !== 'object' || Array.isArray(existingFdKeys)) existingFdKeys = {};
-    } catch (_) { existingFdKeys = {}; }
+  // Keys: getrennt an die Admin-Funktion (der Server speichert Hash bzw. verschlüsselt).
+  // Leeres Feld = unverändert, "__CLEAR__" = Key entfernen.
+  const secrets = {};
+  const apiKey = (fd.get('api_key') || '').trim();
+  if (!id && !apiKey) return toast('Login-Key fehlt', 'error');
+  if (apiKey) {
+    if (apiKey.length < 12) return toast('Login-Key muss mindestens 12 Zeichen haben', 'error');
+    secrets.api_key = apiKey;
   }
-  let fdKeysChanged = false;
+  const fdDefault = (fd.get('freshdesk_api_key') || '').trim();
+  if (fdDefault) secrets.freshdesk_api_key = fdDefault === '__CLEAR__' ? null : fdDefault;
+  const fdKeys = {};
   for (const [name, value] of fd.entries()) {
     if (!name.startsWith('fd_key__')) continue;
-    const companyId = name.slice('fd_key__'.length);
     const v = (value || '').toString().trim();
-    if (v === '') continue; // leer = beibehalten
-    fdKeysChanged = true;
-    if (v === '__CLEAR__') {
-      delete existingFdKeys[companyId];
-    } else {
-      existingFdKeys[companyId] = v;
-    }
+    if (v) fdKeys[name.slice('fd_key__'.length)] = v === '__CLEAR__' ? null : v;
   }
-  if (fdKeysChanged) {
-    fields.freshdesk_keys_json = Object.keys(existingFdKeys).length > 0
-      ? JSON.stringify(existingFdKeys)
-      : '';
-  }
+  if (Object.keys(fdKeys).length > 0) secrets.freshdesk_keys = fdKeys;
 
-  if (!fields.name)    return toast('Name fehlt', 'error');
-  if (!fields.api_key) return toast('API-Key fehlt', 'error');
   if (!id) fields.created = new Date().toISOString().slice(0,10);
+  let userId = id;
   try {
     if (id) await updateData('User', id, fields);
-    else    await writeData('User', fields);
-    closeModal();
-    renderAdminUsers();
-    toast('Gespeichert', 'success');
-  } catch (err) { toast(err.message, 'error'); }
+    else    userId = (await writeData('User', fields)).id;
+  } catch (err) { return toast(escapeHtml(err.message), 'error'); }
+
+  if (Object.keys(secrets).length > 0) {
+    try {
+      await _api('PATCH', '/admin/users/' + encodeURIComponent(userId) + '/secrets', { body: secrets });
+    } catch (err) {
+      if (!id) {
+        await deleteData('User', userId).catch(() => {});
+        return toast('Benutzer nicht angelegt: ' + escapeHtml(err.message), 'error', 8000);
+      }
+      return toast('Benutzer gespeichert, Keys aber nicht: ' + escapeHtml(err.message), 'error', 8000);
+    }
+  }
+  closeModal();
+  renderAdminUsers();
+  toast('Gespeichert', 'success');
 }
 
 async function toggleUserStatus(id, currentlyInactive) {
@@ -14491,34 +14472,20 @@ async function toggleUserStatus(id, currentlyInactive) {
     await updateData('User', id, { status: currentlyInactive ? 'aktiv' : 'inaktiv' });
     renderAdminUsers();
     toast(currentlyInactive ? 'Aktiviert' : 'Deaktiviert', 'success');
-  } catch (err) { toast(err.message, 'error'); }
+  } catch (err) { toast(escapeHtml(err.message), 'error'); }
 }
 
-// Alle aktiven Browser-Sessions eines Users im Val.town-Proxy invalidieren.
+// Alle Sitzungen eines Benutzers auf dem Server beenden.
 // Nützlich z.B. bei verlorenem Handy oder Mitarbeiter-Austritt.
 async function revokeAllSessions(userId, userName) {
   if (!APP_KEYS.user?.is_admin) return toast('Nur für Admins', 'error');
-  if (!APP_KEYS.apiProxyUrl) return toast('API-Proxy nicht konfiguriert', 'error');
-  const label = userName ? '"' + userName + '"' : 'diesem User';
-  if (!confirm('Alle aktiven Browser-Sessions von ' + label + ' im Proxy abmelden?\n\n• Alle offenen Browser-Tabs/Handys werden beim nächsten Call abgemeldet.\n• Login-Key bleibt unverändert — User kann sich danach normal neu einloggen.\n• Bei Mitarbeiter-Austritt zusätzlich Status auf "inaktiv" setzen.')) return;
+  const label = userName ? '"' + userName + '"' : 'diesem Benutzer';
+  if (!confirm('Alle Sitzungen von ' + label + ' beenden?\n\n• Alle offenen Browser-Tabs/Handys werden beim nächsten Aufruf abgemeldet.\n• Login-Key bleibt unverändert — der Benutzer kann sich danach normal neu anmelden.\n• Bei Mitarbeiter-Austritt zusätzlich Status auf "inaktiv" setzen.')) return;
   try {
-    const res = await fetch(APP_KEYS.apiProxyUrl.replace(/\/+$/, '') + '/sessions/revoke-user', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + (APP_KEYS.sessionToken || _getStoredToken()),
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ user_id: userId })
-    });
-    if (!res.ok) {
-      let msg = 'Fehler (HTTP ' + res.status + ')';
-      try { const ej = await res.json(); if (ej.error) msg = ej.error; } catch (_) {}
-      throw new Error(msg);
-    }
-    const data = await res.json();
-    toast(data.revoked + ' Session(s) abgemeldet', 'success');
+    const data = await _api('POST', '/sessions/revoke-user', { body: { user_id: userId } });
+    toast(data.revoked + ' Sitzung(en) abgemeldet', 'success');
   } catch (e) {
-    toast(e.message, 'error', 6000);
+    toast(escapeHtml(e.message), 'error', 6000);
   }
 }
 
@@ -15260,12 +15227,6 @@ async function deleteQuoteBundle(id) {
    Admins schreiben). API-Keys sind Railway-Variablen; Mailchimp-Keys liegen
    verschlüsselt am Mandanten auf dem Server. Der Browser sieht keinen Key.
    ============================================================ */
-
-function _maskSecret(val) {
-  if (!val) return '';
-  if (val.length <= 10) return '••••••••';
-  return val.substring(0, 4) + '••••••••' + val.substring(val.length - 4);
-}
 
 /* ============================================================
    ADMIN: API-KOSTEN (AiUsageLog Dashboard)
