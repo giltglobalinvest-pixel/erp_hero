@@ -1387,7 +1387,14 @@ async function writeData(table, fields, opts = {}) {
   try {
     created = await _api('POST', _dataPath(table), { body: _writeBody(fields, opts) });
   } catch (e) {
-    throw _prefixError('Schreiben fehlgeschlagen: ', e);
+    let recovered = null;
+    try {
+      recovered = await _recoverNumberConflict(table, fields, opts, e);
+    } catch (e2) {
+      throw _prefixError('Schreiben fehlgeschlagen: ', e2);
+    }
+    if (!recovered) throw _prefixError('Schreiben fehlgeschlagen: ', e);
+    created = recovered;
   }
   // === Lazy-Push-Trigger ===
   // Wenn ein Customer in einem Geschäftsvorgang (Quote/Order/Invoice/...) verwendet
@@ -1442,6 +1449,53 @@ async function uploadFileToRecord(recordId, attachmentField, file) {
   });
   if (!res.ok) throw new Error('Upload fehlgeschlagen');
   return await res.json();
+}
+
+/* ============================================================
+   BELEGNUMMERN (Server)
+   - Vorschlag: GET /api/numbers/:typ/next (nichts wird reserviert)
+   - Beim Speichern prüft der Server die Nummer erneut. Ist ein Vorschlag
+     inzwischen vergeben, speichert writeData mit der nächsten freien Nummer.
+   ============================================================ */
+// Nummernfeld je Tabelle (wie NUMBER_SPECS auf dem Server).
+const NUMBER_FIELDS = {
+  Customer: 'customer_no', Supplier: 'supplier_no', Article: 'article_no',
+  Inquiry: 'inquiry_no', Quote: 'quote_no', Order: 'order_no',
+  SupplierOrder: 'purchase_no', DeliveryNote: 'delivery_no', Invoice: 'invoice_no'
+};
+// Nummerntyp der API → Tabelle.
+const _NUMBER_TABLES = {
+  customer: 'Customer', supplier: 'Supplier', article: 'Article',
+  inquiry: 'Inquiry', quote: 'Quote', order: 'Order',
+  purchase: 'SupplierOrder', delivery: 'DeliveryNote', invoice: 'Invoice'
+};
+// Vorschläge dieser Sitzung als "Tabelle|Nummer". Nur für sie vergibt writeData bei einer
+// Kollision eine neue Nummer — eine von Hand eingetippte Nummer wird nie ersetzt.
+const _peekedNumbers = new Set();
+
+async function _peekNumber(type, companyId, base) {
+  if (!companyId) throw new Error('Kein Mandant ausgewählt');
+  const params = new URLSearchParams({ company: companyId });
+  if (base) params.set('base', base);
+  const data = await _api('GET', '/numbers/' + type + '/next?' + params.toString());
+  _peekedNumbers.add(_NUMBER_TABLES[type] + '|' + data.number);
+  return data.number;
+}
+
+// 409 DUPLICATE_NUMBER auf einen Vorschlag: einmal neu speichern, der Server vergibt die
+// nächste freie Nummer (eine Variante Q-n.m bleibt eine Variante derselben Basis).
+// Liefert den neuen Datensatz oder null, wenn der Fehler nicht dazu passt.
+async function _recoverNumberConflict(table, fields, opts, e) {
+  if (!e || e.status !== 409 || e.type !== 'DUPLICATE_NUMBER') return null;
+  if (opts && (opts.assignNumber || opts.variantOf)) return null;
+  const field = NUMBER_FIELDS[table];
+  const value = field && fields ? fields[field] : undefined;
+  if (typeof value !== 'string' || !_peekedNumbers.has(table + '|' + value)) return null;
+  const retry = /^Q-\d+\.\d+$/.test(value) ? { variantOf: value } : { assignNumber: true };
+  const created = await _api('POST', _dataPath(table), { body: _writeBody(fields, retry) });
+  const stored = created && created.fields ? String(created.fields[field] || '') : '';
+  toast('Nummer ' + escapeHtml(value) + ' war inzwischen vergeben – gespeichert als ' + escapeHtml(stored), 'warn', 8000);
+  return created;
 }
 
 /* ============================================================
@@ -2080,7 +2134,7 @@ async function _tcmCreateErpForMandant(mandantId, itemEl) {
   }
 
   try {
-    const customerNo = await nextCustomerNo(mandantId).catch(()=>'');
+    let customerNo = await nextCustomerNo(mandantId).catch(()=>'');
     const cf = ctx.fs.custom_field || ctx.fs.custom_fields || {};
     const customerFields = {
       name1:           ctx.fs.name || '',
@@ -2101,6 +2155,7 @@ async function _tcmCreateErpForMandant(mandantId, itemEl) {
     };
     console.log('[tcmCreateErp] writeData Customer:', customerFields);
     const newCustomer = await writeData('Customer', customerFields);
+    customerNo = newCustomer?.fields?.customer_no || customerNo;
     console.log('[tcmCreateErp] Customer angelegt:', newCustomer?.id);
 
     // Contact ggf. anlegen
@@ -4114,7 +4169,7 @@ async function _aocCreateOrder() {
       { name: 'custom_values',       type: 'multilineText' }
     ]); } catch (_) {}
 
-    const orderNo = await nextOrderNo(cur.id);
+    let orderNo = await nextOrderNo(cur.id);
     const today = new Date();
     const iso = d => d.toISOString().slice(0, 10);
 
@@ -4155,6 +4210,7 @@ async function _aocCreateOrder() {
       }
     }
     if (!created) throw lastErr || new Error('Order-Anlage fehlgeschlagen');
+    orderNo = created.fields?.order_no || orderNo;
 
     // OrderItems
     const articleById = new Map((_aocState.ticketContext?.articlesInMandant || []).map(a => [a.id, a]));
@@ -4781,7 +4837,7 @@ async function _eaCreateQuote(action) {
       ]);
     } catch (_) {}
 
-    const quoteNo = await nextQuoteNo(cur.id);
+    let quoteNo = await nextQuoteNo(cur.id);
     const today = new Date();
     const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
     const iso = d => d.toISOString().slice(0, 10);
@@ -4843,6 +4899,7 @@ async function _eaCreateQuote(action) {
       }
     }
     if (!created) throw lastErr || new Error('Quote-Anlage fehlgeschlagen');
+    quoteNo = created.fields?.quote_no || quoteNo;
 
     // Items anlegen (matched + new_article inline ohne Katalog-Anlage by default)
     const articleById = new Map((_eaState.context.articles || []).map(a => [a.id, a]));
@@ -6008,6 +6065,7 @@ async function _aqcCreateQuote() {
       }
     }
     if (!created) throw lastErr || new Error('Quote-Write fehlgeschlagen ohne konkreten Fehler');
+    quoteNo = created.fields?.quote_no || quoteNo;
 
     // Artikel-Cache + bestehender SKU-Index (case-insensitive) für Duplikat-Check
     const articleById = new Map();
@@ -11243,7 +11301,7 @@ async function _fdQuickCreateArticle(btnEl) {
   if (!name) { toast('Artikel-Name fehlt', 'warn'); document.getElementById('fdQuickArtName')?.focus(); return; }
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lege an…'; if (window.lucide) lucide.createIcons(); }
   try {
-    const articleNo = await nextArticleNo(cur.id).catch(()=>'');
+    let articleNo = await nextArticleNo(cur.id).catch(()=>'');
     const fields = {
       article_no: articleNo,
       name1: name,
@@ -11253,6 +11311,7 @@ async function _fdQuickCreateArticle(btnEl) {
     };
     console.log('[fdQuickCreate] writeData Article:', fields);
     const created = await writeData('Article', fields);
+    articleNo = created?.fields?.article_no || articleNo;
     // Cache aktualisieren
     _fdTicketState.cache = _fdTicketState.cache || {};
     _fdTicketState.cache.articles = _fdTicketState.cache.articles || [];
@@ -11345,7 +11404,7 @@ async function aiCreateQuoteFromEdits() {
         { name: 'ai_summary',          type: 'multilineText' }
       ]);
     } catch (_) {}
-    const quoteNo = await nextQuoteNo(cur.id);
+    let quoteNo = await nextQuoteNo(cur.id);
     const today = new Date();
     const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
     const iso = (d) => d.toISOString().slice(0, 10);
@@ -11396,6 +11455,7 @@ async function aiCreateQuoteFromEdits() {
     }
     // Quote anlegen
     const created = await writeData('Quote', fields);
+    quoteNo = created?.fields?.quote_no || quoteNo;
     // Items als QuoteItem (vollständig via Helper)
     const articleById = new Map((_fdTicketState.cache?.articles || []).map(a => [a.id, a]));
     let pos = 1;
@@ -13621,7 +13681,7 @@ async function prepareQuoteFromVoice() {
         { name: 'freshdesk_ticket_id', type: 'singleLineText' }
       ]);
     } catch (_) {}
-    const quoteNo = await nextQuoteNo(cur.id);
+    let quoteNo = await nextQuoteNo(cur.id);
     const today = new Date();
     const validUntil = new Date(); validUntil.setDate(today.getDate() + 30);
     const iso = (d) => d.toISOString().slice(0, 10);
@@ -13665,6 +13725,7 @@ async function prepareQuoteFromVoice() {
     }
     if (chosenBundleId) fields.bundle_id = chosenBundleId;
     const created = await writeData('Quote', fields);
+    quoteNo = created?.fields?.quote_no || quoteNo;
     // Items als QuoteItem anlegen — vollständig wie beim manuellen Hinzufügen
     // (Pos fortlaufend, description aus name1, unit/preis/mwst aus Article)
     const ctx = _voiceState.context || { articles: [] };
@@ -18177,17 +18238,7 @@ function setCustomerViewMode(mode) { _customerListState.viewMode = mode; renderC
 let _customerSearchTimer = null;
 
 async function nextCustomerNo(companyId) {
-  const all = await readData('Customer');
-  const inCo = all.filter(c => (c.fields.company_id || []).includes(companyId));
-  let max = 1000;
-  inCo.forEach(c => {
-    const m = (c.fields.customer_no || '').match(/^K-(\d+)$/);
-    if (m) {
-      const n = parseInt(m[1], 10);
-      if (n > max) max = n;
-    }
-  });
-  return 'K-' + (max + 1);
+  return _peekNumber('customer', companyId);
 }
 
 // Vergibt nachträglich Kundennummern an alle Customer ohne customer_no.
@@ -18927,14 +18978,7 @@ function setSupplierViewMode(mode) { _supplierListState.viewMode = mode; renderS
 let _supplierSearchTimer = null;
 
 async function nextSupplierNo(companyId) {
-  const all = await readData('Supplier');
-  const inCo = all.filter(s => (s.fields.company_id || []).includes(companyId));
-  let max = 1000;
-  inCo.forEach(s => {
-    const m = (s.fields.supplier_no || '').match(/^L-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'L-' + (max + 1);
+  return _peekNumber('supplier', companyId);
 }
 
 async function renderSuppliers() {
@@ -19280,14 +19324,7 @@ function distinctValues(records, field, defaults) {
 }
 
 async function nextArticleNo(companyId) {
-  const all = await readData('Article');
-  const inCo = all.filter(a => (a.fields.company_id || []).includes(companyId));
-  let max = 10000;
-  inCo.forEach(a => {
-    const m = (a.fields.article_no || '').match(/^A-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'A-' + (max + 1);
+  return _peekNumber('article', companyId);
 }
 
 async function renderArticles() {
@@ -20704,14 +20741,7 @@ let _inquiryImages = []; // im Modal gehaltene Bilder { name, mediaType, base64 
 let _inquirySpeech = null; // Web-Speech-Recognition Instanz
 
 async function nextInquiryNo(companyId) {
-  const all = await readData('Inquiry');
-  const inCo = all.filter(i => (i.fields.company_id || []).includes(companyId));
-  let max = 1000;
-  inCo.forEach(i => {
-    const m = (i.fields.inquiry_no || '').match(/^AN-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'AN-' + (max + 1);
+  return _peekNumber('inquiry', companyId);
 }
 
 // Auto-Refresh-State für das Anfragen-Modul
@@ -21561,14 +21591,7 @@ function updateUndoButtons() {
 }
 
 async function nextQuoteNo(companyId) {
-  const all = await readData('Quote');
-  const inCo = all.filter(q => (q.fields.company_id || []).includes(companyId));
-  let max = 1000;
-  inCo.forEach(q => {
-    const m = (q.fields.quote_no || '').match(/^Q-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'Q-' + (max + 1);
+  return _peekNumber('quote', companyId);
 }
 
 // Liefert die Basis-Nummer eines Angebots ohne Varianten-Suffix.
@@ -21578,10 +21601,16 @@ function _extractQuoteBase(quoteNo) {
   return m ? m[1] : (quoteNo || '');
 }
 
-// Sucht die naechste freie Varianten-Nummer fuer eine gegebene Basis.
-// Beispiel: Basis "Q-1024" mit existierenden Varianten Q-1024.1, Q-1024.2 → "Q-1024.3"
+// Nächste freie Varianten-Nummer für eine Basis.
+// Beispiel: Basis "Q-1024" mit Q-1024.1 und Q-1024.2 → "Q-1024.3"
+// Der Server kennt nur Q-Nummern; ältere Nummernkreise rechnet der Browser wie bisher.
 async function nextQuoteVariantNo(baseQuoteNo, companyId) {
   const base = _extractQuoteBase(baseQuoteNo);
+  if (/^Q-\d+$/.test(base)) return _peekNumber('quote', companyId, base);
+  return _localQuoteVariantNo(base, companyId);
+}
+
+async function _localQuoteVariantNo(base, companyId) {
   const all = await readData('Quote');
   const inCo = all.filter(q => (q.fields.company_id || []).includes(companyId));
   const reg = new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.(\\d+)$');
@@ -21607,7 +21636,7 @@ async function createQuoteVariant(quoteId, opts = {}) {
     const original = all.find(q => q.id === quoteId);
     if (!original) throw new Error('Original-Angebot nicht gefunden');
     const of = original.fields || {};
-    const newQuoteNo = await nextQuoteVariantNo(of.quote_no, cur.id);
+    let newQuoteNo = await nextQuoteVariantNo(of.quote_no, cur.id);
     const today = new Date();
     const valid = new Date(); valid.setDate(today.getDate() + 30);
     const iso = d => d.toISOString().slice(0, 10);
@@ -21650,6 +21679,7 @@ async function createQuoteVariant(quoteId, opts = {}) {
       }
     }
     if (!created) throw lastErr || new Error('Variante konnte nicht angelegt werden');
+    newQuoteNo = created.fields?.quote_no || newQuoteNo;
 
     // QuoteItems duplizieren
     let copiedItems = 0;
@@ -22055,7 +22085,7 @@ async function inqWizCreateQuote() {
   try {
     const inquiry = await _persistInquiryFromWizard();
     const cur = getCurrentCompany();
-    const quoteNo = await nextQuoteNo(cur.id);
+    let quoteNo = await nextQuoteNo(cur.id);
     const today = new Date();
     const validUntil = new Date(today); validUntil.setDate(validUntil.getDate() + 30);
     const iso = d => d.toISOString().slice(0, 10);
@@ -22072,6 +22102,7 @@ async function inqWizCreateQuote() {
     if (w.data.customer_id) quoteFields.customer_id = [w.data.customer_id];
     if (w.data.contact_id)  quoteFields.contact_id  = [w.data.contact_id];
     const created = await writeData('Quote', quoteFields);
+    quoteNo = created?.fields?.quote_no || quoteNo;
     closeModal();
     toast('Angebot ' + quoteNo + ' angelegt — öffne Editor zum Befüllen', 'success', 3500);
     setTimeout(() => openQuoteModal(created.id), 200);
@@ -28215,14 +28246,7 @@ async function ensureOrderSchema() {
 }
 
 async function nextOrderNo(companyId) {
-  const all = await readData('Order');
-  const inCo = all.filter(o => (o.fields.company_id || []).includes(companyId) || o.fields.company_id === companyId);
-  let max = 1000;
-  inCo.forEach(o => {
-    const m = (o.fields.order_no || '').match(/^AB-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'AB-' + (max + 1);
+  return _peekNumber('order', companyId);
 }
 
 function orderStatusBadge(status) {
@@ -29837,14 +29861,7 @@ async function ensureSupplierOrderSchema() {
 }
 
 async function nextPurchaseNo(companyId) {
-  const all = await readData('SupplierOrder');
-  const inCo = all.filter(o => (o.fields.company_id || []).includes(companyId) || o.fields.company_id === companyId);
-  let max = 1000;
-  inCo.forEach(o => {
-    const m = (o.fields.purchase_no || '').match(/^B-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'B-' + (max + 1);
+  return _peekNumber('purchase', companyId);
 }
 
 function purchaseStatusBadge(status) {
@@ -30434,7 +30451,7 @@ async function launchPoFromOrderForSupplier(orderId, supplierId, items) {
     const allContacts = await readData('Contact').catch(()=>[]);
     const primaryContactId = findPrimaryContactId(allContacts, supplierId, 'supplier');
     const order = await readData('Order').then(arr => arr.find(o => o.id === orderId)).catch(()=>null);
-    const purchaseNo = await nextPurchaseNo(cur.id);
+    let purchaseNo = await nextPurchaseNo(cur.id);
     const sumsItems = items.map(it => ({ fields: {
       qty: it.fields.qty,
       unit_price_net: it.fields.purchase_price || it.fields.unit_price_net || 0,
@@ -30456,6 +30473,7 @@ async function launchPoFromOrderForSupplier(orderId, supplierId, items) {
       total_gross:  sums.total_gross,
     };
     const created = await writeData('SupplierOrder', purchaseFields);
+    purchaseNo = created?.fields?.purchase_no || purchaseNo;
     let pos = 1;
     for (const it of items) {
       const f = it.fields || {};
@@ -31186,14 +31204,7 @@ async function ensureDeliveryNoteSchema() {
 }
 
 async function nextDeliveryNo(companyId) {
-  const all = await readData('DeliveryNote');
-  const inCo = all.filter(o => (o.fields.company_id || []).includes(companyId) || o.fields.company_id === companyId);
-  let max = 1000;
-  inCo.forEach(o => {
-    const m = (o.fields.delivery_no || '').match(/^L-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'L-' + (max + 1);
+  return _peekNumber('delivery', companyId);
 }
 
 function deliveryStatusBadge(status) {
@@ -32339,7 +32350,7 @@ async function launchDnFromOrder(orderId) {
     const items = allOI.filter(it => (it.fields.order_id || []).includes(orderId) || it.fields.order_id === orderId)
       .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
     const of = order.fields;
-    const deliveryNo = await nextDeliveryNo(cur.id);
+    let deliveryNo = await nextDeliveryNo(cur.id);
     const deliveryFields = {
       delivery_no:    deliveryNo,
       company_id:     cur.id,
@@ -32355,6 +32366,7 @@ async function launchDnFromOrder(orderId) {
       invoice_address_id:  of.invoice_address_id  || '',
     };
     const created = await writeData('DeliveryNote', deliveryFields);
+    deliveryNo = created?.fields?.delivery_no || deliveryNo;
     let pos = 1;
     for (const it of items) {
       const f = it.fields || {};
@@ -32442,14 +32454,7 @@ async function ensureInvoiceSchema() {
 }
 
 async function nextInvoiceNo(companyId) {
-  const all = await readData('Invoice');
-  const inCo = all.filter(o => (o.fields.company_id || []).includes(companyId) || o.fields.company_id === companyId);
-  let max = 1000;
-  inCo.forEach(o => {
-    const m = (o.fields.invoice_no || '').match(/^R-(\d+)$/);
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  });
-  return 'R-' + (max + 1);
+  return _peekNumber('invoice', companyId);
 }
 
 function invoiceStatusBadge(status) {
@@ -33679,7 +33684,7 @@ async function launchInvoiceFromOrder(orderId) {
     const items = allOI.filter(it => (it.fields.order_id || []).includes(orderId) || it.fields.order_id === orderId)
       .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
     const of = order.fields;
-    const invoiceNo = await nextInvoiceNo(cur.id);
+    let invoiceNo = await nextInvoiceNo(cur.id);
     const today = new Date();
     const due = new Date(today); due.setDate(due.getDate() + 14);
     const invoiceFields = {
@@ -33703,6 +33708,7 @@ async function launchInvoiceFromOrder(orderId) {
     invoiceFields.vat_total    = sums.vat_total;
     invoiceFields.total_gross  = sums.total_gross;
     const created = await writeData('Invoice', invoiceFields);
+    invoiceNo = created?.fields?.invoice_no || invoiceNo;
     let pos = 1;
     for (const it of items) {
       const f = it.fields || {};
