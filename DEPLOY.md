@@ -26,9 +26,11 @@ file on a Railway volume. For the design, see `docs/superpowers/specs/2026-09-25
    `npm run build`, starts with `npm start`, and restarts on failure (up to 10 times).
    > `railway.json` in the repo describes the same settings, but Railway has deprecated these
    > config files: **new services do not read them**, and existing services stop reading them on
-   > 2026-12-01. That is why the healthcheck path must be set here. Railway's replacement is a
-   > `.railway/railway.ts` file applied with `railway config apply` ("Infrastructure as Code" in
-   > Railway's docs). It is not set up in this repo yet.
+   > 2026-12-01. That is why the healthcheck path must be set here. Where the file is still read,
+   > it overrides these settings, so it leaves the start command out on purpose: sections 7 and 9
+   > set a one-time start command here, which the file would otherwise cancel. Railway's
+   > replacement is a `.railway/railway.ts` file applied with `railway config apply`
+   > ("Infrastructure as Code" in Railway's docs). It is not set up in this repo yet.
 5. **Settings → Deploy → Regions:** choose **EU West (Amsterdam)**.
 
 > **When the repository becomes private:** Railway's GitHub app must be allowed to read it.
@@ -83,6 +85,11 @@ Open the service → **Settings → Networking → Generate Domain**. Copy the U
 trailing slash), and redeploy. `PUBLIC_ORIGIN` must match the address in the browser, otherwise
 every login and save is rejected as a cross-site request.
 
+The app sends visitors of the old GitHub Pages address and of the loader pages to
+`https://erp-hero-production.up.railway.app`. If your domain is different, change that address in
+`index.html`, `loader.html` and `loader-admin.html` (and in `test/e2e/pwa.e2e.ts`) before the
+cutover.
+
 ## 6. Check the deployment
 
 - `https://<domain>/healthz` → `{"ok":true}`
@@ -129,19 +136,23 @@ the users from Airtable.
 
 Everything you create in this section goes into the database the service started with.
 Activating the import (section 9, step 5) replaces that database and keeps it only in
-`/data/backup-<timestamp>/`. If you do not import, it stays the real database, and step 5 is how
-you create your colleagues' logins.
+`/data/backup-<timestamp>/`. If you do not import, it stays the real database, and step 5 above
+is how you create your colleagues' logins.
 
 Then check the areas that the automated tests do not cover. Before the import there is no real
-data, so repeat these checks after section 9, step 6.
+data, so repeat these checks after section 9, step 6. Step 8 there replaces the Anthropic,
+Freshdesk and Freshsales keys: check KI-Angebot, Freshdesk and Freshsales once more after it.
 
 > **Some of these checks write into the live Freshdesk and Freshsales accounts.** A new quote,
 > order, delivery note or invoice sends its customer to Freshdesk as a company, and to Freshsales
 > as an account once the Freshsales subdomain is saved; so does linking or creating a customer
 > from a ticket. A KI-Angebot adds a private note with a link to the new quote to its ticket, and
-> a saved AI summary adds a note too. These entries stay when the database is replaced. Before the
-> import, use a test customer and a test ticket, and afterwards delete the test company in
-> Freshdesk, the test account in Freshsales and the notes in the ticket.
+> every AI summary is saved in its ticket as a private note, so the attachment-proxy check leaves
+> one too. These entries stay when the database is replaced. Before the import, use a test ticket
+> and a test customer whose name no real company has, for example `ERP-Hero-Test-<date>`: when no
+> name matches exactly, the sync can take over the first search hit, a real company. Afterwards,
+> check in Freshdesk and Freshsales that the company, the account and the notes are the ones the
+> test created, then delete them.
 
 - **PDF:** open a quote and create its PDF.
 - **Quotes:** create an article first (**Stammdaten → Artikel**), then a quote with that article
@@ -209,15 +220,27 @@ The cutover moves the data and retires the old setup.
    rolled back, run `railway ssh`, read `/data/activation-failed`, move the entries listed there back
    in the order listed, as described in that file, delete the file, and restart again. The service
    then runs on the previous database; run `db:activate` again if you still want the import.
-6. Log in at the new address with your existing login key and check the data. Then give every
-   user a new login key before your colleagues start working here. The imported keys were
-   readable through the Airtable token in the old `index.html`, and the old proxy sent them to
-   every logged-in user, so until they are replaced anyone who read them can log in here,
-   including with an admin's key. Open each user under Administration → Benutzer: click **Neu**,
-   copy the key and save, then open the user again and click **Alle Sitzungen abmelden**. Do your
-   own account last, because that logs you out; log in again with your new key. Hand each new key
-   over in person or by phone. A REST client does the same with
-   `PATCH /api/admin/users/<id>/secrets` and `{"generate_api_key": true}`, then
+
+   The service refuses to start while that file exists, and Railway stops restarting it after 10
+   failed starts, so `railway ssh` may find no running service. Then run a placeholder instead of
+   the app for one deploy (this path has not been tried on Railway yet):
+   1. Set **Settings → Deploy → Custom Start Command** to
+      `node -e "require('http').createServer((q, s) => s.end()).listen(process.env.PORT)"` and
+      deploy. The placeholder only answers the health check.
+   2. Run `railway ssh`, move the entries back as `/data/activation-failed` describes, and delete
+      the file.
+   3. Set the start command back to `npm start` and deploy.
+6. Log in at the new address with the existing login key of a user who is an admin in Airtable,
+   and check the data. The import replaced the admin from section 7. If no imported user is an
+   admin, create one first as in section 7, with `npm run user:create -- --name "<name>" --admin`.
+   Then give every user a new login key before your colleagues start working here. The imported
+   keys were readable through the Airtable token in the old `index.html`, and the old proxy sent
+   them to every logged-in user, so until they are replaced anyone who read them can log in here,
+   including with an admin's key. As that admin, open each user under Administration → Benutzer:
+   click **Neu**, copy the key and save, then open the user again and click
+   **Alle Sitzungen abmelden**. Do your own account last, because that logs you out; log in again
+   with your new key. Hand each new key over in person or by phone. A REST client does the same
+   with `PATCH /api/admin/users/<id>/secrets` and `{"generate_api_key": true}`, then
    `POST /api/sessions/revoke-user` and `{"user_id": "<id>"}`. `<id>` is the user's `id` from
    `GET /api/data/User`, and the PATCH response carries the new key once, as `api_key`. Both calls
    need the session cookie and the `Origin: https://<domain>` header (see section 8), for example:
