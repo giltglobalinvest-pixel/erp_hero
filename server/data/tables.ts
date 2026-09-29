@@ -98,3 +98,26 @@ export const ATTACHMENT_FIELDS: Readonly<Record<string, AttachmentFieldRule>> = 
 
 export const attachmentFieldRule = (table: TableName, field: string): AttachmentFieldRule | undefined =>
   ATTACHMENT_FIELDS[`${table}.${field}`];
+
+const DOCUMENT_TOTALS = ['subtotal_net', 'vat_total', 'total_gross'];
+const PRICED_ITEM_FIELDS = ['pos', 'qty', 'unit_price_net', 'discount_pct', 'vat_rate', 'line_total_net'];
+
+/**
+ * Fields the Airtable base typed as numbers: the `type: 'number'` field definitions in index.html
+ * (ensureOrderSchema and its siblings) and main's AI_USAGE_LOG_SCHEMA. QuoteItem has no definition of
+ * its own; the client builds order items from quote items with the same fields ("Schema fast
+ * identisch — nur quote_id → order_id"), so it has OrderItem's number fields.
+ */
+export const NUMERIC_FIELDS: Readonly<Partial<Record<TableName, ReadonlySet<string>>>> = {
+  AiUsageLog: new Set(['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'cost_usd']),
+  Order: new Set(DOCUMENT_TOTALS),
+  SupplierOrder: new Set(DOCUMENT_TOTALS),
+  Invoice: new Set(DOCUMENT_TOTALS),
+  QuoteItem: new Set([...PRICED_ITEM_FIELDS, 'purchase_price']),
+  OrderItem: new Set([...PRICED_ITEM_FIELDS, 'purchase_price']),
+  SupplierOrderItem: new Set(PRICED_ITEM_FIELDS),
+  InvoiceItem: new Set(PRICED_ITEM_FIELDS),
+  DeliveryNoteItem: new Set(['pos', 'qty']),
+};
+
+export const isNumericField = (table: TableName, field: string): boolean => NUMERIC_FIELDS[table]?.has(field) ?? false;

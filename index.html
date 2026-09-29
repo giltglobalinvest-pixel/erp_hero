@@ -11614,7 +11614,7 @@ async function aiCreateQuoteFromEdits() {
         if (article) {
           await writeData('QuoteItem', _aiBuildQuoteItemFields(article, it.qty, pos, created.id));
         } else {
-          await writeData('QuoteItem', { quote_id: [created.id], article_id: [it.article_id], qty: it.qty, pos });
+          await writeData('QuoteItem', { quote_id: [created.id], article_id: [it.article_id], qty: Math.max(1, Number(it.qty) || 1), pos });
         }
         pos++;
       } catch (e) { console.warn('QuoteItem-Anlage fehlgeschlagen:', e.message); }
@@ -15389,9 +15389,9 @@ function _aiCostsAggregateBy(rows, key) {
     if (!map.has(k)) map.set(k, { key: k, count: 0, in_tok: 0, out_tok: 0, cost: 0 });
     const e = map.get(k);
     e.count++;
-    e.in_tok  += (r.input_tokens || 0) + (r.cache_creation_input_tokens || 0) + (r.cache_read_input_tokens || 0);
-    e.out_tok += r.output_tokens || 0;
-    e.cost    += r.cost_usd || 0;
+    e.in_tok  += (Number(r.input_tokens) || 0) + (Number(r.cache_creation_input_tokens) || 0) + (Number(r.cache_read_input_tokens) || 0);
+    e.out_tok += Number(r.output_tokens) || 0;
+    e.cost    += Number(r.cost_usd) || 0;
   }
   return [...map.values()].sort((a, b) => b.cost - a.cost);
 }
@@ -15405,19 +15405,21 @@ function _aiCostsAggregateByDay(rows) {
     if (!map.has(key)) map.set(key, { key, count: 0, cost: 0 });
     const e = map.get(key);
     e.count++;
-    e.cost += r.cost_usd || 0;
+    e.cost += Number(r.cost_usd) || 0;
   }
   return [...map.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
 function _formatUsd(v) {
   if (!v && v !== 0) return '$0.00';
+  v = Number(v) || 0;
   if (v < 0.01) return '$' + v.toFixed(6);
   if (v < 1)    return '$' + v.toFixed(4);
   return '$' + v.toFixed(2);
 }
 
 function _formatTok(v) {
+  v = Number(v);
   if (!v) return '0';
   if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
   if (v >= 1_000)     return (v / 1_000).toFixed(1) + 'k';
@@ -15458,9 +15460,9 @@ async function renderAdminAiCosts() {
 
 function _renderAdminAiCosts() {
   const rows = _aiCostsFilteredRows();
-  const totalCost = rows.reduce((s, r) => s + (r.cost_usd || 0), 0);
-  const totalIn   = rows.reduce((s, r) => s + (r.input_tokens || 0) + (r.cache_creation_input_tokens || 0) + (r.cache_read_input_tokens || 0), 0);
-  const totalOut  = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
+  const totalCost = rows.reduce((s, r) => s + (Number(r.cost_usd) || 0), 0);
+  const totalIn   = rows.reduce((s, r) => s + (Number(r.input_tokens) || 0) + (Number(r.cache_creation_input_tokens) || 0) + (Number(r.cache_read_input_tokens) || 0), 0);
+  const totalOut  = rows.reduce((s, r) => s + (Number(r.output_tokens) || 0), 0);
   const totalCalls = rows.length;
 
   // Aggregationen
@@ -15620,7 +15622,7 @@ function _renderAdminAiCosts() {
                   <td class="px-3 py-2 truncate max-w-[120px]" title="${escapeHtml(r.company_name || '')}">${escapeHtml(r.company_name || '–')}</td>
                   <td class="px-3 py-2 truncate max-w-[180px] font-mono text-[10px]" title="${escapeHtml(r.model || '')}">${escapeHtml(r.model || '–')}</td>
                   <td class="px-3 py-2 truncate max-w-[160px]" title="${escapeHtml(r.purpose || '')}">${escapeHtml(r.purpose || '–')}</td>
-                  <td class="px-3 py-2 text-right font-mono">${_formatTok((r.input_tokens || 0) + (r.cache_creation_input_tokens || 0) + (r.cache_read_input_tokens || 0))}</td>
+                  <td class="px-3 py-2 text-right font-mono">${_formatTok((Number(r.input_tokens) || 0) + (Number(r.cache_creation_input_tokens) || 0) + (Number(r.cache_read_input_tokens) || 0))}</td>
                   <td class="px-3 py-2 text-right font-mono">${_formatTok(r.output_tokens || 0)}</td>
                   <td class="px-3 py-2 text-right font-mono font-semibold text-ink-900">${_formatUsd(r.cost_usd || 0)}</td>
                 </tr>
@@ -19569,7 +19571,7 @@ async function openArticleModal(id) {
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">EK €</label>
           <div class="flex gap-1">
-            <input id="art_purchase_price" name="purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="flex-1 min-w-0 px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <input id="art_purchase_price" name="purchase_price" inputmode="decimal" value="${escapeHtml(String(f.purchase_price ?? ''))}" placeholder="0,00" class="flex-1 min-w-0 px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
             <button type="button" onclick="copyDefaultSupplierPrice('${id || ''}')" class="px-2 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-ink-600 shrink-0" title="Übernehme Hauptlieferanten-EK">
               <i data-lucide="arrow-down-to-line" class="w-4 h-4"></i>
             </button>
@@ -19577,11 +19579,11 @@ async function openArticleModal(id) {
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">VK €</label>
-          <input name="sales_price" inputmode="decimal" value="${f.sales_price ?? ''}" placeholder="0,00" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input name="sales_price" inputmode="decimal" value="${escapeHtml(String(f.sales_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">MwSt %</label>
-          <input name="vat_rate" inputmode="decimal" value="${f.vat_rate ?? 19}" placeholder="19" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input name="vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" placeholder="19" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Einheit</label>
@@ -25179,7 +25181,7 @@ function quoteItemRow(quoteId, it) {
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline gap-2">
-            <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
+            <span class="text-xs font-mono text-ink-500">Pos. ${escapeHtml(String(f.pos || '?'))}</span>
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
           ${artBadgeHtml}
@@ -25321,7 +25323,7 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
         <div class="lg:col-span-1">
           <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
-          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${escapeHtml(String(f.pos ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="lg:col-span-2">
           <label class="block text-xs font-medium text-ink-700 mb-1">Artikel (suchen oder leer = freie Position)</label>
@@ -25346,14 +25348,14 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
-          <input id="${fid}_purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_purchase_price" inputmode="decimal" value="${escapeHtml(String(f.purchase_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
       <div class="qi-quad-grid grid grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -25361,18 +25363,18 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EP €</label>
-          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
-          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcQiPreview('${fid}')" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
       <div class="grid grid-cols-2 gap-2 items-end">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
-          <input id="${fid}_vat_rate" inputmode="decimal" value="${f.vat_rate ?? 19}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="text-right">
           <label class="block text-xs font-medium text-ink-700 mb-1">Zeilensumme netto</label>
@@ -25756,7 +25758,7 @@ async function showArticleSupplierInlineForm(articleId, junctionId) {
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
-          <input id="${fid}_purchase_price" inputmode="decimal" value="${f.purchase_price ?? ''}" placeholder="0,00" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_purchase_price" inputmode="decimal" value="${escapeHtml(String(f.purchase_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Lieferzeit</label>
@@ -28197,7 +28199,7 @@ function orderItemRow(orderId, it, locked) {
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline gap-2">
-            <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
+            <span class="text-xs font-mono text-ink-500">Pos. ${escapeHtml(String(f.pos || '?'))}</span>
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
           ${artBadgeHtml}
@@ -28280,7 +28282,7 @@ async function showOrderItemInlineForm(orderId, itemId) {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
         <div class="lg:col-span-1">
           <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
-          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${escapeHtml(String(f.pos ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="lg:col-span-2">
           <label class="block text-xs font-medium text-ink-700 mb-1">Artikel (suchen oder leer = freie Position)</label>
@@ -28296,7 +28298,7 @@ async function showOrderItemInlineForm(orderId, itemId) {
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -28304,17 +28306,17 @@ async function showOrderItemInlineForm(orderId, itemId) {
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EP €</label>
-          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
-          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcOiPreview('${fid}')" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
-          <input id="${fid}_vat_rate" inputmode="decimal" value="${f.vat_rate ?? 19}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="text-right self-end">
           <p class="text-xs text-ink-500">Zeilensumme netto</p>
@@ -29659,7 +29661,7 @@ function purchaseItemRow(purchaseId, it) {
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline gap-2">
-            <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
+            <span class="text-xs font-mono text-ink-500">Pos. ${escapeHtml(String(f.pos || '?'))}</span>
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
           <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
@@ -29733,7 +29735,7 @@ async function showPurchaseItemInlineForm(purchaseId, itemId) {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
         <div class="lg:col-span-1">
           <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
-          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${escapeHtml(String(f.pos ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="lg:col-span-2">
           <label class="block text-xs font-medium text-ink-700 mb-1">Artikel</label>
@@ -29748,7 +29750,7 @@ async function showPurchaseItemInlineForm(purchaseId, itemId) {
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" oninput="recalcPiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcPiPreview('${fid}')" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -29756,17 +29758,17 @@ async function showPurchaseItemInlineForm(purchaseId, itemId) {
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
-          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcPiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcPiPreview('${fid}')" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
-          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcPiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcPiPreview('${fid}')" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
-          <input id="${fid}_vat_rate" inputmode="decimal" value="${f.vat_rate ?? 19}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="text-right self-end">
           <p class="text-xs text-ink-500">Zeilensumme netto</p>
@@ -30920,7 +30922,7 @@ function deliveryItemRow(deliveryId, it) {
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline gap-2">
-            <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
+            <span class="text-xs font-mono text-ink-500">Pos. ${escapeHtml(String(f.pos || '?'))}</span>
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
           <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
@@ -30991,7 +30993,7 @@ async function showDeliveryItemInlineForm(deliveryId, itemId) {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
         <div class="lg:col-span-1">
           <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
-          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${escapeHtml(String(f.pos ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="lg:col-span-2">
           <label class="block text-xs font-medium text-ink-700 mb-1">Artikel</label>
@@ -31006,7 +31008,7 @@ async function showDeliveryItemInlineForm(deliveryId, itemId) {
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" value="${f.qty ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -32199,7 +32201,7 @@ function invoiceItemRow(invoiceId, it, locked) {
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline gap-2">
-            <span class="text-xs font-mono text-ink-500">Pos. ${f.pos || '?'}</span>
+            <span class="text-xs font-mono text-ink-500">Pos. ${escapeHtml(String(f.pos || '?'))}</span>
             <p class="font-medium text-ink-900 text-sm truncate">${escapeHtml(desc)}</p>
           </div>
           <p class="text-xs text-ink-500 mt-1 font-mono">${escapeHtml(meta)}</p>
@@ -32275,7 +32277,7 @@ async function showInvoiceItemInlineForm(invoiceId, itemId) {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
         <div class="lg:col-span-1">
           <label class="block text-xs font-medium text-ink-700 mb-1">Pos.</label>
-          <input id="${fid}_pos" type="number" inputmode="numeric" value="${f.pos ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg">
+          <input id="${fid}_pos" type="number" inputmode="numeric" value="${escapeHtml(String(f.pos ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg">
         </div>
         <div class="lg:col-span-2">
           <label class="block text-xs font-medium text-ink-700 mb-1">Artikel</label>
@@ -32288,13 +32290,13 @@ async function showInvoiceItemInlineForm(invoiceId, itemId) {
         <div id="${fid}_description_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:120px;"></div>
       </div>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">Menge</label><input id="${fid}_qty" inputmode="decimal" oninput="recalcIiPreview('${fid}')" value="${f.qty ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">Menge</label><input id="${fid}_qty" inputmode="decimal" oninput="recalcIiPreview('${fid}')" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
         <div><label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label><input id="${fid}_unit" value="${escapeHtml(f.unit || 'Stück')}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg"></div>
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">EP €</label><input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcIiPreview('${fid}')" value="${f.unit_price_net ?? ''}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label><input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcIiPreview('${fid}')" value="${f.discount_pct ?? 0}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">EP €</label><input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcIiPreview('${fid}')" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label><input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcIiPreview('${fid}')" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
       </div>
       <div class="grid grid-cols-2 gap-2">
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label><input id="${fid}_vat_rate" inputmode="decimal" value="${f.vat_rate ?? 19}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label><input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
         <div class="text-right self-end"><p class="text-xs text-ink-500">Zeilensumme netto</p><p id="${fid}_preview" class="font-mono font-semibold text-ink-900">${formatPrice(calcLineNet(f.qty, f.unit_price_net, f.discount_pct))} €</p></div>
       </div>
       <div class="flex justify-end gap-2 pt-1">

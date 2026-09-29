@@ -188,3 +188,58 @@ describe('schema no-ops', () => {
     expect(unknown.status).toBe(404);
   });
 });
+
+describe('number fields', () => {
+  const update = (table: string, id: string, fields: Record<string, unknown>) =>
+    ctx.req(`/api/data/${table}/${id}`, { method: 'PATCH', cookie: user.cookie, body: { fields } });
+
+  it('rejects a token count that is not a number, also from a non-admin', async () => {
+    const res = await create('AiUsageLog', { created_at: '2026-01-05T08:00:00.000Z', model: 'claude', output_tokens: 'viele' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: { type: 'INVALID_REQUEST', message: 'output_tokens: Zahl erwartet' } });
+    expect(await ctx.deps.records.list('AiUsageLog')).toEqual([]);
+  });
+
+  it('rejects an item position that is not a number, on create and on update', async () => {
+    expect((await create('QuoteItem', { quote_id: ['recAAAAAAAAAAAAAA'], pos: 'erste', qty: 1 })).status).toBe(400);
+    expect(await ctx.deps.records.list('QuoteItem')).toEqual([]);
+    const ok = await create('QuoteItem', { quote_id: ['recAAAAAAAAAAAAAA'], pos: 1, qty: 2.5 });
+    expect(ok.status).toBe(200);
+    const item = await ok.json();
+    expect(item.fields).toEqual({ quote_id: ['recAAAAAAAAAAAAAA'], pos: 1, qty: 2.5 });
+    expect((await update('QuoteItem', item.id, { pos: 'zweite' })).status).toBe(400);
+    expect((await ctx.deps.records.get('QuoteItem', item.id))?.fields.pos).toBe(1);
+  });
+
+  it('stores a plain decimal sent as text as a number; null and empty text still clear', async () => {
+    const res = await create('InvoiceItem', {
+      invoice_id: 'recIIIIIIIIIIIIII',
+      pos: '12',
+      qty: ' -3.5 ',
+      vat_rate: '0.19',
+      discount_pct: 0,
+      unit: '12',
+    });
+    expect(res.status).toBe(200);
+    const item = await res.json();
+    expect(item.fields).toEqual({ invoice_id: 'recIIIIIIIIIIIIII', pos: 12, qty: -3.5, vat_rate: 0.19, discount_pct: 0, unit: '12' });
+    const cleared = await update('InvoiceItem', item.id, { qty: null, vat_rate: '' });
+    expect((await cleared.json()).fields).toEqual({ invoice_id: 'recIIIIIIIIIIIIII', pos: 12, discount_pct: 0, unit: '12' });
+  });
+
+  it('rejects booleans, lists, objects, non-finite numbers and text that is not a plain decimal', async () => {
+    for (const value of [true, false, [], [1], {}, 'NaN', 'Infinity', '1e3', '3,5', '0x10', ' ', '2 Stück']) {
+      const res = await create('OrderItem', { order_id: 'recOOOOOOOOOOOOOO', qty: value });
+      expect(res.status, JSON.stringify(value)).toBe(400);
+    }
+    const tooBig = await ctx.req('/api/data/Invoice', {
+      method: 'POST',
+      cookie: user.cookie,
+      headers: { 'content-type': 'application/json' },
+      body: '{"fields":{"total_gross":1e400}}',
+    });
+    expect(tooBig.status).toBe(400);
+    expect(await ctx.deps.records.list('OrderItem')).toEqual([]);
+    expect(await ctx.deps.records.list('Invoice')).toEqual([]);
+  });
+});

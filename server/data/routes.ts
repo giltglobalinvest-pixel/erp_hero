@@ -65,7 +65,7 @@ export function dataRoutes(deps: AppDeps): Hono<AppEnv> {
     const table = tableParam(c);
     assertCanWrite(table, c.get('user'), 'create');
     const body = await readJsonBody(c);
-    const { set } = prepareWriteFields(body.fields ?? {});
+    const { set } = prepareWriteFields(body.fields ?? {}, table);
     const record = await deps.db.write(async (tx) => {
       await deps.numbers.applyOnCreate(tx, table, set, { assignNumber: body.assignNumber === true, variantOf: body.variantOf });
       await deps.files.normalizeAttachmentFields(tx, table, null, set);
@@ -79,7 +79,7 @@ export function dataRoutes(deps: AppDeps): Hono<AppEnv> {
     assertCanWrite(table, c.get('user'), 'update');
     const id = c.req.param('id');
     const body = await readJsonBody(c);
-    const { set, clear } = prepareWriteFields(body.fields ?? {});
+    const { set, clear } = prepareWriteFields(body.fields ?? {}, table);
     const record = await deps.db.write(async (tx) => {
       const existing = await deps.records.get(table, id, tx);
       if (!existing) return null;

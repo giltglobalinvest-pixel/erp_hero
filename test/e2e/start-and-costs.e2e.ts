@@ -123,4 +123,52 @@ describe('AI costs page', () => {
     expect(days).toEqual(['2026-09-01']);
     await h.assertClean(page);
   });
+
+  // Rows the API would now refuse can still exist (older data, direct imports): the page must show them as text.
+  it('never renders a stored token count as markup', async () => {
+    await h.deps.db.write((tx) =>
+      h.deps.records.insert(tx, 'AiUsageLog', {
+        created_at: new Date().toISOString(),
+        user_name: 'Vera Vertrieb',
+        model: 'e2e-markup',
+        output_tokens: '<b>fett</b>',
+      }),
+    );
+    const admin = await h.newPage();
+    await h.openApp(admin, 'admin');
+    await admin.dispatchEvent('button.nav-item[data-route="admin-ai-costs"]', 'click');
+    await admin.waitForSelector('#pageContent table');
+    const bold = await h.run<number>(
+      admin,
+      `return [...document.querySelectorAll('#pageContent b')].filter((e) => e.textContent === 'fett').length;`,
+    );
+    expect(bold).toBe(0);
+    await h.assertClean(admin);
+  });
+
+  it('adds up token counts and costs that are stored as text', async () => {
+    await h.deps.db.write((tx) =>
+      h.deps.records.insert(tx, 'AiUsageLog', {
+        created_at: new Date().toISOString(),
+        model: 'e2e-text',
+        input_tokens: '1200',
+        output_tokens: '30',
+        cost_usd: '0.5',
+      }),
+    );
+    const page = await h.newPage();
+    await h.openApp(page, 'admin');
+    const shown = await h.run<{ kpis: string[]; row: string[] }>(
+      page,
+      `_aiCostsState.model = 'e2e-text';
+       await renderAdminAiCosts();
+       const row = document.querySelector('#pageContent tbody tr');
+       return {
+         kpis: [...document.querySelectorAll('#pageContent p.text-2xl')].map((e) => e.textContent.trim()),
+         row: [...row.cells].slice(-3).map((c) => c.textContent.trim()),
+       };`,
+    );
+    expect(shown).toEqual({ kpis: ['$0.5000', '1.2k', '30', '$0.5000'], row: ['1.2k', '30', '$0.5000'] });
+    await h.assertClean(page);
+  });
 });
