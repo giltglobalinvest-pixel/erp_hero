@@ -1169,17 +1169,21 @@ async function tryAutoLogin() {
    COMPANY (MANDANT) STATE
    ============================================================ */
 async function loadCompanies() {
-  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
-  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + "/Company?filterByFormula=" + encodeURIComponent("{status}='aktiv'");
-  const res = await fetch(url, { headers });
-  if (!res.ok) { APP_KEYS.companies = []; APP_KEYS.currentCompanyId = null; return; }
-  const data = await res.json();
-  const all = (data.records || []).map(r => ({
+  let records;
+  try {
+    records = await readData('Company', "{status}='aktiv'");
+  } catch (e) {
+    console.warn('Firmen konnten nicht geladen werden:', e.message);
+    APP_KEYS.companies = [];
+    APP_KEYS.currentCompanyId = null;
+    return;
+  }
+  const all = records.map(r => ({
     id: r.id,
     name: r.fields.name || '–',
     fd_sales_group_id: String(r.fields.fd_sales_group_id || '').trim(),
     fd_order_group_id: String(r.fields.fd_order_group_id || '').trim(),
-    mailchimp_api_key:       String(r.fields.mailchimp_api_key || '').trim(),
+    has_mailchimp_key:       !!r.fields.has_mailchimp_key,
     mailchimp_server_prefix: String(r.fields.mailchimp_server_prefix || '').trim().toLowerCase(),
     mailchimp_list_id:       String(r.fields.mailchimp_list_id || '').trim(),
     mailchimp_list_name:     String(r.fields.mailchimp_list_name || '').trim()
@@ -1400,10 +1404,95 @@ async function logout() {
 }
 
 /* ============================================================
-   AIRTABLE: CRUD (Helpers für nächste Phasen)
+   API-CLIENT: alle Server-Aufrufe laufen über _api (same-origin, Session-Cookie)
+   ============================================================ */
+const API_BASE = '/api';
+const NETWORK_ERROR_TEXT = 'Server nicht erreichbar – bitte Verbindung prüfen';
+
+// Fehlertext aus einer Server- oder Upstream-Antwort, in dieser Reihenfolge:
+// {error:{message}} (unser Server) · {error:"…"} · {message} · {description} (Freshdesk) · Rohtext · HTTP-Status
+function _errorMessageFrom(data, text, status) {
+  if (data && typeof data === 'object') {
+    if (data.error && typeof data.error === 'object' && data.error.message) return String(data.error.message);
+    if (typeof data.error === 'string' && data.error) return data.error;
+    if (typeof data.message === 'string' && data.message) return data.message;
+    if (typeof data.description === 'string' && data.description) return data.description;
+  }
+  if (text) return text.slice(0, 200);
+  return 'HTTP ' + status;
+}
+
+// Zentraler HTTP-Helper. Auth läuft über das HttpOnly-Session-Cookie — kein Token im Browser.
+// Fehler: Error(message) mit .status, .type (Server-Fehlertyp), .body (JSON) und .text (Rohtext).
+async function _api(method, path, { body, headers, keepalive, reauth = true } = {}) {
+  const h = Object.assign({ 'Accept': 'application/json' }, headers || {});
+  let payload;
+  if (body instanceof FormData || typeof body === 'string') {
+    payload = body;
+  } else if (body !== undefined && body !== null) {
+    payload = JSON.stringify(body);
+    if (!h['Content-Type']) h['Content-Type'] = 'application/json';
+  }
+  let res;
+  try {
+    res = await fetch(API_BASE + path, {
+      method,
+      headers: h,
+      body: payload,
+      credentials: 'same-origin',
+      ...(keepalive ? { keepalive: true } : {})
+    });
+  } catch (_) {
+    throw new Error(NETWORK_ERROR_TEXT);
+  }
+  const ct = res.headers.get('content-type') || '';
+  const text = await res.text().catch(() => '');
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
+  if (!res.ok) {
+    const type = data && data.error && typeof data.error === 'object' ? data.error.type : undefined;
+    // Sitzung abgelaufen: neu anmelden (Overlay) und den Aufruf genau einmal wiederholen.
+    // Ein 401 vom Upstream (z.B. Freshdesk lehnt den Key ab) hat keinen Typ und wird normal geworfen.
+    if (res.status === 401 && type === 'UNAUTHENTICATED' && reauth) {
+      await _reauth();
+      return _api(method, path, { body, headers, keepalive, reauth: false });
+    }
+    const err = new Error(_errorMessageFrom(data, text, res.status));
+    err.status = res.status;
+    err.type = type;
+    err.body = data;
+    err.text = text;
+    throw err;
+  }
+  return ct.includes('application/json') ? data : text;
+}
+
+// Platzhalter bis zum Re-Login-Overlay: eine abgelaufene Sitzung ist ein normaler Fehler.
+async function _reauth() {
+  throw new Error('Sitzung abgelaufen');
+}
+
+function _prefixError(prefix, e) {
+  const err = new Error(prefix + (e && e.message ? e.message : String(e)));
+  if (e) { err.status = e.status; err.type = e.type; err.body = e.body; err.text = e.text; }
+  return err;
+}
+
+function _dataPath(table, id) {
+  return '/data/' + encodeURIComponent(table) + (id ? '/' + encodeURIComponent(id) : '');
+}
+
+function _writeBody(fields, opts) {
+  const body = { fields };
+  if (opts && opts.assignNumber) body.assignNumber = true;
+  if (opts && opts.variantOf) body.variantOf = opts.variantOf;
+  return body;
+}
+
+/* ============================================================
+   DATEN: CRUD über /api (Server)
    ============================================================ */
 async function readData(table, filter, opts = {}) {
-  let url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
   const params = new URLSearchParams();
   if (filter) params.set('filterByFormula', filter);
   if (opts.sort) opts.sort.forEach((s, i) => {
@@ -1411,13 +1500,14 @@ async function readData(table, filter, opts = {}) {
     if (s.direction) params.set(`sort[${i}][direction]`, s.direction);
   });
   if (opts.maxRecords) params.set('maxRecords', String(opts.maxRecords));
-  if (opts.pageSize) params.set('pageSize', String(opts.pageSize));
+  if (opts.fields) opts.fields.forEach(f => params.append('fields[]', f));
   const qs = params.toString();
-  if (qs) url += '?' + qs;
-  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY } });
-  if (!res.ok) throw new Error('Lesen fehlgeschlagen: ' + res.status);
-  const data = await res.json();
-  return data.records || [];
+  try {
+    const data = await _api('GET', _dataPath(table) + (qs ? '?' + qs : ''));
+    return (data && data.records) || [];
+  } catch (e) {
+    throw _prefixError('Lesen fehlgeschlagen: ', e);
+  }
 }
 
 // Entfernt leere Strings für Date-Felder bevor sie an Airtable geschickt werden.
@@ -1432,19 +1522,13 @@ function _stripEmptyDateFields(fields, dateKeys) {
   return fields;
 }
 
-async function writeData(table, fields) {
-  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
-  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table);
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fields })
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error('Schreiben fehlgeschlagen: ' + (err.error?.message || res.status));
+async function writeData(table, fields, opts = {}) {
+  let created;
+  try {
+    created = await _api('POST', _dataPath(table), { body: _writeBody(fields, opts) });
+  } catch (e) {
+    throw _prefixError('Schreiben fehlgeschlagen: ', e);
   }
-  const created = await res.json();
   // === Lazy-Push-Trigger ===
   // Wenn ein Customer in einem Geschäftsvorgang (Quote/Order/Invoice/...) verwendet
   // wird, pushen wir den Customer-Stand silent an die konfigurierten CRMs.
@@ -1460,83 +1544,26 @@ async function writeData(table, fields) {
 }
 
 async function updateData(table, recordId, fields) {
-  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
-  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + recordId;
-  const res = await fetch(url, {
-    method: 'PATCH',
-    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fields })
-  });
-  if (!res.ok) throw new Error('Update fehlgeschlagen: ' + res.status);
-  return await res.json();
+  try {
+    return await _api('PATCH', _dataPath(table, recordId), { body: { fields } });
+  } catch (e) {
+    throw _prefixError('Update fehlgeschlagen: ', e);
+  }
 }
 
 async function deleteData(table, recordId) {
-  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
-  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(table) + '/' + recordId;
-  const res = await fetch(url, {
-    method: 'DELETE',
-    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey }
-  });
-  if (!res.ok) throw new Error('Löschen fehlgeschlagen: ' + res.status);
-  return await res.json();
-}
-
-async function ensureTable(tableName, fields) {
-  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
-  const metaRes = await fetch(
-    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
-    { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
-  );
-  if (!metaRes.ok) throw new Error('Meta-API nicht erreichbar');
-  const meta = await metaRes.json();
-  const exists = (meta.tables || []).find(t => t.name === tableName);
-  if (exists) return exists;
-  const createRes = await fetch(
-    'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
-    {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: tableName, fields })
-    }
-  );
-  if (!createRes.ok) {
-    const err = await createRes.json().catch(() => ({}));
-    throw new Error('Tabelle anlegen fehlgeschlagen: ' + (err.error?.message || createRes.status));
-  }
-  return await createRes.json();
-}
-
-/* ensureFields: stellt sicher, dass alle übergebenen Felder auf der Tabelle existieren.
-   fieldDefs: Array von { name, type, options? } — nur Felder, die noch nicht da sind, werden angelegt.
-   Idempotent: kann beliebig oft aufgerufen werden. */
-async function ensureFields(tableName, fieldDefs) {
-  if (!APP_KEYS.airtableWriteKey) return;
   try {
-    const metaRes = await fetch(
-      'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables',
-      { headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
-    );
-    if (!metaRes.ok) return;
-    const meta = await metaRes.json();
-    const table = (meta.tables || []).find(t => t.name === tableName);
-    if (!table) return;
-    const existingNames = new Set((table.fields || []).map(f => f.name));
-    for (const def of fieldDefs) {
-      if (existingNames.has(def.name)) continue;
-      try {
-        await fetch(
-          'https://api.airtable.com/v0/meta/bases/' + APP_CONFIG.APP_BASE_ID + '/tables/' + table.id + '/fields',
-          {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-            body: JSON.stringify(def)
-          }
-        );
-      } catch (e) { /* einzelner Fehler ignoriert — andere Felder weitermachen */ }
-    }
-  } catch (e) { /* still */ }
+    return await _api('DELETE', _dataPath(table, recordId));
+  } catch (e) {
+    throw _prefixError('Löschen fehlgeschlagen: ', e);
+  }
 }
+
+// Alle Tabellen existieren serverseitig, Felder brauchen kein Schema: nichts zu tun.
+async function ensureTable(tableName, fields) {}
+
+// Siehe ensureTable. Bleibt als No-op, damit die Aufrufer unverändert bleiben.
+async function ensureFields(tableName, fieldDefs) {}
 
 async function uploadFileToRecord(recordId, attachmentField, file) {
   if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
