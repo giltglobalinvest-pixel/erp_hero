@@ -24428,7 +24428,14 @@ async function _adminAddAttachment() {
     const created = await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
     if (file && created?.id) {
       toast('Datei wird hochgeladen …', 'info', 1500);
-      await uploadFileToRecord('Attachment', created.id, 'file', file);
+      try {
+        await uploadFileToRecord('Attachment', created.id, 'file', file);
+      } catch (upErr) {
+        // Kein Anhang ohne Datei zurücklassen: sonst legt der nächste Versuch einen zweiten an.
+        try { await deleteData('Attachment', created.id); } catch (e) {}
+        toast('Datei-Upload fehlgeschlagen – Anhang nicht angelegt: ' + upErr.message, 'error', 6000);
+        return;
+      }
     }
     if (nameInp) nameInp.value = '';
     if (fileInp) fileInp.value = '';
@@ -24532,7 +24539,14 @@ async function addAttachmentWithFile() {
     const created = await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
     if (file && created?.id) {
       toast('Datei wird hochgeladen …', 'info', 1500);
-      await uploadFileToRecord('Attachment', created.id, 'file', file);
+      try {
+        await uploadFileToRecord('Attachment', created.id, 'file', file);
+      } catch (upErr) {
+        // Kein Anhang ohne Datei zurücklassen: sonst legt der nächste Versuch einen zweiten an.
+        try { await deleteData('Attachment', created.id); } catch (e) {}
+        toast('Datei-Upload fehlgeschlagen – Anhang nicht angelegt: ' + upErr.message, 'error');
+        return;
+      }
     }
     if (nameInp) nameInp.value = '';
     if (fileInp) fileInp.value = '';

@@ -39,6 +39,50 @@ const uploadAndWaitForReopen = async (page: Page, input: string, alt: string, na
   );
 };
 
+interface Rec {
+  id: string;
+  fields: Record<string, unknown>;
+}
+
+// File counts of the stored Attachment records with this name.
+const storedFileCounts = async (name: string): Promise<number[]> =>
+  (await h.apiAs<{ records: Rec[] }>('admin', 'GET', '/api/data/Attachment')).records
+    .filter((r) => r.fields.name === name)
+    .map((r) => (Array.isArray(r.fields.file) ? r.fields.file.length : 0))
+    .sort();
+
+// The first attachment upload of the page is dropped, as on a network drop. Later ones go through.
+const dropFirstUpload = async (page: Page): Promise<void> => {
+  let dropped = false;
+  await page.route('**/api/data/Attachment/*/files/file', (route) => {
+    if (dropped) return route.continue();
+    dropped = true;
+    return route.abort();
+  });
+};
+
+// "Anlegen + Hochladen": in "Anhänge verwalten" (every user) and on the admin page "Anhänge".
+const ATTACHMENT_FORMS = [
+  {
+    handler: 'addAttachmentWithFile',
+    who: 'vera',
+    open: 'await openAttachmentManagement();',
+    nameInput: '#newAttName',
+    fileInput: '#newAttFile',
+    list: '#modalBox',
+    name: 'AGB 2026',
+  },
+  {
+    handler: '_adminAddAttachment',
+    who: 'admin',
+    open: 'await renderAdminAttachments();',
+    nameInput: '#adminNewAttName',
+    fileInput: '#adminNewAttFile',
+    list: '#adminAttContent',
+    name: 'Datenblatt 2026',
+  },
+] as const;
+
 describe('files', () => {
   it('an admin uploads a company logo through the form, its URL serves the image, and removing it works', async () => {
     const page = await h.newPage();
@@ -100,6 +144,35 @@ describe('files', () => {
     });
     await h.assertClean(page);
   });
+
+  for (const form of ATTACHMENT_FORMS) {
+    it(`${form.handler}: a failed upload removes the new attachment again, so the retry leaves one "${form.name}"`, async () => {
+      const page = await h.newPage();
+      await h.openApp(page, form.who);
+      await h.run(page, form.open);
+      await dropFirstUpload(page);
+      await page.fill(form.nameInput, form.name);
+      await page.setInputFiles(form.fileInput, { name: 'agb.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 AGB') });
+      const button = `button[onclick="${form.handler}()"]`;
+      await page.dispatchEvent(button, 'click');
+      const failToast = page.locator('#toastWrap span.flex-1', { hasText: 'Server nicht erreichbar' });
+      await failToast.waitFor();
+      const failText = await failToast.textContent();
+      const afterFailure = await storedFileCounts(form.name);
+      // The inputs are still filled: the user clicks again.
+      await page.dispatchEvent(button, 'click');
+      // The handler shows the list again after the upload.
+      const listed = page.locator(form.list).getByText(form.name, { exact: true });
+      await listed.first().waitFor();
+      expect({ failText, afterFailure, afterRetry: await storedFileCounts(form.name), listed: await listed.count() }).toEqual({
+        failText: 'Datei-Upload fehlgeschlagen – Anhang nicht angelegt: Server nicht erreichbar – bitte Verbindung prüfen',
+        afterFailure: [],
+        afterRetry: [1],
+        listed: 1,
+      });
+      await h.assertClean(page);
+    });
+  }
 
   it('a file name with umlauts and spaces uploads and downloads', async () => {
     const page = await h.newPage();
