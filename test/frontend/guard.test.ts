@@ -29,3 +29,12 @@ describe('index.html', () => {
     }
   });
 });
+
+describe('sw.js', () => {
+  const sw = read('sw.js');
+
+  it('is version 2 and leaves /api/ and /healthz to the network', () => {
+    expect(sw.includes("const SW_VERSION = 'erp-hero-sw-v2';")).toBe(true);
+    expect(sw.includes("if (url.pathname.startsWith('/api/') || url.pathname === '/healthz') return;")).toBe(true);
+  });
+});

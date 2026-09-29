@@ -2,6 +2,13 @@
 <html lang="de">
 <head>
 <meta charset="utf-8" />
+<!-- Die App lebt nur auf Railway. Kopien auf GitHub Pages (direkt oder über den alten Loader) leiten sofort dorthin um. -->
+<script>
+  if (/(^|\.)github\.io$/i.test(location.hostname)) {
+    window.stop();
+    location.replace('https://erp-hero-production.up.railway.app/');
+  }
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <meta name="theme-color" content="#1FA8D6" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -44,7 +51,7 @@
     if (lnk) lnk.setAttribute('href', url);
   } catch (_) {}
 
-  // 2) Service Worker registrieren — sw.js liegt im selben Verzeichnis (per gitdeploy hochgeladen).
+  // 2) Service Worker registrieren — sw.js liefert der Server neben index.html aus.
   // Ohne SW zeigt Chrome zwar 'Install app' im Menue, aber das automatische beforeinstallprompt
   // wird nicht ausgeloest. Mit minimalem SW haben wir den Install-Button verlaesslich verfuegbar.
   if ('serviceWorker' in navigator) {
@@ -26999,16 +27006,22 @@ function _pwaShowButtonAlwaysOnNonChrome() {
 }
 document.addEventListener('DOMContentLoaded', _pwaShowButtonAlwaysOnNonChrome);
 
-function forceAppUpdate() {
+async function forceAppUpdate() {
   toast('Lade neueste Version…', 'info', 1500);
-  // Loader-Cache + alle App-Caches leeren, damit auch der Offline-Fallback keine alte Version zeigt
+  // Alte Loader-Kopie, App-Caches und den Service-Worker-Cache leeren, damit auch der Offline-Fallback keine alte Version zeigt
   try {
     Object.keys(localStorage).forEach(k => {
       if (k.startsWith('app_cache_') || k.startsWith('cache_')) localStorage.removeItem(k);
     });
   } catch (e) {}
-  // Über loader.html: zieht index.html direkt von raw.githubusercontent.com → umgeht GitHub-Pages-CDN komplett
-  setTimeout(() => location.replace('loader.html?t=' + Date.now()), 250);
+  try {
+    if (window.caches) {
+      const names = await caches.keys();
+      await Promise.all(names.map(n => caches.delete(n)));
+    }
+  } catch (e) {}
+  // Der Server liefert index.html mit no-cache aus; ?t= macht das Neuladen trotzdem eindeutig.
+  setTimeout(() => location.replace('/?t=' + Date.now()), 250);
 }
 
 // Klick außerhalb schließt das Mandanten-Menü
@@ -27066,14 +27079,6 @@ function _setDefaultRememberMe() {
   if (!cb) return;
   const isTouch = (navigator.maxTouchPoints || 0) > 0 || /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent || '');
   cb.checked = isTouch;
-}
-
-/* ============================================================
-   UPDATE-CHECK (raw.githubusercontent.com — bypasst GitHub-Pages-CDN)
-   ============================================================ */
-async function checkForUpdate() {
-  // App-eigenes Update-Banner entfernt — der Loader übernimmt Update-Erkennung + UI.
-  // Funktion bleibt als No-Op für die Init-Aufrufe.
 }
 
 /* ============================================================
@@ -33098,12 +33103,6 @@ async function init() {
   const ok = await tryAutoLogin();
   if (ok) showApp();
   else showLoginScreen();
-
-  // Update-Check: einmal nach UI ready, dann alle 3 Min + bei Tab-Wechsel/Fokus
-  setTimeout(checkForUpdate, 1500);
-  setInterval(checkForUpdate, 3 * 60 * 1000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkForUpdate(); });
-  window.addEventListener('focus', checkForUpdate);
 }
 
 document.addEventListener('DOMContentLoaded', init);

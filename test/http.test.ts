@@ -35,7 +35,7 @@ describe('static files', () => {
     const res = await ctx.req('/sw.js');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/javascript; charset=utf-8');
-    expect(await res.text()).toContain('erp-hero-sw-v1');
+    expect(await res.text()).toContain('erp-hero-sw-v2');
   });
 
   it('redirects the loaders to /', async () => {

@@ -1,10 +1,10 @@
 // ERP Hero · Service Worker
 // Minimaler SW fuer PWA-Installierbarkeit + Network-first mit Offline-Fallback.
-// Bewusst klein gehalten — die App lebt von Live-Daten (Airtable, Freshdesk),
-// daher kein aggressives Caching von API-Calls. Nur Shell (HTML/JS-CDNs) wird
-// optional bei wiederholten Aufrufen schneller dank Browser-Cache.
+// Bewusst klein gehalten — die App lebt von Live-Daten ueber den eigenen Server.
+// Anfragen an /api/ und /healthz gehen immer direkt ans Netz und werden nie
+// gespeichert; gecacht wird nur die App-Shell (index.html) fuer den Offline-Fall.
 
-const SW_VERSION = 'erp-hero-sw-v1';
+const SW_VERSION = 'erp-hero-sw-v2';
 
 self.addEventListener('install', (event) => {
   // Sofort aktivieren — keine Wartezeit auf alten Worker
@@ -12,7 +12,7 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  // Alte Caches aufraeumen (falls jemals welche entstanden sind)
+  // Alte Caches aufraeumen — v1 hat auch API-Antworten gespeichert
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
@@ -31,6 +31,8 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  // API und Healthcheck nie abfangen: Die Antworten gehoeren zu einer Sitzung und sind Live-Daten.
+  if (url.pathname.startsWith('/api/') || url.pathname === '/healthz') return;
 
   event.respondWith(
     fetch(req).then((res) => {
