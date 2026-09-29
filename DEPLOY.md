@@ -10,7 +10,9 @@ file on a Railway volume. For the design, see `docs/superpowers/specs/2026-09-25
 > **Revoke the old keys.** The Airtable token that was embedded in the old `index.html` stays
 > readable in the git history. Revoke it in Airtable, together with the old Airtable write key.
 > Revoke the Val.town API token too, and delete the Val.town proxy (`erpHeroProxy`). The app uses
-> none of them anymore, and the import in section 9 uses its own read-only token.
+> none of them anymore, and the import in section 9 uses its own read-only token. The keys kept in
+> Val.town, such as the Freshsales token, were readable with that API token: replace them as well
+> (section 9, step 8).
 
 ## 1. Create the project from GitHub
 
@@ -117,16 +119,33 @@ the users from Airtable.
    starts there). Enter a name and save.
 4. Close the customer, open it again, close it, and reload the page. You are still logged in, and
    the customer is still there.
-5. **Administration → Benutzer → Benutzer anlegen** creates a login key for each colleague. The
+5. **Administration → Benutzer → Benutzer anlegen** creates a user with a login key. Create one
+   test user here, not your colleagues: the import in section 9 brings them with their keys. The
    form fills in a new key: copy it with **Kopieren** before you save, because it is not shown
    again.
 6. To replace a key, yours included, open the user, click **Neu**, copy the key and save. Saving a
-   new key does not end open sessions; **Alle Sitzungen abmelden** in the same form does.
+   new key does not end open sessions; **Alle Sitzungen abmelden** in the same form does, and on
+   your own user it logs you out as well.
 
-Then check, with real data, the areas that the automated tests do not cover:
+Everything you create in this section goes into the database the service started with.
+Activating the import (section 9, step 5) replaces that database and keeps it only in
+`/data/backup-<timestamp>/`. If you do not import, it stays the real database, and step 5 is how
+you create your colleagues' logins.
+
+Then check the areas that the automated tests do not cover. Before the import there is no real
+data, so repeat these checks after section 9, step 6.
+
+> **Some of these checks write into the live Freshdesk and Freshsales accounts.** A new quote,
+> order, delivery note or invoice sends its customer to Freshdesk as a company, and to Freshsales
+> as an account once the Freshsales subdomain is saved; so does linking or creating a customer
+> from a ticket. A KI-Angebot adds a private note with a link to the new quote to its ticket, and
+> a saved AI summary adds a note too. These entries stay when the database is replaced. Before the
+> import, use a test customer and a test ticket, and afterwards delete the test company in
+> Freshdesk, the test account in Freshsales and the notes in the ticket.
 
 - **PDF:** open a quote and create its PDF.
-- **Quotes:** create a quote with an article item, then change the item's quantity.
+- **Quotes:** create an article first (**Stammdaten → Artikel**), then a quote with that article
+  as an item, then change the item's quantity.
 - **KI-Angebot:** start one from a Freshdesk ticket (uses `ANTHROPIC_API_KEY`).
 - **Freshdesk:** open a ticket in the app. This needs a Freshdesk key: your own, entered under
   Administration → Benutzer ("Freshdesk API-Keys"), or the server's fallback `FRESHDESK_API_KEY`.
@@ -134,7 +153,9 @@ Then check, with real data, the areas that the automated tests do not cover:
   the image. If the server answers `403 Domain nicht erlaubt: <host>`, add that host to
   `ATTACHMENT_PROXY_ALLOW` (for example `ATTACHMENT_PROXY_ALLOW=<host>,…plus the defaults`) and
   tell the developer, so the default list gets updated.
-- **Freshsales, Mailchimp:** use one feature each (Freshsales sync, Mailchimp "Verbindung testen").
+- **Freshsales, Mailchimp:** under **Administration → Einstellungen**, save the Freshsales
+  subdomain (this turns the Freshsales sync on) and use Mailchimp "Verbindung testen". Then open
+  a customer and click **Erstmals syncen** in its Freshsales section.
 
 The API also works from a REST client with the session cookie:
 
@@ -154,7 +175,9 @@ The API also works from a REST client with the session cookie:
 The app is already switched: it talks only to this server, and the loader pages redirect here.
 The cutover moves the data and retires the old setup.
 
-1. Tell everyone to stop using the old app, and wait until nobody is editing anymore.
+1. Tell everyone to stop using the old app, and wait until nobody is editing anymore. Then revoke
+   the old Airtable keys, if not done yet (see the note at the top): the old app can then no
+   longer write to Airtable, and the import uses its own token.
 2. In Airtable, create a **new read-only token** with scopes `data.records:read` and
    `schema.bases:read` on the App base and the Master base.
 3. Set the import variables on the service (`AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`,
@@ -173,7 +196,7 @@ The cutover moves the data and retires the old setup.
    - review duplicate document numbers, links to missing records, and calculated Airtable fields
      (copied as fixed values);
    - users listed under "Mehrere Benutzer mit demselben Login-Key" share one login key, and only the
-     oldest of them can log in. Give each of them a separate key in step 8.
+     oldest of them can log in. Give each of them a separate key in step 6.
 5. Activate the import. The old database is kept in `/data/backup-<timestamp>/`.
 
    ```
@@ -186,32 +209,42 @@ The cutover moves the data and retires the old setup.
    rolled back, run `railway ssh`, read `/data/activation-failed`, move the entries listed there back
    in the order listed, as described in that file, delete the file, and restart again. The service
    then runs on the previous database; run `db:activate` again if you still want the import.
-6. Everyone logs in at the new address with their existing login key (replaced in step 8). Old
-   bookmarks of the GitHub Pages address and of the loader pages lead here too. An app that was
-   added to the home screen from the old address opens the new address; remove it and add it again
-   from the new address.
+6. Log in at the new address with your existing login key and check the data. Then give every
+   user a new login key before your colleagues start working here. The imported keys were
+   readable through the Airtable token in the old `index.html`, and the old proxy sent them to
+   every logged-in user, so until they are replaced anyone who read them can log in here,
+   including with an admin's key. Open each user under Administration → Benutzer: click **Neu**,
+   copy the key and save, then open the user again and click **Alle Sitzungen abmelden**. Do your
+   own account last, because that logs you out; log in again with your new key. Hand each new key
+   over in person or by phone. A REST client does the same with
+   `PATCH /api/admin/users/<id>/secrets` and `{"generate_api_key": true}`, then
+   `POST /api/sessions/revoke-user` and `{"user_id": "<id>"}`. `<id>` is the user's `id` from
+   `GET /api/data/User`, and the PATCH response carries the new key once, as `api_key`. Both calls
+   need the session cookie and the `Origin: https://<domain>` header (see section 8), for example:
+
+   ```
+   curl -b jar.txt -X PATCH -H "Origin: https://<domain>" -H "Content-Type: application/json" \
+     -d '{"generate_api_key":true}' https://<domain>/api/admin/users/<id>/secrets
+   ```
+
+   Old bookmarks of the GitHub Pages address and of the loader pages lead here too. An app that
+   was added to the home screen from the old address opens the new address; remove it and add it
+   again from the new address.
 7. Remove the four import variables again, and delete the read-only Airtable token.
-8. **Rotate every key the old setup exposed.** The old `index.html` is public, including in the git history:
+8. **Rotate the other keys the old setup exposed.** The old `index.html` is public, including in the git history:
    - revoke the Airtable token that was embedded in the old `index.html`, and the old Airtable
      write key, if not done yet (see the note at the top);
    - create a new Anthropic key (update `ANTHROPIC_API_KEY`);
    - have each user regenerate their Freshdesk API key, then enter it again under
      Administration → Benutzer;
-   - rotate Mailchimp keys;
-   - revoke the Val.town API token and delete the Val.town proxy (`erpHeroProxy`);
-   - **give every user a new login key.** The imported keys were readable through the Airtable
-     token in the old `index.html`, and the old proxy sent them to every logged-in user. As admin,
-     open each user under Administration → Benutzer, yourself included: click **Neu**, copy the
-     key and save, then open the user again and click **Alle Sitzungen abmelden**. Hand each new
-     key over in person or by phone. A REST client does the same with
-     `PATCH /api/admin/users/<id>/secrets` and `{"generate_api_key": true}`, then
-     `POST /api/sessions/revoke-user` and `{"user_id": "<id>"}`. Both calls need the session cookie
-     and the `Origin: https://<domain>` header (see section 8), for example:
-
-     ```
-     curl -b jar.txt -X PATCH -H "Origin: https://<domain>" -H "Content-Type: application/json" \
-       -d '{"generate_api_key":true}' https://<domain>/api/admin/users/<id>/secrets
-     ```
+   - replace the keys that were kept in Val.town, because the old Val.town API token could read
+     them: create a new Freshsales API key (update `FRESHSALES_API_KEY`), and a new Freshdesk key
+     if the server's `FRESHDESK_API_KEY` came from there. The environment variables of the
+     Val.town account list them all;
+   - create a new Mailchimp API key for each Mandant and enter it under
+     Administration → Einstellungen;
+   - revoke the Val.town API token and delete the Val.town proxy (`erpHeroProxy`), if not done
+     yet (see the note at the top).
 9. Keep the Airtable bases untouched as an archive.
 10. GitHub Pages is no longer needed. Leave it on until nobody uses the old address anymore, so old
     bookmarks still redirect, then turn it off in GitHub under **Settings → Pages**.
