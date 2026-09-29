@@ -6,6 +6,11 @@
 <script>
   if (/(^|\.)github\.io$/i.test(location.hostname)) {
     window.stop();
+    // Die alte App hat hier ihre Val.town-Sitzung und den Login-Key gespeichert: vor dem Umleiten löschen.
+    ['session_token_p_1778057282571', 'user_key_p_1778057282571'].forEach(function (k) {
+      try { localStorage.removeItem(k); } catch (e) {}
+      try { sessionStorage.removeItem(k); } catch (e) {}
+    });
     location.replace('https://erp-hero-production.up.railway.app/' + location.hash);
   }
 </script>

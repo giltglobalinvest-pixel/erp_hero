@@ -16,12 +16,17 @@ a{color:#00e676;font-weight:700;}
 <p><a href="https://erp-hero-production.up.railway.app/">Weiter zu ERP Hero</a></p>
 </div>
 <script>
-// ERP Hero läuft nur noch auf Railway. Die alte Kopie von index.html aus dem Loader-Cache wird gelöscht.
+// ERP Hero läuft nur noch auf Railway. Die alte Kopie von index.html aus dem Loader-Cache wird gelöscht, ebenso die
+// Val.town-Sitzung und der Login-Key, die die alte App hier gespeichert hat.
 try {
   Object.keys(localStorage).forEach(function (k) {
     if (k.indexOf('app_cache_') === 0) localStorage.removeItem(k);
   });
 } catch (e) {}
+['session_token_p_1778057282571', 'user_key_p_1778057282571'].forEach(function (k) {
+  try { localStorage.removeItem(k); } catch (e) {}
+  try { sessionStorage.removeItem(k); } catch (e) {}
+});
 location.replace('https://erp-hero-production.up.railway.app/' + location.hash);
 </script>
 </body>
