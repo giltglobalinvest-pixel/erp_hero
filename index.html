@@ -1466,23 +1466,20 @@ async function ensureTable(tableName, fields) {}
 // Siehe ensureTable. Bleibt als No-op, damit die Aufrufer unverändert bleiben.
 async function ensureFields(tableName, fieldDefs) {}
 
-async function uploadFileToRecord(recordId, attachmentField, file) {
-  if (!APP_KEYS.airtableWriteKey) throw new Error('Bitte einloggen');
+// Datei an ein Anhangsfeld hängen: Company.logo / secondary_logo / sub_logo (nur Admins) und Attachment.file.
+// Liefert den aktualisierten Datensatz. Fehler tragen den Text des Servers, ohne Präfix:
+// die Aufrufer setzen ihr eigenes davor (z.B. 'Upload fehlgeschlagen: ').
+async function uploadFileToRecord(table, recordId, attachmentField, file) {
   if (file.size > 5 * 1024 * 1024) throw new Error('Datei zu groß (max 5 MB)');
   const base64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
-  const url = 'https://content.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + recordId + '/' + attachmentField + '/uploadAttachment';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contentType: file.type, file: base64, filename: file.name })
+  return _api('POST', _dataPath(table, recordId) + '/files/' + encodeURIComponent(attachmentField), {
+    body: { file: base64, filename: file.name, contentType: file.type || 'application/octet-stream' }
   });
-  if (!res.ok) throw new Error('Upload fehlgeschlagen');
-  return await res.json();
 }
 
 /* ============================================================
@@ -7376,7 +7373,7 @@ async function _downloadAttachmentAsBase64(att) {
 
   // Versuche zwei Wege parallel-fallback:
   //   1. Direkt-Download (manche Freshdesk-CDN-URLs haben CORS aktiviert)
-  //   2. Über Val.town-Proxy /attachment-proxy (CORS-Bypass)
+  //   2. Über den Server: /api/attachment-proxy (CORS-Bypass, nur erlaubte Freshdesk-Hosts)
   const tryDirect = async () => {
     try {
       const r = await fetch(att.attachment_url);
@@ -7386,12 +7383,8 @@ async function _downloadAttachmentAsBase64(att) {
     } catch (_) { return null; }
   };
   const tryProxy = async () => {
-    const base = _proxyBase();
-    const bearer = _bearerForProxy();
-    if (!base || !bearer) return null;
     try {
-      const proxyUrl = base.replace(/\/+$/, '') + '/attachment-proxy?url=' + encodeURIComponent(att.attachment_url);
-      const r = await fetch(proxyUrl, { headers: { 'Authorization': 'Bearer ' + bearer } });
+      const r = await fetch(API_BASE + '/attachment-proxy?url=' + encodeURIComponent(att.attachment_url), { credentials: 'same-origin' });
       if (!r.ok) return null;
       const b = await r.blob();
       return b.size <= MAX_SIZE ? b : null;
@@ -14325,11 +14318,11 @@ async function uploadCompanyLogo(id, inputEl) {
   if (file.size > 5 * 1024 * 1024) { toast('Datei zu groß (max 5 MB)', 'error'); return; }
   toast('Logo wird hochgeladen …', 'info', 1500);
   try {
-    await uploadFileToRecord(id, 'logo', file);
+    await uploadFileToRecord('Company', id, 'logo', file);
     toast('Logo hochgeladen', 'success');
     // Form neu laden, damit das Preview aktualisiert
     closeModal();
-    setTimeout(() => openCompanyEdit(id), 80);
+    setTimeout(() => openCompanyModal(id), 80);
   } catch (err) {
     toast('Upload fehlgeschlagen: ' + err.message, 'error');
   }
@@ -14341,7 +14334,7 @@ async function removeCompanyLogo(id) {
     await updateData('Company', id, { logo: [] });
     toast('Logo entfernt', 'success');
     closeModal();
-    setTimeout(() => openCompanyEdit(id), 80);
+    setTimeout(() => openCompanyModal(id), 80);
   } catch (err) {
     toast('Entfernen fehlgeschlagen: ' + err.message, 'error');
   }
@@ -14353,10 +14346,10 @@ async function uploadCompanySecondaryLogo(id, inputEl) {
   if (file.size > 5 * 1024 * 1024) { toast('Datei zu groß (max 5 MB)', 'error'); return; }
   toast('2. Logo wird hochgeladen …', 'info', 1500);
   try {
-    await uploadFileToRecord(id, 'secondary_logo', file);
+    await uploadFileToRecord('Company', id, 'secondary_logo', file);
     toast('2. Logo hochgeladen', 'success');
     closeModal();
-    setTimeout(() => openCompanyEdit(id), 80);
+    setTimeout(() => openCompanyModal(id), 80);
   } catch (err) {
     toast('Upload fehlgeschlagen: ' + err.message, 'error');
   }
@@ -14368,7 +14361,7 @@ async function removeCompanySecondaryLogo(id) {
     await updateData('Company', id, { secondary_logo: [] });
     toast('2. Logo entfernt', 'success');
     closeModal();
-    setTimeout(() => openCompanyEdit(id), 80);
+    setTimeout(() => openCompanyModal(id), 80);
   } catch (err) {
     toast('Entfernen fehlgeschlagen: ' + err.message, 'error');
   }
@@ -14380,10 +14373,10 @@ async function uploadCompanySubLogo(id, inputEl) {
   if (file.size > 5 * 1024 * 1024) { toast('Datei zu groß (max 5 MB)', 'error'); return; }
   toast('Sub-Logo wird hochgeladen …', 'info', 1500);
   try {
-    await uploadFileToRecord(id, 'sub_logo', file);
+    await uploadFileToRecord('Company', id, 'sub_logo', file);
     toast('Sub-Logo hochgeladen', 'success');
     closeModal();
-    setTimeout(() => openCompanyEdit(id), 80);
+    setTimeout(() => openCompanyModal(id), 80);
   } catch (err) {
     toast('Upload fehlgeschlagen: ' + err.message, 'error');
   }
@@ -14395,7 +14388,7 @@ async function removeCompanySubLogo(id) {
     await updateData('Company', id, { sub_logo: [] });
     toast('Sub-Logo entfernt', 'success');
     closeModal();
-    setTimeout(() => openCompanyEdit(id), 80);
+    setTimeout(() => openCompanyModal(id), 80);
   } catch (err) {
     toast('Entfernen fehlgeschlagen: ' + err.message, 'error');
   }
@@ -25370,7 +25363,7 @@ async function _adminAddAttachment() {
     const created = await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
     if (file && created?.id) {
       toast('Datei wird hochgeladen …', 'info', 1500);
-      await uploadFileToRecord(created.id, 'file', file);
+      await uploadFileToRecord('Attachment', created.id, 'file', file);
     }
     if (nameInp) nameInp.value = '';
     if (fileInp) fileInp.value = '';
@@ -25474,7 +25467,7 @@ async function addAttachmentWithFile() {
     const created = await writeData('Attachment', { name, company_id: [cur.id], status: 'aktiv' });
     if (file && created?.id) {
       toast('Datei wird hochgeladen …', 'info', 1500);
-      await uploadFileToRecord(created.id, 'file', file);
+      await uploadFileToRecord('Attachment', created.id, 'file', file);
     }
     if (nameInp) nameInp.value = '';
     if (fileInp) fileInp.value = '';
@@ -25489,7 +25482,7 @@ async function addAttachmentFile(attachmentId, inputEl) {
   if (file.size > 5 * 1024 * 1024) return toast('Datei zu groß (max 5 MB)', 'error');
   try {
     toast('Datei wird hochgeladen …', 'info', 1500);
-    await uploadFileToRecord(attachmentId, 'file', file);
+    await uploadFileToRecord('Attachment', attachmentId, 'file', file);
     toast('Datei hochgeladen', 'success');
     await openAttachmentManagement(_attMgmtModal2);
   } catch (err) { toast('Upload fehlgeschlagen: ' + err.message, 'error'); }
