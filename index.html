@@ -726,13 +726,6 @@ const APP_CONFIG = {
   GITHUB_REPO: 'giltglobalinvest-pixel/erp_hero'
 };
 
-// Val.town Auto-Setup Konstanten (analog Freshdesk Hero):
-//   * VALTOWN_VAL_NAME wird beim Auto-Create verwendet
-//   * VALTOWN_FILE_PATH ist die Hauptdatei im Val (HTTP-Trigger)
-const VALTOWN_API_BASE  = 'https://api.val.town';
-const VALTOWN_VAL_NAME  = 'erpHeroProxy';
-const VALTOWN_FILE_PATH = 'main.tsx';
-
 const APP_KEYS = {
   airtableWriteKey: null,
   anthropicKey: null,
@@ -758,11 +751,6 @@ const APP_KEYS = {
   freshdeskTicketTypes: null,
   // Subdomain (z.B. "flpliftparts") für Direktlinks zum Ticket in Freshdesk-UI
   freshdeskDomain: null,
-  // Val.town Auto-Setup: Token + ID des Vals (für Re-Deploy + Env-Vars).
-  // Werden in Master-Base abgelegt und sind auch über die Airtable-API lesbar
-  // (Maintenance-Updates aus dem Chat heraus ohne Copy-Paste möglich).
-  valtownKey: null,
-  valtownValId: null,
   // Freshsales-CRM: Subdomain (z.B. "gilt" für gilt.freshworks.com)
   // + API-Key liegt in Val.town als env var, NICHT im Browser
   freshsalesSubdomain: null
@@ -1019,6 +1007,16 @@ async function loadSettings() {
   } catch (e) {
     console.warn('Einstellungen konnten nicht geladen werden:', e.message);
   }
+}
+
+// Speichert eine Einstellung auf dem Server (nur Admins). Leerer Wert = Einstellung löschen.
+// Übernimmt die Antwort (alle Einstellungen) in APP_KEYS.
+async function saveSetting(key, value) {
+  const data = await _api('PUT', '/settings/' + encodeURIComponent(key), {
+    body: { value: value == null ? '' : String(value) }
+  });
+  _applySettings(data && data.settings);
+  return (data && data.settings) || {};
 }
 
 /* ============================================================
@@ -2788,7 +2786,7 @@ async function _memSend(ticketId, toEmail, fsContactId, btnEl) {
     // 0) email_config_id (Pflichtfeld für outbound_email) auflösen
     const emailConfigId = await _getDefaultEmailConfigId();
     if (!emailConfigId) {
-      throw new Error('Keine email_config_id verfügbar — Admin → Einstellungen → Step 8: Freshdesk Email-Inbox-ID setzen.');
+      throw new Error('Keine email_config_id verfügbar — Admin → Einstellungen → Step 4: Freshdesk Email-Inbox-ID setzen.');
     }
     // 1) Outbound Email via Freshdesk — legt automatisch ein Ticket an
     const res = await proxyFetch('freshdesk/api/v2/tickets/outbound_email', {
@@ -2827,7 +2825,7 @@ async function _memSend(ticketId, toEmail, fsContactId, btnEl) {
     if (/email_config_id/i.test(m)) {
       msg = 'Freshdesk akzeptiert nicht den Default-Absender. Bitte in Freshdesk → Admin → Email Settings prüfen ob ein Default-Email-Config aktiv ist.';
     }
-    toast(msg, 'error', 10000);
+    toast(escapeHtml(msg), 'error', 10000);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
 }
@@ -4314,7 +4312,7 @@ async function openNewTicketModal(mode) {
   const cur = getCurrentCompany();
   if (!cur) { toast('Bitte erst Mandant wählen', 'warn'); return; }
   const groupId = mode === 'order' ? getCurrentOrderGroupId() : getCurrentSalesGroupId();
-  if (!groupId) { toast('Keine Group-ID konfiguriert — Admin → Einstellungen → Step 5', 'error', 7000); return; }
+  if (!groupId) { toast('Keine Group-ID konfiguriert — Admin → Einstellungen → Step 1', 'error', 7000); return; }
   if (!_proxyBase()) { toast('Proxy nicht konfiguriert', 'error', 6000); return; }
 
   // Daten für Combobox + Auto-Fill
@@ -4502,7 +4500,7 @@ async function _newTicketSubmit(mode, formEl) {
     console.error('[newTicket]', err);
     let msg = err.message || String(err);
     if (/group/i.test(msg) && /not.*found|invalid/i.test(msg)) {
-      msg = 'Group-ID ' + groupId + ' ist in Freshdesk unbekannt. Bitte Admin → Einstellungen → Step 5 prüfen.';
+      msg = 'Group-ID ' + groupId + ' ist in Freshdesk unbekannt. Bitte Admin → Einstellungen → Step 1 prüfen.';
     }
     toast('Anlage fehlgeschlagen: ' + msg, 'error', 9000);
     if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="plus-circle" class="w-4 h-4"></i> ' + (mode === 'order' ? 'Bestellung' : 'Anfrage') + ' anlegen'; if (window.lucide) lucide.createIcons(); }
@@ -10170,7 +10168,7 @@ async function _tcmCreateFdCompany(btnEl) {
 async function _tcmPushFdToFs(btnEl) {
   const ctx = _tcmCtx;
   if (!ctx) return;
-  if (!APP_KEYS.freshsalesSubdomain) return toast('Freshsales nicht konfiguriert (Step 9)', 'warn', 6000);
+  if (!APP_KEYS.freshsalesSubdomain) return toast('Freshsales nicht konfiguriert (Step 6)', 'warn', 6000);
   if (!APP_KEYS.proxyV2) return toast('Benötigt Val.town-Proxy v2', 'error', 7000);
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Synce nach Freshsales…'; if (window.lucide) lucide.createIcons(); }
   toast('Erstelle/verknüpfe in Freshsales…', 'info', 2500);
@@ -12034,166 +12032,6 @@ async function freshdeskFetch(path) {
   let p = String(path).replace(/^\/+/, '');
   if (!p.startsWith('api/v2/')) p = 'api/v2/' + p;
   return proxyFetch('freshdesk/' + p);
-}
-
-/* ============================================================
-   VAL.TOWN MANAGEMENT API — Auto-Setup + Re-Deploy
-   ============================================================
-   Direkt-Zugriff auf api.val.town. Der API-Token wird im Schnell-Setup
-   einmal eingegeben und in der Master-Base als "valtownKey" abgelegt,
-   damit Maintenance-Updates aus dem Chat heraus ohne Copy-Paste laufen.
-   Pattern ist identisch zur Freshdesk Hero App (bewährt + getestet).
-   ============================================================ */
-async function valtownApi(token, method, path, body) {
-  if (!token) throw new Error('Val.town API-Token fehlt');
-  const init = {
-    method,
-    headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' }
-  };
-  if (body !== undefined) {
-    init.headers['Content-Type'] = 'application/json';
-    init.body = JSON.stringify(body);
-  }
-  let res;
-  try { res = await fetch(VALTOWN_API_BASE + path, init); }
-  catch (netErr) { throw new Error('Val.town nicht erreichbar: ' + netErr.message); }
-  const text = await res.text();
-  let data; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { _raw: text }; }
-  if (!res.ok) {
-    let msg = '';
-    if (data && data.message)      msg = data.message;
-    else if (data && data.error)   msg = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
-    else if (data && data.errors)  msg = JSON.stringify(data.errors);
-    else if (data && data.issues)  msg = JSON.stringify(data.issues);  // Zod-Style
-    else if (data && data._raw)    msg = data._raw.slice(0, 200);
-    else                            msg = 'HTTP ' + res.status;
-    if (!String(msg).match(/HTTP/)) msg = msg + ' (HTTP ' + res.status + ')';
-    const err = new Error(String(msg));
-    err.status = res.status; err.data = data;
-    throw err;
-  }
-  return data;
-}
-
-async function valtownMe(token)             { return valtownApi(token, 'GET', '/v1/me'); }
-async function valtownGetVal(token, valId)  { return valtownApi(token, 'GET', '/v2/vals/' + valId); }
-async function valtownCreateVal(token, name, description = '', privacy = 'public') {
-  // 'public' default: zählt nicht zum Free-Tier-Privatlimit; Code-Sichtbarkeit
-  // ist unkritisch — alle Secrets liegen in Env-Vars (immer privat).
-  const body = { name, privacy };
-  if (description && description.length > 0) body.description = description.slice(0, 64);
-  return valtownApi(token, 'POST', '/v2/vals', body);
-}
-async function valtownAddHttpFile(token, valId, code) {
-  return valtownApi(token, 'POST', `/v2/vals/${valId}/files?path=${encodeURIComponent(VALTOWN_FILE_PATH)}`, {
-    type: 'http', content: code
-  });
-}
-async function valtownUpdateFile(token, valId, code) {
-  return valtownApi(token, 'PUT', `/v2/vals/${valId}/files?path=${encodeURIComponent(VALTOWN_FILE_PATH)}`, {
-    content: code
-  });
-}
-async function valtownSetEnvVar(token, valId, key, value, description = '') {
-  // POST = create; bei 409/400/"exists" → PUT (update)
-  try {
-    return await valtownApi(token, 'POST', `/v2/vals/${valId}/environment_variables`, { key, value, description });
-  } catch (e) {
-    if (e.status === 409 || e.status === 400 || /exist|duplicate|already/i.test(e.message)) {
-      return valtownApi(token, 'PUT', `/v2/vals/${valId}/environment_variables/${encodeURIComponent(key)}`, { value, description });
-    }
-    throw e;
-  }
-}
-
-// Orchestrator — alle Steps mit Live-Progress-Callback
-async function valtownAutoSetup({ token, onProgress }) {
-  const log = (msg, kind = 'info') => onProgress?.(msg, kind);
-  // 0) /v1/me ist optionaler Pre-Flight (User:Read scope). Endpoint-URL kommt
-  //    aus der File-Creation, daher nicht zwingend.
-  log('Pre-Flight (optional)…');
-  try {
-    const me = await valtownMe(token);
-    log('Eingeloggt als ' + (me.username || me.handle || '?'), 'ok');
-  } catch (e) {
-    log('Pre-Flight übersprungen (User:Read fehlt — egal, fahre fort)', 'warn');
-  }
-
-  // 1) Existierenden Val updaten ODER neuen erstellen
-  let valId = APP_KEYS.valtownValId;
-  let endpointUrl = null;
-  let isUpdate = false;
-  if (valId) {
-    try {
-      log('Bestehender Val (' + valId.slice(0, 8) + '…) → aktualisiere Code…');
-      const fileRes = await valtownUpdateFile(token, valId, VALTOWN_PROXY_CODE);
-      endpointUrl = fileRes.links?.endpoint;
-      isUpdate = true;
-      log('Code aktualisiert', 'ok');
-    } catch (e) {
-      log('Bestehender Val nicht erreichbar (' + e.message + ') → neuer Val', 'warn');
-      valId = null;
-    }
-  }
-  if (!valId) {
-    log('Erstelle Val "' + VALTOWN_VAL_NAME + '" (public — keine Secrets im Code)…');
-    let val;
-    const desc = 'Auto-erstellt von ERP Hero';
-    try {
-      val = await valtownCreateVal(token, VALTOWN_VAL_NAME, desc, 'public');
-    } catch (e) {
-      if (/limit|upgrade/i.test(e.message)) {
-        log('Privat-Limit erreicht → Retry mit Suffix…', 'warn');
-        val = await valtownCreateVal(token, VALTOWN_VAL_NAME + Date.now().toString(36).slice(-4), desc, 'public');
-      } else if (/name|exist|duplicate/i.test(e.message)) {
-        log('Name belegt → Suffix anhängen…', 'warn');
-        val = await valtownCreateVal(token, VALTOWN_VAL_NAME + Date.now().toString(36).slice(-4), desc, 'public');
-      } else throw e;
-    }
-    valId = val.id;
-    log('Val angelegt (' + valId.slice(0, 8) + '…)', 'ok');
-
-    log('Lade Proxy-Code in ' + VALTOWN_FILE_PATH + '…');
-    const fileRes = await valtownAddHttpFile(token, valId, VALTOWN_PROXY_CODE);
-    endpointUrl = fileRes.links?.endpoint;
-    log('Code geladen', 'ok');
-  }
-  if (!endpointUrl) throw new Error('Val.town hat keine Endpoint-URL geliefert');
-  const cleanUrl = endpointUrl.replace(/\/+$/, '');
-
-  // 2) Environment Variables setzen — nur die zwingenden + ANTHROPIC_API_KEY
-  //    wenn vorhanden. FRESHDESK_DOMAIN ist im Frontend-Pfad nicht zwingend
-  //    nötig (Backend liest direkt env), aber wir setzen es wenn bekannt.
-  const envs = [
-    { k: 'AIRTABLE_READ_KEY', v: APP_CONFIG.AIRTABLE_READ_KEY, d: 'Read-Token für App-Base' },
-    { k: 'AIRTABLE_BASE_ID',  v: APP_CONFIG.APP_BASE_ID,       d: 'App-Base-ID' }
-  ];
-  if (APP_KEYS.anthropicKey)        envs.push({ k: 'ANTHROPIC_API_KEY',    v: APP_KEYS.anthropicKey,        d: 'Anthropic-Key für KI-Calls' });
-  if (APP_KEYS.freshdeskDomain)     envs.push({ k: 'FRESHDESK_DOMAIN',     v: APP_KEYS.freshdeskDomain,     d: 'Freshdesk-Subdomain (z.B. flpliftparts)' });
-  if (APP_KEYS.freshsalesSubdomain) envs.push({ k: 'FRESHSALES_SUBDOMAIN', v: APP_KEYS.freshsalesSubdomain, d: 'Freshsales-Subdomain (z.B. gilt)' });
-  for (const env of envs) {
-    log('Setze ENV ' + env.k + '…');
-    try {
-      await valtownSetEnvVar(token, valId, env.k, env.v, env.d);
-      log('OK: ' + env.k, 'ok');
-    } catch (e) {
-      log('Konnte ' + env.k + ' nicht setzen: ' + e.message, 'warn');
-    }
-  }
-
-  // 3) Master-Base persistieren
-  log('Speichere Konfiguration in Master-Base…');
-  const keys = await _fetchMasterBaseKeys();
-  const find = (k) => keys.find(r => r.fields.key_name === k);
-  await _writeMasterBaseKey('apiProxyUrl',  cleanUrl, find('apiProxyUrl')?.id);
-  await _writeMasterBaseKey('valtownKey',   token,    find('valtownKey')?.id);
-  await _writeMasterBaseKey('valtownValId', valId,    find('valtownValId')?.id);
-  APP_KEYS.apiProxyUrl  = cleanUrl;
-  APP_KEYS.valtownKey   = token;
-  APP_KEYS.valtownValId = valId;
-  log('Master-Base aktualisiert', 'ok');
-
-  return { valId, endpointUrl: cleanUrl, isUpdate };
 }
 
 /* ============================================================
@@ -15417,566 +15255,17 @@ async function deleteQuoteBundle(id) {
 }
 
 /* ============================================================
-   ADMIN: EINSTELLUNGEN — Val.town Setup-Wizard
-   Der Val.town-Proxy ist die einzige Stelle, an der API-Keys für
-   Anthropic + Freshdesk leben. Browser hält keine externen Keys mehr.
-   Auth zum Proxy = User-API-Key (Bearer). Val.town validiert ihn
-   gegen Airtable User-Tabelle (mit In-Memory-Cache).
+   ADMIN: EINSTELLUNGEN
+   Nicht geheime Einstellungen liegen auf dem Server (/api/settings, nur
+   Admins schreiben). API-Keys sind Railway-Variablen; Mailchimp-Keys liegen
+   verschlüsselt am Mandanten auf dem Server. Der Browser sieht keinen Key.
    ============================================================ */
-
-// Der komplette Val.town-Code als Copy-Paste-Vorlage. Wird in der
-// Settings-UI angezeigt; User legt einen "HTTP val" in Val.town an
-// und fügt diesen Code ein. Alle Secrets kommen aus env vars oder
-// vom Airtable User-Record (per-User Freshdesk-Key).
-const VALTOWN_PROXY_CODE = `// FLP ERP · API-Proxy v2 mit Session-Token + per-User-×-Firma-Freshdesk-Keys
-// =====================================================================
-// HTTP-Val für Val.town. Routet:
-//   POST /auth                     →  Login: User-Key prüfen, Session-Token ausgeben
-//   POST /logout                   →  aktuelle Session invalidieren
-//   GET  /me                       →  aktuellen User abrufen (für Auto-Login)
-//   POST /sessions/revoke-user     →  ALLE Sessions eines Users killen (Admin only)
-//   POST /anthropic/v1/messages    →  api.anthropic.com (mit ANTHROPIC_API_KEY)
-//   GET  /freshdesk/api/v2/...     →  <domain>.freshdesk.com
-//                                      Key-Auswahl: User × aktuelle Firma
-//                                      (Header X-Company-Id) → User-Default
-//                                      → env var FRESHDESK_API_KEY
-//   GET  /health                   →  Auth-Check (für "Verbindung testen")
-//
-// WICHTIG — Sessions persistent:
-//   Val.town schläfert HTTP-Vals nach kurzer Inaktivität ein. Eine
-//   In-Memory-Map würde dann den State verlieren → 401 nach Worker-Wakeup.
-//   Daher liegen Sessions in Val.town's blob-Storage (übersteht Restarts).
-//   TTL wird manuell geprüft (blob hat kein natives expireIn).
-//
-// ENV VARS in Val.town setzen:
-//   AIRTABLE_READ_KEY   — Read-Token mit Scope auf App-Base
-//   AIRTABLE_BASE_ID    — App-Base-ID (appCu...)
-//   ANTHROPIC_API_KEY   — sk-ant-...
-//   FRESHDESK_DOMAIN    — Subdomain ohne .freshdesk.com (z.B. flpliftparts)
-//   FRESHDESK_API_KEY   — (optional) Fallback wenn User keinen eigenen Key hat
-// =====================================================================
-
-import { blob } from "https://esm.town/v/std/blob";
-
-const USER_CACHE    = new Map(); // in-memory user cache (60s TTL, ok wenn weg)
-const CACHE_TTL_MS  = 60_000;
-const SESSION_SHORT = 8 * 60 * 60 * 1000;        // 8 h
-const SESSION_LONG  = 30 * 24 * 60 * 60 * 1000;  // 30 d
-const SESSION_PREFIX = "erp_session_";
-
-async function setSession(token: string, data: any) {
-  await blob.setJSON(SESSION_PREFIX + token, data);
-}
-async function getSession(token: string) {
-  let data: any;
-  try {
-    data = await blob.getJSON(SESSION_PREFIX + token);
-  } catch (_) {
-    return null; // blob nicht vorhanden
-  }
-  if (!data) return null;
-  if (data.expires && data.expires < Date.now()) {
-    try { await blob.delete(SESSION_PREFIX + token); } catch (_) {}
-    return null;
-  }
-  return data;
-}
-async function deleteSession(token: string) {
-  try { await blob.delete(SESSION_PREFIX + token); } catch (_) {}
-}
-async function revokeAllSessionsForUser(userId: string): Promise<number> {
-  let count = 0;
-  let items: any[] = [];
-  try {
-    items = await blob.list(SESSION_PREFIX) || [];
-  } catch (_) { return 0; }
-  for (const item of items) {
-    const key = item.key || item;
-    let val: any;
-    try { val = await blob.getJSON(key); } catch (_) { continue; }
-    if (val && val.userId === userId) {
-      try { await blob.delete(key); count++; } catch (_) {}
-    }
-  }
-  return count;
-}
-
-function generateSessionToken(): string {
-  const arr = new Uint8Array(32);
-  crypto.getRandomValues(arr);
-  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function lookupUser(userKey: string) {
-  const cached = USER_CACHE.get(userKey);
-  if (cached && cached.expires > Date.now()) return cached.user;
-  const baseId = Deno.env.get("AIRTABLE_BASE_ID");
-  const readKey = Deno.env.get("AIRTABLE_READ_KEY");
-  if (!baseId || !readKey) throw new Error("Server-Konfiguration: AIRTABLE_BASE_ID/AIRTABLE_READ_KEY fehlt");
-  const formula = \`AND({api_key}='\${userKey.replace(/'/g, "\\\\'")}',{status}='aktiv')\`;
-  const url = \`https://api.airtable.com/v0/\${baseId}/User?filterByFormula=\${encodeURIComponent(formula)}\`;
-  const res = await fetch(url, { headers: { Authorization: \`Bearer \${readKey}\` } });
-  if (!res.ok) throw new Error(\`User-Lookup fehlgeschlagen: \${res.status}\`);
-  const data = await res.json();
-  const rec = (data.records || [])[0];
-  if (!rec) return null;
-  // Per-Firma-Keys: JSON-Object { "<companyId>": "<key>" } im Feld
-  // freshdesk_keys_json. Robust gegen leeren / kaputten String.
-  let fdKeysByCompany: Record<string, string> = {};
-  try {
-    const raw = (rec.fields.freshdesk_keys_json || "").toString().trim();
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        for (const [k, v] of Object.entries(parsed)) {
-          const s = (v || "").toString().trim();
-          if (s) fdKeysByCompany[k] = s;
-        }
-      }
-    }
-  } catch (_) { /* malformed JSON → ignorieren, Fallback greift */ }
-  const user = {
-    id: rec.id,
-    name: rec.fields.name || "",
-    role: rec.fields.role || "",
-    is_admin: !!rec.fields.is_admin,
-    allowed_companies: rec.fields.allowed_companies || [],
-    freshdesk_api_key: (rec.fields.freshdesk_api_key || "").trim() || null,
-    freshdesk_keys_by_company: fdKeysByCompany
-  };
-  USER_CACHE.set(userKey, { user, expires: Date.now() + CACHE_TTL_MS });
-  return user;
-}
-
-// Resolves a Bearer token to user info. Tries KV session first, then
-// falls back to legacy direct-user-key lookup (for migration).
-async function resolveAuth(token: string) {
-  if (!token) return null;
-  // 1) Session token (preferred) — aus KV
-  const sess = await getSession(token);
-  if (sess) {
-    return {
-      kind: "session",
-      userId: sess.userId,
-      name: sess.name,
-      role: sess.role || "",
-      is_admin: sess.isAdmin,
-      allowed_companies: sess.allowedCompanies || [],
-      freshdesk_api_key: sess.freshdeskApiKey,
-      freshdesk_keys_by_company: sess.freshdeskKeysByCompany || {}
-    };
-  }
-  // 2) Legacy: Bearer == user_key (Übergangsmodus, nicht persistieren)
-  try {
-    const u = await lookupUser(token);
-    if (u) return {
-      kind: "legacy",
-      userId: u.id,
-      name: u.name,
-      role: u.role,
-      is_admin: u.is_admin,
-      allowed_companies: u.allowed_companies,
-      freshdesk_api_key: u.freshdesk_api_key,
-      freshdesk_keys_by_company: u.freshdesk_keys_by_company || {}
-    };
-  } catch (_) { /* fall through */ }
-  return null;
-}
-
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*",
-      "access-control-allow-headers": "authorization, content-type, x-company-id",
-      "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    }
-  });
-}
-
-export default async function (req: Request): Promise<Response> {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "access-control-allow-origin": "*",
-        "access-control-allow-headers": "authorization, content-type, x-company-id, x-mailchimp-key, x-mailchimp-server",
-        "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-        "access-control-max-age": "86400"
-      }
-    });
-  }
-
-  const url = new URL(req.url);
-  const path = url.pathname.replace(/^\\/+/, "");
-
-  // ===== /auth: Login mit user_key, gibt session_token zurück =====
-  if (path === "auth" && req.method === "POST") {
-    let body: any = {};
-    try { body = await req.json(); } catch (_) {}
-    const userKey = (body.user_key || "").toString().trim();
-    const longLived = !!body.long_lived;
-    if (!userKey) return jsonResponse({ error: "user_key fehlt" }, 400);
-    let user;
-    try { user = await lookupUser(userKey); }
-    catch (e) { return jsonResponse({ error: e.message }, 500); }
-    if (!user) return jsonResponse({ error: "Ungültiger Login-Key oder Account inaktiv" }, 401);
-    const token = generateSessionToken();
-    const ttl = longLived ? SESSION_LONG : SESSION_SHORT;
-    await setSession(token, {
-      userId: user.id,
-      name: user.name,
-      role: user.role,
-      isAdmin: user.is_admin,
-      allowedCompanies: user.allowed_companies,
-      freshdeskApiKey: user.freshdesk_api_key,
-      freshdeskKeysByCompany: user.freshdesk_keys_by_company || {},
-      expires: Date.now() + ttl,
-      longLived
-    });
-    return jsonResponse({
-      session_token: token,
-      expires_in: Math.floor(ttl / 1000),
-      user: {
-        id: user.id,
-        name: user.name,
-        role: user.role,
-        is_admin: user.is_admin,
-        allowed_companies: user.allowed_companies,
-        has_freshdesk_key: !!user.freshdesk_api_key,
-        freshdesk_company_keys: Object.keys(user.freshdesk_keys_by_company || {})
-      }
-    });
-  }
-
-  // 1) Auth — Token aus Bearer-Header (Session-Token oder legacy User-Key)
-  const auth = req.headers.get("authorization") || "";
-  const token = auth.replace(/^Bearer\\s+/i, "").trim();
-  if (!token) return jsonResponse({ error: "Missing Bearer token" }, 401);
-  const user = await resolveAuth(token);
-  if (!user) return jsonResponse({ error: "Ungültiges Token oder abgelaufen" }, 401);
-
-  // ===== /logout: aktuelle Session killen =====
-  if (path === "logout" && req.method === "POST") {
-    if (user.kind === "session") await deleteSession(token);
-    return jsonResponse({ ok: true });
-  }
-
-  // ===== /me: aktuelle User-Daten (für Auto-Login) =====
-  if (path === "me") {
-    return jsonResponse({
-      user: {
-        id: user.userId,
-        name: user.name,
-        role: user.role,
-        is_admin: user.is_admin,
-        allowed_companies: user.allowed_companies,
-        has_freshdesk_key: !!user.freshdesk_api_key,
-        freshdesk_company_keys: Object.keys(user.freshdesk_keys_by_company || {})
-      }
-    });
-  }
-
-  // ===== /sessions/revoke-user: Admin killt alle Sessions eines Users =====
-  if (path === "sessions/revoke-user" && req.method === "POST") {
-    if (!user.is_admin) return jsonResponse({ error: "Nur für Admins" }, 403);
-    let body: any = {};
-    try { body = await req.json(); } catch (_) {}
-    const targetId = (body.user_id || "").toString();
-    if (!targetId) return jsonResponse({ error: "user_id fehlt" }, 400);
-    const count = await revokeAllSessionsForUser(targetId);
-    return jsonResponse({ revoked: count });
-  }
-
-  // 2) Pfad-Routing für proxied Calls
-  // Health-Check (für "Verbindung testen" in der App)
-  if (path === "health") {
-    return jsonResponse({
-      ok: true,
-      auth_kind: user.kind,
-      user: {
-        name: user.name,
-        is_admin: user.is_admin,
-        has_freshdesk_key: !!user.freshdesk_api_key,
-        freshdesk_company_keys: Object.keys(user.freshdesk_keys_by_company || {})
-      }
-    });
-  }
-
-  // 3) Anthropic
-  if (path === "anthropic/v1/messages") {
-    if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
-    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-    if (!apiKey) return jsonResponse({ error: "ANTHROPIC_API_KEY env var fehlt in Val.town" }, 500);
-    const body = await req.text();
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-      },
-      body
-    });
-    const text = await upstream.text();
-    return new Response(text, {
-      status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") || "application/json",
-        "access-control-allow-origin": "*"
-      }
-    });
-  }
-
-  // 4a) Attachment-Proxy für Freshdesk-CDN-URLs
-  //     Browser kann attachment_url meistens nicht direkt fetchen (CORS-Block
-  //     bei Freshdesk-CDN/-attachment-Hosts). Der Proxy schleust GET-Requests
-  //     durch und gibt CORS-Header zurück — limitiert auf Freshdesk-Domains.
-  if (path === "attachment-proxy" && req.method === "GET") {
-    const targetUrl = url.searchParams.get("url");
-    if (!targetUrl) return jsonResponse({ error: "url param fehlt" }, 400);
-    let u: URL;
-    try { u = new URL(targetUrl); }
-    catch (_) { return jsonResponse({ error: "Ungültige URL" }, 400); }
-    // Whitelist: nur Freshdesk-Hosts erlauben (verhindert SSRF)
-    const host = u.hostname.toLowerCase();
-    const freshdeskHosts = /(^|\\.)freshdesk\\.com$|(^|\\.)freshdesk-attachment\\.com$|^attachment\\.freshdesk\\.com$|^cdn\\.freshdesk\\.com$|^attachments\\.freshdesk\\.com$|^s3.*\\.amazonaws\\.com$|^attachment\\.freshdeskusercontent\\.com$/i;
-    if (!freshdeskHosts.test(host)) {
-      return jsonResponse({ error: "Domain nicht erlaubt: " + host }, 403);
-    }
-    const upstream = await fetch(targetUrl);
-    if (!upstream.ok) {
-      return jsonResponse({ error: "Upstream " + upstream.status }, upstream.status);
-    }
-    const buf = await upstream.arrayBuffer();
-    return new Response(buf, {
-      status: 200,
-      headers: {
-        "content-type": upstream.headers.get("content-type") || "application/octet-stream",
-        "content-length": String(buf.byteLength),
-        "cache-control": "private, max-age=300",
-        "access-control-allow-origin": "*"
-      }
-    });
-  }
-
-  // 4) Freshdesk
-  if (path.startsWith("freshdesk/")) {
-    const fdPath = path.replace(/^freshdesk\\//, "");
-    if (!fdPath.startsWith("api/v2/")) {
-      return jsonResponse({ error: "Bad path. Erwartet: /freshdesk/api/v2/..." }, 400);
-    }
-    let domain = Deno.env.get("FRESHDESK_DOMAIN") || "";
-    // Defensive Parsing: wenn User versehentlich "https://", ".freshdesk.com",
-    // trailing slash etc. mit eingetragen hat, sauber abschneiden.
-    domain = domain
-      .replace(/^https?:\\/\\//i, "")
-      .replace(/\\.freshdesk\\.com\\/?$/i, "")
-      .replace(/\\/+$/, "")
-      .trim();
-    if (!domain) return jsonResponse({ error: "FRESHDESK_DOMAIN env var fehlt in Val.town" }, 500);
-    // Key-Auswahl in 3 Stufen:
-    //  1. User × aktuelle Firma (X-Company-Id Header) → freshdesk_keys_by_company[companyId]
-    //  2. User-Default → freshdesk_api_key
-    //  3. Server-Fallback → env var FRESHDESK_API_KEY
-    const companyId = (req.headers.get("x-company-id") || "").trim();
-    let fdKey: string | null = null;
-    let fdKeySource = "fallback-env";
-    if (companyId && user.freshdesk_keys_by_company && user.freshdesk_keys_by_company[companyId]) {
-      fdKey = user.freshdesk_keys_by_company[companyId];
-      fdKeySource = "user-company";
-    }
-    if (!fdKey && user.freshdesk_api_key) { fdKey = user.freshdesk_api_key; fdKeySource = "user-default"; }
-    if (!fdKey) fdKey = Deno.env.get("FRESHDESK_API_KEY") || null;
-    if (!fdKey) return jsonResponse({
-      error: "Kein Freshdesk-Key verfügbar. Entweder beim User in der App eintragen (Admin → Benutzer · pro Firma oder Default) oder FRESHDESK_API_KEY env var in Val.town setzen."
-    }, 500);
-    const target = \`https://\${domain}.freshdesk.com/\${fdPath}\${url.search}\`;
-    const basic = btoa(\`\${fdKey}:X\`);
-    // Content-Type vom Client-Request übernehmen (multipart/form-data oder application/json)
-    const clientCT = req.headers.get("content-type") || "application/json";
-    const isMultipart = clientCT.toLowerCase().startsWith("multipart/");
-    const fdHeaders: Record<string, string> = {
-      "Authorization": \`Basic \${basic}\`
-    };
-    // Bei multipart KEIN Content-Type setzen — fetch übernimmt mit Boundary
-    if (!isMultipart) fdHeaders["Content-Type"] = clientCT;
-    else fdHeaders["Content-Type"] = clientCT;   // mit Boundary aus Client
-    const init: RequestInit = { method: req.method, headers: fdHeaders };
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      if (isMultipart) {
-        // Multipart: Body als ArrayBuffer durchreichen (Boundary bleibt erhalten)
-        init.body = await req.arrayBuffer();
-      } else {
-        init.body = await req.text();
-      }
-    }
-    const upstream = await fetch(target, init);
-    const text = await upstream.text();
-    return new Response(text, {
-      status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") || "application/json",
-        "access-control-allow-origin": "*"
-      }
-    });
-  }
-
-  // 5) Freshsales / Freshworks-CRM — Routet /freshsales/api/... an
-  //    https://<subdomain>.freshworks.com/crm/sales/api/...
-  //    Auth: "Token token=API_TOKEN" Header. Subdomain + Key kommen aus env vars.
-  if (path.startsWith("freshsales/")) {
-    const fsPath = path.replace(/^freshsales\\//, "");
-    let subdomain = (Deno.env.get("FRESHSALES_SUBDOMAIN") || "").trim()
-      .replace(/^https?:\\/\\//i, "")
-      .replace(/\\.freshworks\\.com\\/?.*$/i, "")
-      .replace(/\\/+$/, "");
-    if (!subdomain) return jsonResponse({ error: "FRESHSALES_SUBDOMAIN env var fehlt in Val.town" }, 500);
-    const fsKey = Deno.env.get("FRESHSALES_API_KEY");
-    if (!fsKey) return jsonResponse({ error: "FRESHSALES_API_KEY env var fehlt in Val.town" }, 500);
-    const target = \`https://\${subdomain}.freshworks.com/crm/sales/\${fsPath}\${url.search}\`;
-    const init: RequestInit = {
-      method: req.method,
-      headers: {
-        "Authorization": \`Token token=\${fsKey}\`,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      }
-    };
-    if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
-    const upstream = await fetch(target, init);
-    const text = await upstream.text();
-    return new Response(text, {
-      status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") || "application/json",
-        "access-control-allow-origin": "*"
-      }
-    });
-  }
-
-  // 6) Mailchimp — Routet /mailchimp/3.0/... an https://<server>.api.mailchimp.com/3.0/...
-  //    Pro-Mandant-Modell: API-Key + Server-Prefix kommen vom Client als Header.
-  //    Erlaubt unabhaengige Mailchimp-Accounts je Mandant ohne env vars je Firma.
-  if (path.startsWith("mailchimp/")) {
-    const mcPath = path.replace(/^mailchimp\\//, "");
-    const apiKey = req.headers.get("x-mailchimp-key") || "";
-    const server = (req.headers.get("x-mailchimp-server") || "").trim().toLowerCase();
-    if (!apiKey || !server) {
-      return jsonResponse({ error: "x-mailchimp-key + x-mailchimp-server Header benoetigt (per-Mandant-Setup)" }, 400);
-    }
-    // server-Prefix validieren (us1-us20, eu1-eu5, etc.) — verhindert SSRF
-    if (!/^[a-z]{2,3}\\d{1,2}$/.test(server)) {
-      return jsonResponse({ error: "Ungueltiger Mailchimp-Server-Prefix: " + server }, 400);
-    }
-    const target = \`https://\${server}.api.mailchimp.com/\${mcPath}\${url.search}\`;
-    const init: RequestInit = {
-      method: req.method,
-      headers: {
-        "Authorization": "Basic " + btoa("anystring:" + apiKey),
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      }
-    };
-    if (req.method !== "GET" && req.method !== "HEAD") init.body = await req.text();
-    const upstream = await fetch(target, init);
-    const text = await upstream.text();
-    return new Response(text, {
-      status: upstream.status,
-      headers: {
-        "content-type": upstream.headers.get("content-type") || "application/json",
-        "access-control-allow-origin": "*"
-      }
-    });
-  }
-
-  return jsonResponse({ error: \`Route nicht gefunden: \${path}\` }, 404);
-}
-`;
-
-// Definitionen für Env-Vars-Tabelle im Wizard. "value" wird zur
-// Laufzeit aus der App geliefert (Read-Key + Base-ID), die anderen
-// muss der User selbst beschaffen.
-function _valtownEnvVars() {
-  return [
-    { name: 'AIRTABLE_READ_KEY',  hint: 'Read-Token für Airtable. Der bereits in der App eingebettete Read-Key kann verwendet werden:', value: APP_CONFIG.AIRTABLE_READ_KEY, secret: true, required: true },
-    { name: 'AIRTABLE_BASE_ID',   hint: 'App-Base-ID — wo die User-Tabelle liegt:', value: APP_CONFIG.APP_BASE_ID, secret: false, required: true },
-    { name: 'ANTHROPIC_API_KEY',  hint: 'Anthropic Console → API Keys → Create. Beginnt mit sk-ant-...', value: '', secret: true, required: true },
-    { name: 'FRESHDESK_DOMAIN',   hint: 'Subdomain ohne .freshdesk.com (z.B. wenn URL flpliftparts.freshdesk.com → "flpliftparts")', value: '', secret: false, required: true },
-    { name: 'FRESHDESK_API_KEY',  hint: 'OPTIONAL — Fallback-Key. Wird nur verwendet, wenn ein User keinen eigenen Freshdesk-Key in seinem Profil hat. Empfehlung: leer lassen und stattdessen pro Mitarbeiter den persönlichen Key in Admin → Benutzer eintragen.', value: '', secret: true, required: false },
-    { name: 'FRESHSALES_SUBDOMAIN', hint: 'OPTIONAL — Subdomain ohne .freshworks.com (z.B. "gilt" wenn deine URL gilt.freshworks.com lautet). Nur nötig wenn du Kunden ins Freshsales-CRM syncen willst.', value: '', secret: false, required: false },
-    { name: 'FRESHSALES_API_KEY',   hint: 'OPTIONAL — API-Token aus Freshsales: in der CRM-UI oben rechts Profil → "Settings" → "API Settings" → Token kopieren.', value: '', secret: true, required: false }
-  ];
-}
-
-async function _fetchMasterBaseKeys() {
-  const headers = { 'Authorization': 'Bearer ' + APP_CONFIG.AIRTABLE_READ_KEY };
-  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys?filterByFormula=' +
-    encodeURIComponent("{project_id}='" + APP_CONFIG.PROJECT_ID + "'");
-  const res = await fetch(url, { headers });
-  if (!res.ok) throw new Error('Konnte Keys nicht laden (HTTP ' + res.status + ')');
-  const data = await res.json();
-  return data.records || [];
-}
-
-async function _writeMasterBaseKey(keyName, value, existingRecordId) {
-  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt — bitte einloggen');
-  const url = 'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys' +
-    (existingRecordId ? '/' + existingRecordId : '');
-  const method = existingRecordId ? 'PATCH' : 'POST';
-  const body = existingRecordId
-    ? { fields: { key_value: value } }
-    : { fields: { project_id: APP_CONFIG.PROJECT_ID, key_name: keyName, key_value: value } };
-  const res = await fetch(url, {
-    method,
-    headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    if (res.status === 403 || res.status === 401) {
-      throw new Error('Kein Schreibzugriff auf Master-Base. Der airtableWriteKey braucht Scope für Base ' + APP_CONFIG.MASTER_BASE_ID + ' (data.records:write). Token in Airtable-Account erweitern.');
-    }
-    let msg = 'Speichern fehlgeschlagen (HTTP ' + res.status + ')';
-    try { const ej = JSON.parse(txt); if (ej.error?.message) msg = ej.error.message; } catch {}
-    throw new Error(msg);
-  }
-  return res.json();
-}
-
-async function _deleteMasterBaseKey(recordId) {
-  if (!APP_KEYS.airtableWriteKey) throw new Error('Schreib-Key fehlt');
-  const res = await fetch(
-    'https://api.airtable.com/v0/' + APP_CONFIG.MASTER_BASE_ID + '/Keys/' + recordId,
-    { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey } }
-  );
-  if (!res.ok) {
-    if (res.status === 403 || res.status === 401) throw new Error('Kein Schreibzugriff auf Master-Base.');
-    throw new Error('Löschen fehlgeschlagen (HTTP ' + res.status + ')');
-  }
-  return true;
-}
 
 function _maskSecret(val) {
   if (!val) return '';
   if (val.length <= 10) return '••••••••';
   return val.substring(0, 4) + '••••••••' + val.substring(val.length - 4);
 }
-
-// Spiegelt einen geänderten Key in APP_KEYS, damit er sofort wirkt
-function _applyKeyToAppState(keyName, value) {
-  if (keyName === 'freshdeskProxyUrl')      APP_KEYS.freshdeskProxyUrl     = value;
-  if (keyName === 'freshdeskProxyToken')    APP_KEYS.freshdeskProxyToken   = value;
-  if (keyName === 'freshdeskSalesGroupId')  APP_KEYS.freshdeskSalesGroupId = value;
-  if (keyName === 'anthropicKey')           APP_KEYS.anthropicKey          = value;
-  if (keyName === 'airtableWriteKey')       APP_KEYS.airtableWriteKey      = value;
-  if (keyName === 'airtableBaseId')         APP_KEYS.appBaseId             = value;
-}
-
-// State für Wizard (welcher Step expanded ist)
-let _settingsWizState = { proxyUrlInput: '', salesGroupInput: '', testResult: null };
 
 /* ============================================================
    ADMIN: API-KOSTEN (AiUsageLog Dashboard)
@@ -16350,7 +15639,7 @@ let _fsCustomFieldsStatus = null;   // Cache: { fieldName: 'ok' | 'missing' | 'u
 async function _fsCheckCustomFieldsStatus(force) {
   if (!force && _fsCustomFieldsStatus) return _fsCustomFieldsStatus;
   if (!APP_KEYS.freshsalesSubdomain) {
-    _fsCustomFieldsStatus = { _error: 'Freshsales nicht konfiguriert (Step 9 zuerst)' };
+    _fsCustomFieldsStatus = { _error: 'Freshsales nicht konfiguriert (Step 6 zuerst)' };
     return _fsCustomFieldsStatus;
   }
   const status = {};
@@ -16435,42 +15724,25 @@ async function renderAdminSettings() {
   }
   document.getElementById('pageContent').innerHTML = '<p class="text-ink-500 text-sm">Lade Einstellungen…</p>';
 
-  // Aktuelle Master-Base-Keys laden für Statusanzeige
-  let keys = [];
-  try { keys = await _fetchMasterBaseKeys(); }
-  catch (e) {
-    document.getElementById('pageContent').innerHTML = `
-      <div class="max-w-3xl mx-auto"><div class="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-900">Fehler beim Laden: ${escapeHtml(e.message)}</div></div>`;
-    return;
-  }
-  const byName = {};
-  keys.forEach(rec => { byName[rec.fields.key_name] = rec; });
-  const proxyRec     = byName['apiProxyUrl'];
-  const proxyUrl     = proxyRec?.fields?.key_value || '';
-  const salesRec     = byName['freshdeskSalesGroupId'];
-  const salesGroupId = salesRec?.fields?.key_value || '';
-  const typesRec     = byName['freshdeskTicketTypes'];
-  const ticketTypes  = typesRec?.fields?.key_value || '';
-  const domainRec    = byName['freshdeskDomain'];
-  const fdDomain     = domainRec?.fields?.key_value || '';
-
-  const isProxySet = !!proxyUrl;
-  const envVars = _valtownEnvVars();
+  // Einstellungen frisch vom Server holen (auch für die Anzeige unten)
+  await loadSettings();
+  const salesGroupId = APP_KEYS.freshdeskSalesGroupId || '';
+  const orderGroupId = APP_KEYS.freshdeskOrderGroupId || '';
+  const ticketTypes  = APP_KEYS.freshdeskTicketTypes || '';
+  const fdDomain     = APP_KEYS.freshdeskDomain || '';
 
   // Freshdesk-Gruppen vorab laden, damit Sales/Order-Group-IDs als Dropdown auswählbar sind.
-  // Bei Fehler (kein Proxy, kein FD-Key) wird auf Text-Input zurückgefallen.
+  // Bei Fehler (Server-Key fehlt o.ä.) wird auf Text-Input zurückgefallen.
   let fdGroups = null;
-  if (isProxySet) {
-    try {
-      const list = await proxyFetch('freshdesk/api/v2/groups', { method: 'GET' });
-      if (Array.isArray(list)) {
-        fdGroups = list
-          .map(g => ({ id: String(g.id), name: g.name || ('Gruppe ' + g.id), description: g.description || '' }))
-          .sort((a, b) => a.name.localeCompare(b.name, 'de'));
-      }
-    } catch (e) {
-      console.warn('[AdminSettings] FD-Gruppen konnten nicht geladen werden:', e.message);
+  try {
+    const list = await proxyFetch('freshdesk/api/v2/groups', { method: 'GET' });
+    if (Array.isArray(list)) {
+      fdGroups = list
+        .map(g => ({ id: String(g.id), name: g.name || ('Gruppe ' + g.id), description: g.description || '' }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'de'));
     }
+  } catch (e) {
+    console.warn('[AdminSettings] FD-Gruppen konnten nicht geladen werden:', e.message);
   }
   window._fdGroupsCache = fdGroups;
 
@@ -16512,35 +15784,12 @@ async function renderAdminSettings() {
     <div class="max-w-4xl mx-auto">
       <div class="flex items-start justify-between mb-4 flex-wrap gap-2">
         <div>
-          <h2 class="text-xl font-bold text-ink-900">Einstellungen · Val.town-Setup</h2>
-          <p class="text-xs text-ink-500 mt-0.5">Externe API-Keys (Anthropic, Freshdesk) liegen ausschließlich serverseitig in Val.town. Im Browser bleibt nur der User-API-Key für die Auth.</p>
+          <h2 class="text-xl font-bold text-ink-900">Einstellungen</h2>
+          <p class="text-xs text-ink-500 mt-0.5">API-Keys sind Railway-Variablen auf dem Server (<code>ANTHROPIC_API_KEY</code>, <code>FRESHDESK_DOMAIN</code>/<code>FRESHDESK_API_KEY</code>, <code>FRESHSALES_SUBDOMAIN</code>/<code>FRESHSALES_API_KEY</code>). Mailchimp-Keys liegen verschlüsselt am Mandanten auf dem Server. Der Browser sieht keinen Key.</p>
         </div>
         <button type="button" onclick="renderAdminSettings()" class="text-ink-700 border border-ink-200 rounded-lg px-3 py-2 text-sm font-medium hover:bg-ink-50 flex items-center gap-2">
           <i data-lucide="refresh-cw" class="w-4 h-4"></i> Neu laden
         </button>
-      </div>
-
-      <!-- Architektur-Diagramm -->
-      <div class="bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl p-4 mb-4">
-        <p class="text-xs font-semibold text-brand-700 uppercase tracking-wider mb-2">Architektur</p>
-        <pre class="text-[11px] sm:text-xs text-ink-700 font-mono leading-relaxed whitespace-pre-wrap">Login (1×):  Browser ──[ user_key, einmalig ]──▶  Val.town  ──▶  Airtable User-Tabelle
-             Browser ◀──[ session_token       ]──   Val.town
-             User-Key wird im Browser SOFORT vergessen ✓
-
-Calls:       Browser ──[ Bearer: session_token ]──▶  Val.town  ──┬──▶  Anthropic   (env var)
-                                                                  │
-                                                                  └──▶  Freshdesk   (User.freshdesk_api_key
-                                                                                    · env-var-Fallback)
-
-Browser hält:    session_token (8h Tab / 30 Tage Gerät · kurzlebig)
-Val.town hält:   In-Memory Session-Map · ANTHROPIC_API_KEY · AIRTABLE_READ_KEY
-                 (optional FRESHDESK_API_KEY-Fallback)
-Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
-        <div class="text-[11px] text-emerald-800 mt-2 space-y-1.5">
-          <p class="flex items-start gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>User-Login-Key</strong> wird nirgendwo im Browser persistiert — er steht nur einmalig im Login-Form und wird nach erfolgreichem Login sofort verworfen.</span></p>
-          <p class="flex items-start gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>Session-Token</strong> ist kurzlebig und kann jederzeit zentral invalidiert werden (Admin → Benutzer → „Alle Sessions abmelden").</span></p>
-          <p class="flex items-start gap-1.5"><i data-lucide="check-circle-2" class="w-3.5 h-3.5 mt-0.5 shrink-0"></i> <span><strong>Persönliche Freshdesk-Keys</strong> liegen serverseitig in Airtable und werden nie an den Browser ausgeliefert.</span></p>
-        </div>
       </div>
 
       <!-- Setup-Status -->
@@ -16548,12 +15797,12 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         <p class="text-xs font-semibold text-ink-500 uppercase tracking-wider mb-3">Status</p>
         <div class="grid sm:grid-cols-2 gap-3 text-sm">
           <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
-            <span class="text-ink-700">Proxy-URL gesetzt</span>
-            ${statusBadge(isProxySet, isProxySet ? 'OK' : 'fehlt')}
+            <span class="text-ink-700">API-Keys</span>
+            ${statusBadge(true, 'auf dem Server')}
           </div>
           <div class="flex items-center justify-between bg-ink-50 rounded-lg px-3 py-2">
             <span class="text-ink-700">Verbindung</span>
-            <button type="button" onclick="testProxyConnection()" class="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1" ${!isProxySet ? 'disabled' : ''}>
+            <button type="button" onclick="testProxyConnection()" class="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1">
               <i data-lucide="zap" class="w-3.5 h-3.5"></i> Test
             </button>
           </div>
@@ -16561,93 +15810,15 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         <div id="proxyTestResult" class="mt-3"></div>
       </div>
 
-      <!-- ============ STEP 1 ============ -->
-      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-        ${stepHeader(1, 'Val.town-Account anlegen + HTTP-Val erstellen', '')}
-        <div class="text-sm text-ink-700 space-y-2 pl-11">
-          <p>1. Auf <a href="https://val.town" target="_blank" class="text-brand-600 hover:text-brand-700 underline">val.town</a> einloggen (oder kostenlos registrieren).</p>
-          <p>2. Oben rechts <strong>„New Val"</strong> klicken → Typ <strong>„HTTP"</strong> wählen.</p>
-          <p>3. Den Val z.B. <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">erp-api-proxy</code> nennen.</p>
-        </div>
-      </div>
-
-      <!-- ============ STEP 2 ============ -->
-      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-        ${stepHeader(2, 'Code in den Val einfügen', '')}
-        <div class="pl-11">
-          <div class="bg-ink-50 border border-ink-200 rounded-lg p-2.5 mb-3 text-[12px] text-ink-700 leading-snug">
-            <strong>💡 Tipp:</strong> Wenn du oben das Schnell-Setup nutzt, wird dieser Code automatisch in deinen Val gepusht — diesen Block hier brauchst du dann nicht.
-          </div>
-          <p class="text-sm text-ink-700 mb-2">Den vorhandenen Beispiel-Code in Val.town komplett ersetzen mit:</p>
-          <div class="relative">
-            <button type="button" onclick="copyValTownCode(this)" class="absolute top-2 right-2 z-10 bg-ink-900 text-white text-xs px-2.5 py-1.5 rounded-lg hover:bg-ink-700 flex items-center gap-1.5 shadow">
-              <i data-lucide="copy" class="w-3.5 h-3.5"></i> Code kopieren
-            </button>
-            <pre id="valtownCodeBlock" class="bg-ink-900 text-emerald-200 text-[11px] leading-relaxed font-mono p-4 pt-12 rounded-lg overflow-x-auto max-h-96 overflow-y-auto whitespace-pre"></pre>
-          </div>
-          <p class="text-xs text-ink-500 mt-2">Anschließend in Val.town oben auf <strong>„Save"</strong> klicken.</p>
-        </div>
-      </div>
-
-      <!-- ============ STEP 3 ============ -->
-      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-        ${stepHeader(3, 'Environment Variables in Val.town setzen', '')}
-        <div class="pl-11">
-          <p class="text-sm text-ink-700 mb-3">In Val.town: rechts in der Seitenleiste → <strong>„Environment Variables"</strong> → für jede Zeile <strong>„+ Add"</strong> klicken und Name + Wert eintragen.</p>
-          <div class="bg-ink-50 rounded-lg overflow-hidden border border-ink-200">
-            ${envVars.map(v => `
-              <div class="grid grid-cols-12 gap-2 px-3 py-3 border-b border-ink-200 last:border-b-0 items-start">
-                <div class="col-span-12 sm:col-span-4">
-                  <p class="font-mono text-xs font-semibold text-ink-900">${escapeHtml(v.name)}</p>
-                  <div class="flex gap-1 flex-wrap mt-0.5">
-                    ${v.secret ? '<span class="text-[10px] uppercase tracking-wider bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-semibold">secret</span>' : ''}
-                    ${v.required === false ? '<span class="text-[10px] uppercase tracking-wider bg-ink-200 text-ink-700 px-1.5 py-0.5 rounded font-semibold">optional</span>' : ''}
-                  </div>
-                </div>
-                <div class="col-span-12 sm:col-span-8 space-y-1">
-                  <p class="text-[11px] text-ink-600">${escapeHtml(v.hint)}</p>
-                  ${v.value ? `
-                    <div class="flex items-center gap-2">
-                      <code class="bg-white border border-ink-200 px-2 py-1 rounded text-[11px] font-mono break-all flex-1 select-all">${escapeHtml(v.value)}</code>
-                      <button type="button" onclick="copyToClipboard('${escapeHtml(v.value).replace(/'/g, "\\'")}', this)" class="text-xs text-brand-600 hover:text-brand-700 flex items-center gap-1 shrink-0">
-                        <i data-lucide="copy" class="w-3.5 h-3.5"></i> kopieren
-                      </button>
-                    </div>
-                  ` : `<p class="text-[11px] text-amber-700 italic">Wert musst du selbst beschaffen.</p>`}
-                </div>
-              </div>
-            `).join('')}
-          </div>
-          <p class="text-xs text-ink-500 mt-3"><strong>Wichtig:</strong> Nach dem Anlegen aller Env-Vars in Val.town nochmal <strong>„Save"</strong> drücken (oder Val neu deployen), damit die Werte aktiv werden.</p>
-        </div>
-      </div>
-
-      <!-- ============ STEP 4 ============ -->
-      <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-        ${stepHeader(4, 'Val.town-URL hier eintragen', isProxySet ? statusBadge(true, 'gesetzt') : '')}
-        <div class="pl-11">
-          <p class="text-sm text-ink-700 mb-2">In Val.town wird oben über dem Code-Editor die <strong>HTTP-Endpoint-URL</strong> angezeigt (z.B. <code class="bg-ink-100 px-1.5 py-0.5 rounded text-[11px]">https://benutzername-erpapiproxy.web.val.run</code>). Diese hier eintragen:</p>
-          <div class="flex gap-2 flex-wrap">
-            <input type="url" id="settingsProxyUrl" value="${escapeHtml(proxyUrl)}" placeholder="https://benutzername-erpapiproxy.web.val.run" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 font-mono text-sm">
-            <button type="button" onclick="saveProxyUrl()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
-              <i data-lucide="save" class="w-4 h-4"></i> Speichern
-            </button>
-          </div>
-          <p class="text-[11px] text-ink-500 mt-1">URL ohne abschließenden Slash. Wird in der Master-Base unter <code>apiProxyUrl</code> abgelegt.</p>
-        </div>
-      </div>
-
-      <!-- ============ STEP 5 — Freshdesk-Gruppen (Anfragen + Bestellungen, pro Mandant) ============ -->
+      <!-- ============ STEP 1 — Freshdesk-Gruppen (Anfragen + Bestellungen, pro Mandant) ============ -->
       ${(() => {
-        const orderRec = byName['freshdeskOrderGroupId'];
-        const orderGroupId = orderRec?.fields?.key_value || '';
         const companies = (APP_KEYS.companies || []);
         const anyGroupSet = !!(salesGroupId || orderGroupId) || companies.some(c => c.fd_sales_group_id || c.fd_order_group_id);
         const groupsLoaded = !!fdGroups;
         const groupsCount = fdGroups ? fdGroups.length : 0;
         return `
         <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-          ${stepHeader(5, 'Freshdesk-Gruppen für Anfragen + Bestellungen', anyGroupSet ? statusBadge(true, 'konfiguriert') : statusBadge(false, 'leer'))}
+          ${stepHeader(1, 'Freshdesk-Gruppen für Anfragen + Bestellungen', anyGroupSet ? statusBadge(true, 'konfiguriert') : statusBadge(false, 'leer'))}
           <div class="pl-11">
             <p class="text-sm text-ink-700 mb-3">Die Anfragen- und Bestellungen-Listen filtern Tickets nach Freshdesk-Gruppe. Pro Mandant kann eine eigene Gruppe gesetzt werden — die globalen Defaults darunter werden verwendet, wenn der Mandant keinen eigenen Wert hat.</p>
 
@@ -16659,7 +15830,7 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
                 </div>`
               : `<div class="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 text-xs text-amber-900 flex items-center gap-2">
                   <i data-lucide="alert-circle" class="w-4 h-4 shrink-0"></i>
-                  <span>Freshdesk-Gruppen konnten nicht geladen werden — IDs bitte manuell eintragen. Proxy + FD-Key prüfen.</span>
+                  <span>Freshdesk-Gruppen konnten nicht geladen werden — IDs bitte manuell eintragen. Server-Variablen <code>FRESHDESK_DOMAIN</code>/<code>FRESHDESK_API_KEY</code> bzw. deinen Freshdesk-Key prüfen.</span>
                 </div>`}
 
             <!-- Globale Defaults -->
@@ -16708,15 +15879,15 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
               `;
               }).join('')}
             </div>
-            <p class="text-[11px] text-ink-500 mt-2 italic">Die Felder werden bei Bedarf automatisch auf der Company-Tabelle angelegt (<code>fd_sales_group_id</code>, <code>fd_order_group_id</code>).</p>
+            <p class="text-[11px] text-ink-500 mt-2 italic">Die Werte werden am Mandanten gespeichert (<code>fd_sales_group_id</code>, <code>fd_order_group_id</code>).</p>
           </div>
         </div>
         `;
       })()}
 
-      <!-- ============ STEP 6 ============ -->
+      <!-- ============ STEP 2 ============ -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-        ${stepHeader(6, 'Ticket-Typen filtern (optional)', ticketTypes ? statusBadge(true, ticketTypes.split(',').filter(Boolean).length + ' Typen') : statusBadge(false, 'alle'))}
+        ${stepHeader(2, 'Ticket-Typen filtern (optional)', ticketTypes ? statusBadge(true, ticketTypes.split(',').filter(Boolean).length + ' Typen') : statusBadge(false, 'alle'))}
         <div class="pl-11">
           <p class="text-sm text-ink-700 mb-2">Standardmäßig werden alle offenen / ausstehenden Sales-Tickets angezeigt. Wenn du nur bestimmte Tickettypen sehen willst (z.B. „Question", „Refund Request"), wähle sie hier aus. Leer = alle Typen.</p>
           <div class="flex gap-2 flex-wrap mb-2">
@@ -16733,11 +15904,12 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
-      <!-- ============ STEP 7 ============ -->
+      <!-- ============ STEP 3 ============ -->
       <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-        ${stepHeader(7, 'Freshdesk-Subdomain (für Direktlinks)', fdDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
+        ${stepHeader(3, 'Freshdesk-Subdomain (für Direktlinks)', fdDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
         <div class="pl-11">
           <p class="text-sm text-ink-700 mb-2">Damit die App Tickets direkt in Freshdesk öffnen kann (Klick aufs Link-Icon in der Anfragen-Liste), brauche ich deine Freshdesk-Subdomain.</p>
+          <p class="text-[11px] text-ink-500 mb-2">Nur für Links: API-Aufrufe gehen immer an die Freshdesk-Domain aus der Server-Variable <code>FRESHDESK_DOMAIN</code>.</p>
           <div class="flex gap-2 flex-wrap">
             <input type="text" id="settingsFdDomain" value="${escapeHtml(fdDomain)}" placeholder="z.B. flpliftparts (ohne .freshdesk.com)" class="flex-1 min-w-[260px] px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
             <button type="button" onclick="saveFreshdeskDomain()" class="bg-brand-500 text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-brand-600 flex items-center gap-2">
@@ -16748,12 +15920,12 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>
       </div>
 
-      <!-- ============ STEP 8 — Freshdesk Email-Inbox-ID (für Outbound-Email) ============ -->
+      <!-- ============ STEP 4 — Freshdesk Email-Inbox-ID (für Outbound-Email) ============ -->
       ${(() => {
         const cfgId = localStorage.getItem('fd_email_config_id') || '';
         return `
         <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-          ${stepHeader(8, 'Freshdesk Email-Inbox-ID (für Email-Versand)', cfgId ? statusBadge(true, 'gesetzt: ' + cfgId) : statusBadge(false, 'auto'))}
+          ${stepHeader(4, 'Freshdesk Email-Inbox-ID (für Email-Versand)', cfgId ? statusBadge(true, 'gesetzt: ' + cfgId) : statusBadge(false, 'auto'))}
           <div class="pl-11">
             <p class="text-sm text-ink-700 mb-2">Freshdesk verlangt beim Versand einer Outbound-Email (z.B. Angebot per Mail) eine <code>email_config_id</code> — das ist die Inbox aus der versendet wird. Standardmäßig versucht die App, automatisch die Primary-Inbox aus <code>/api/v2/email_configs</code> zu holen. Wenn das fehlschlägt oder du eine bestimmte Inbox erzwingen willst, kannst du die ID hier manuell setzen.</p>
             <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 mb-3 text-[11px] text-blue-900">
@@ -16774,20 +15946,17 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         `;
       })()}
 
-      <!-- ============ STEP 8b — Mailchimp pro Mandant ============ -->
+      <!-- ============ STEP 5 — Mailchimp pro Mandant ============ -->
       ${(() => {
         const companies = (APP_KEYS.companies || []);
-        const anySet = companies.some(c => c.mailchimp_api_key && c.mailchimp_server_prefix);
+        const linked = companies.filter(c => c.has_mailchimp_key).length;
         return `
         <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-          ${stepHeader(9, 'Mailchimp pro Mandant (optional)', anySet ? statusBadge(true, companies.filter(c => c.mailchimp_api_key && c.mailchimp_server_prefix).length + '/' + companies.length + ' Mandanten verknüpft') : statusBadge(false, 'nicht konfiguriert'))}
+          ${stepHeader(5, 'Mailchimp pro Mandant (optional)', linked ? statusBadge(true, linked + '/' + companies.length + ' Mandanten verknüpft') : statusBadge(false, 'nicht konfiguriert'))}
           <div class="pl-11">
-            <p class="text-sm text-ink-700 mb-2">Jeder Mandant kann mit einem eigenen Mailchimp-Account verbunden werden. Die API-Daten liegen am Mandanten in Airtable, der Val.town-Proxy verwendet sie pro Request (kein env var je Firma notwendig).</p>
+            <p class="text-sm text-ink-700 mb-2">Jeder Mandant kann mit einem eigenen Mailchimp-Account verbunden werden. Der API-Key wird verschlüsselt auf dem Server gespeichert und danach nicht mehr angezeigt; Server-Prefix und Audience liegen am Mandanten.</p>
             <div class="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-900 mb-3">
               <strong>API-Key holen:</strong> in Mailchimp → Profil oben rechts → <em>Profile → Extras → API keys</em> → „Create A Key". Format: <code class="bg-blue-100 px-1 rounded text-[10px]">xxxxxxxxxxxxxxxx-us21</code> — der Suffix nach dem Bindestrich ist der <strong>Server-Prefix</strong> (z.B. <code>us21</code>, <code>eu1</code>).
-            </div>
-            <div class="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-900 mb-3">
-              <strong>⚙ Wichtig:</strong> Damit das funktioniert, muss der Val.town-Proxy auf der aktuellen Version sein (Step 2 → „Code kopieren" → in Val.town aktualisieren). Die Mailchimp-Route nutzt die Header <code class="bg-amber-100 px-1 rounded text-[10px]">x-mailchimp-key</code> + <code class="bg-amber-100 px-1 rounded text-[10px]">x-mailchimp-server</code>.
             </div>
 
             <div class="bg-white border border-ink-200 rounded-lg overflow-hidden">
@@ -16795,7 +15964,7 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
                 <span>Mandant · API-Key · Server-Prefix · Audience</span>
               </div>
               ${companies.length === 0 ? '<p class="text-xs text-ink-500 italic p-3">Keine Mandanten geladen.</p>' : companies.map(c => {
-                const hasKey = !!c.mailchimp_api_key;
+                const hasKey = !!c.has_mailchimp_key;
                 const hasList = !!c.mailchimp_list_id;
                 return `
                 <div class="p-3 border-b border-ink-100 last:border-b-0 space-y-2" data-mc-row-company="${c.id}">
@@ -16805,8 +15974,8 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
                   </div>
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <div>
-                      <label class="block text-[10px] text-ink-500 mb-0.5">API-Key</label>
-                      <input type="password" data-mc-input="api_key" value="${escapeHtml(c.mailchimp_api_key || '')}" placeholder="xxxxx-us21" class="w-full px-2 py-1.5 border border-ink-200 rounded text-xs font-mono">
+                      <label class="block text-[10px] text-ink-500 mb-0.5">API-Key${hasKey ? ' <span class="text-emerald-700">· gespeichert</span>' : ''}</label>
+                      <input type="password" data-mc-input="api_key" value="" placeholder="${hasKey ? 'leer = unverändert' : 'xxxxx-us21'}" autocomplete="new-password" class="w-full px-2 py-1.5 border border-ink-200 rounded text-xs font-mono">
                     </div>
                     <div>
                       <label class="block text-[10px] text-ink-500 mb-0.5">Server-Prefix</label>
@@ -16842,32 +16011,23 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         `;
       })()}
 
-      <!-- ============ STEP 9 — Freshsales-CRM (optional) ============ -->
+      <!-- ============ STEP 6 — Freshsales-CRM (optional) ============ -->
       ${(() => {
         const fsDomain = APP_KEYS.freshsalesSubdomain || '';
-        const canPushEnv = !!(APP_KEYS.valtownKey && APP_KEYS.valtownValId);
-        const sameAsFd = fsDomain && APP_KEYS.freshdeskDomain && fsDomain === APP_KEYS.freshdeskDomain;
         return `
         <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-          ${stepHeader(9, 'Freshsales-CRM-Sync (optional)', fsDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
+          ${stepHeader(6, 'Freshsales-CRM-Sync (optional)', fsDomain ? statusBadge(true, 'gesetzt') : statusBadge(false, 'optional'))}
           <div class="pl-11">
-            <p class="text-sm text-ink-700 mb-2">Damit ERP-Hero Firmen automatisch ins Freshsales-CRM pushen kann (bei Verwendung in einem Quote/Auftrag), braucht es Subdomain + API-Token.</p>
+            <p class="text-sm text-ink-700 mb-2">Damit ERP-Hero Firmen automatisch ins Freshsales-CRM pushen kann (bei Verwendung in einem Quote/Auftrag), braucht es die Freshsales-Subdomain; den API-Token kennt nur der Server.</p>
             <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 mb-3 text-[11px] text-blue-900">
               <strong>Token holen:</strong> in Freshsales oben rechts <strong>Profil → Settings → API Settings → Token kopieren</strong>.<br>
-              ${canPushEnv
-                ? '✓ Beim Speichern wird der Token automatisch als Val.town-Env-Var <code>FRESHSALES_API_KEY</code> abgelegt (per Val.town-API) — wir speichern ihn NICHT in der App-Master-Base.'
-                : '⚠ Val.town-Auto-Setup oben durchführen, damit Token automatisch in Val.town gespeichert werden kann. Sonst musst du <code>FRESHSALES_API_KEY</code> manuell in Val.town setzen.'}
+              Der Token ist die Railway-Variable <code>FRESHSALES_API_KEY</code>, die Subdomain für die API-Aufrufe <code>FRESHSALES_SUBDOMAIN</code> (beide in Railway unter Variables setzen). Die Subdomain hier dient den Links und schaltet den Sync in der App ein.
             </div>
             <div class="grid sm:grid-cols-2 gap-2 mb-2">
               <div>
                 <label class="block text-xs font-medium text-ink-700 mb-1">Subdomain</label>
                 <input type="text" id="settingsFsDomain" value="${escapeHtml(fsDomain)}" placeholder="z.B. gilt" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono">
                 <p class="text-[10px] text-ink-500 mt-0.5">aus <code>gilt.freshworks.com</code></p>
-              </div>
-              <div>
-                <label class="block text-xs font-medium text-ink-700 mb-1">API-Token ${canPushEnv ? '(landet in Val.town)' : '(noch nicht zustellbar)'}</label>
-                <input type="password" id="settingsFsApiKey" value="" placeholder="${fsDomain ? 'leer = beibehalten' : 'aus Freshsales Settings'}" class="w-full px-3 py-2 border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30 text-sm font-mono" autocomplete="off">
-                <p class="text-[10px] text-ink-500 mt-0.5">${canPushEnv ? 'wird beim Speichern direkt in Val.town gepusht' : 'nicht in App speichern — manuell in Val.town setzen'}</p>
               </div>
             </div>
             <div class="flex gap-2 flex-wrap">
@@ -16882,10 +16042,10 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>`;
       })()}
 
-      <!-- ============ STEP 10 — Freshsales Custom Fields (für ERP-Sync) ============ -->
+      <!-- ============ STEP 7 — Freshsales Custom Fields (für ERP-Sync) ============ -->
       ${(() => {
         const fsDomain = APP_KEYS.freshsalesSubdomain || '';
-        if (!fsDomain) return '';   // Step 10 nur anzeigen wenn Step 9 erledigt
+        if (!fsDomain) return '';   // Step 7 nur anzeigen wenn Step 6 erledigt
         const st = _fsCustomFieldsStatus || {};
         const okCount   = FS_REQUIRED_CUSTOM_FIELDS.filter(f => st[f.apiName] === 'ok').length;
         const missCount = FS_REQUIRED_CUSTOM_FIELDS.filter(f => st[f.apiName] === 'missing').length;
@@ -16897,7 +16057,7 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         const fsAdminUrl = 'https://' + fsDomain + '.freshworks.com/crm/sales/admin/business-process/sales_accounts/fields';
         return `
         <div class="bg-white rounded-2xl border border-ink-200 p-4 sm:p-5 mb-4">
-          ${stepHeader(10, 'Freshsales Custom Fields (ERP-Integration)', '<span class="text-[10px] uppercase tracking-wider ' + statusBadgeColor + ' px-1.5 py-0.5 rounded font-semibold">' + statusBadgeText + '</span>')}
+          ${stepHeader(7, 'Freshsales Custom Fields (ERP-Integration)', '<span class="text-[10px] uppercase tracking-wider ' + statusBadgeColor + ' px-1.5 py-0.5 rounded font-semibold">' + statusBadgeText + '</span>')}
           <div class="pl-11">
             <p class="text-sm text-ink-700 mb-2">Damit ERP-Daten (Kundennummer, USt-IdNr, Zahlungsziel, Lieferbedingungen, Mandant) im Freshsales-Sales-Account gespeichert werden können, brauchen wir 5 Custom Fields.</p>
 
@@ -16972,63 +16132,8 @@ Airtable hält:   User-Records mit api_key + freshdesk_api_key</pre>
         </div>`;
       })()}
 
-      <!-- ============ SCHNELL-SETUP (Auto via Val.town API) ============ -->
-      ${(() => {
-        const isProxySet = !!APP_KEYS.apiProxyUrl;
-        const hasToken   = !!APP_KEYS.valtownKey;
-        const hasValId   = !!APP_KEYS.valtownValId;
-        return `
-        <div class="bg-gradient-to-br from-emerald-50 via-brand-50 to-brand-100 border-2 border-brand-300 rounded-2xl p-4 shadow-sm mb-4">
-          <div class="flex items-center gap-3 mb-3 flex-wrap">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shrink-0 shadow shadow-brand-500/30">
-              <i data-lucide="zap" class="w-5 h-5 text-white"></i>
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="font-bold text-ink-900 text-base leading-tight">Schnell-Setup (empfohlen)</h3>
-              <p class="text-[11px] text-ink-600">Val.town in einem Klick — Auto-Anlegen + Code + Env-Vars, kein Copy-Paste</p>
-            </div>
-            ${isProxySet && hasToken ? '<span class="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider"><i data-lucide="check" class="inline w-3 h-3"></i> Eingerichtet</span>' : ''}
-          </div>
-          <div class="space-y-2.5">
-            <div>
-              <label class="text-xs font-semibold text-ink-700">Val.town API-Key</label>
-              <p class="text-[11px] text-ink-500 mb-1.5">In Val.town: oben rechts Avatar → <a href="https://www.val.town/settings/api" target="_blank" class="text-brand-600 underline">Settings → API Tokens</a> → „New token" → Permission <strong>Vals: Read and write</strong> (deckt Code + Env-Vars ab). Andere Permissions können auf <em>None</em> bleiben.</p>
-              <input id="valtownKeyInput" type="password" value="${hasToken ? escapeHtml(APP_KEYS.valtownKey) : ''}" placeholder="vt_pat_…" autocomplete="off" class="w-full px-3 py-2 border border-ink-200 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500">
-            </div>
-            <div class="flex gap-2 flex-wrap">
-              <button type="button" onclick="valtownStartSetup(this)" class="flex-1 min-w-[140px] bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 shadow shadow-brand-500/30">
-                <i data-lucide="zap" class="w-4 h-4"></i> ${isProxySet && hasToken ? 'Proxy-Code aktualisieren' : 'Setup starten'}
-              </button>
-            </div>
-            <div id="valtownProgress" class="hidden">
-              <div id="valtownProgressBox" class="bg-ink-900 rounded-lg p-3 max-h-72 overflow-y-auto border border-ink-700">
-                <ul id="valtownProgressList" class="text-[11px] space-y-0.5 font-mono"></ul>
-              </div>
-            </div>
-            ${hasValId ? `<p class="text-[10px] text-ink-500 text-center pt-1">Val-ID: <code class="bg-white border border-ink-200 px-1 py-0.5 rounded">${escapeHtml(APP_KEYS.valtownValId.slice(0, 8))}…</code></p>` : ''}
-          </div>
-        </div>`;
-      })()}
-
-      <!-- Legacy Master-Base Keys (collapsed) -->
-      <details class="bg-ink-50 border border-ink-200 rounded-2xl p-4 mb-4 group">
-        <summary class="cursor-pointer text-sm font-medium text-ink-700 flex items-center gap-2"><i data-lucide="chevron-right" class="w-4 h-4 group-open:rotate-90 transition"></i> Erweitert: alle Master-Base Keys ansehen</summary>
-        <div class="mt-3 space-y-1.5">
-          ${keys.length === 0 ? '<p class="text-xs text-ink-500 italic">Keine Keys vorhanden.</p>' : keys.map(rec => {
-            const f = rec.fields || {};
-            const isSecret = /key$|token$|Key$|Token$/.test(f.key_name || '');
-            const v = isSecret ? _maskSecret(f.key_value || '') : (f.key_value || '');
-            return `<div class="flex items-baseline gap-3 text-xs"><code class="font-mono font-semibold text-ink-700 shrink-0">${escapeHtml(f.key_name || '')}</code><span class="text-ink-500 break-all">${escapeHtml(v || '(leer)')}</span></div>`;
-          }).join('')}
-          <p class="text-[11px] text-ink-500 italic mt-3">Diese Liste ist read-only. Schreiboperationen laufen über die Steps oben.</p>
-        </div>
-      </details>
     </div>
   `;
-
-  // Code-Block befüllen (textContent damit kein HTML interpretiert wird)
-  const codeEl = document.getElementById('valtownCodeBlock');
-  if (codeEl) codeEl.textContent = VALTOWN_PROXY_CODE;
 
   if (window.lucide) lucide.createIcons();
 }
@@ -17049,25 +16154,19 @@ async function copyToClipboard(text, btnEl) {
   }
 }
 
-async function copyValTownCode(btnEl) {
-  await copyToClipboard(VALTOWN_PROXY_CODE, btnEl);
-}
-
-async function saveProxyUrl() {
-  const inp = document.getElementById('settingsProxyUrl');
-  if (!inp) return;
-  let val = (inp.value || '').trim().replace(/\/+$/, '');
-  if (!val) return toast('URL ist leer', 'warn');
-  if (!/^https?:\/\//i.test(val)) return toast('URL muss mit http(s):// beginnen', 'warn');
+// Gemeinsamer Ablauf der Speichern-Buttons: Wert auf dem Server speichern (leer = löschen),
+// passenden Toast zeigen, Seite neu aufbauen.
+async function _saveSettingFromForm(key, val, savedText, removedText) {
+  const had = !!APP_KEYS[key];
   try {
-    const keys = await _fetchMasterBaseKeys();
-    const existing = keys.find(r => r.fields.key_name === 'apiProxyUrl');
-    await _writeMasterBaseKey('apiProxyUrl', val, existing?.id || null);
-    APP_KEYS.apiProxyUrl = val;
-    toast('Proxy-URL gespeichert', 'success');
+    if (val || had) await saveSetting(key, val);
+    if (val) toast(savedText, 'success');
+    else if (had) toast(removedText, 'success');
     renderAdminSettings();
+    return true;
   } catch (e) {
-    toast(e.message, 'error', 7000);
+    toast(escapeHtml(e.message), 'error', 7000);
+    return false;
   }
 }
 
@@ -17075,22 +16174,7 @@ async function saveSalesGroupId() {
   const inp = document.getElementById('settingsSalesGroupId');
   if (!inp) return;
   const val = (inp.value || '').trim();
-  try {
-    const keys = await _fetchMasterBaseKeys();
-    const existing = keys.find(r => r.fields.key_name === 'freshdeskSalesGroupId');
-    if (val) {
-      await _writeMasterBaseKey('freshdeskSalesGroupId', val, existing?.id || null);
-      APP_KEYS.freshdeskSalesGroupId = val;
-      toast('Sales-Group-ID gespeichert', 'success');
-    } else if (existing) {
-      await _deleteMasterBaseKey(existing.id);
-      APP_KEYS.freshdeskSalesGroupId = null;
-      toast('Sales-Group-ID entfernt', 'success');
-    }
-    renderAdminSettings();
-  } catch (e) {
-    toast(e.message, 'error', 7000);
-  }
+  await _saveSettingFromForm('freshdeskSalesGroupId', val, 'Sales-Group-ID gespeichert', 'Sales-Group-ID entfernt');
 }
 
 // Analog zu saveSalesGroupId — globaler Default für Bestellungen/Auftragsbearbeitung
@@ -17098,22 +16182,7 @@ async function saveOrderGroupId() {
   const inp = document.getElementById('settingsOrderGroupId');
   if (!inp) return;
   const val = (inp.value || '').trim();
-  try {
-    const keys = await _fetchMasterBaseKeys();
-    const existing = keys.find(r => r.fields.key_name === 'freshdeskOrderGroupId');
-    if (val) {
-      await _writeMasterBaseKey('freshdeskOrderGroupId', val, existing?.id || null);
-      APP_KEYS.freshdeskOrderGroupId = val;
-      toast('Bestellungen-Group-ID gespeichert', 'success');
-    } else if (existing) {
-      await _deleteMasterBaseKey(existing.id);
-      APP_KEYS.freshdeskOrderGroupId = null;
-      toast('Bestellungen-Group-ID entfernt', 'success');
-    }
-    renderAdminSettings();
-  } catch (e) {
-    toast(e.message, 'error', 7000);
-  }
+  await _saveSettingFromForm('freshdeskOrderGroupId', val, 'Bestellungen-Group-ID gespeichert', 'Bestellungen-Group-ID entfernt');
 }
 
 // Schreibt die per-Mandant FD-Group-IDs auf den Company-Record. Stellt vorher
@@ -17158,7 +16227,6 @@ async function saveCompanyFdGroups(companyId, btnEl) {
   }
 }
 
-// Helper: holt alle Gruppen aus Freshdesk und listet sie zur Auswahl auf.
 // ===== Mailchimp Admin-Settings-Helper =====
 
 // Liest die per-Mandant Mailchimp-Inputs aus der UI (api_key, server_prefix, list_id, list_name)
@@ -17173,7 +16241,33 @@ function _mcReadRowInputs(companyId) {
   };
 }
 
-// Schreibt die Mailchimp-Felder am Company-Record. Ensure'd das Schema beim ersten Save.
+// Werte für Test/Listen: ein eingegebener Key wird probeweise mitgeschickt (nur Admins),
+// sonst nimmt der Server den gespeicherten Key des Mandanten.
+function _mcCallValues(companyId) {
+  const vals = _mcReadRowInputs(companyId);
+  if (!vals) return null;
+  const c = APP_KEYS.companies.find(x => x.id === companyId);
+  if (!vals.api_key && !(c && c.has_mailchimp_key)) { toast('API-Key fehlt', 'warn'); return null; }
+  if (vals.api_key && !vals.server_prefix) {
+    const m = vals.api_key.match(/-([a-z]{2,3}\d{1,2})$/i);
+    if (m) vals.server_prefix = m[1].toLowerCase();
+    else { toast('Server-Prefix fehlt (oder im Key nicht erkennbar)', 'warn'); return null; }
+  }
+  return vals;
+}
+
+// Header für die Mailchimp-Aufrufe der Einstellungsseite. Mit eingegebenem Key immer auch den
+// Server-Prefix mitsenden: sonst nähme der Server den gespeicherten Prefix.
+function _mcRequestHeaders(companyId, vals) {
+  const c = APP_KEYS.companies.find(x => x.id === companyId);
+  const headers = { 'X-Company-Id': companyId };
+  if (vals.api_key) headers['x-mailchimp-key'] = vals.api_key;
+  if (vals.server_prefix && (vals.api_key || vals.server_prefix !== ((c && c.mailchimp_server_prefix) || ''))) headers['x-mailchimp-server'] = vals.server_prefix;
+  return headers;
+}
+
+// Speichert die Mailchimp-Daten eines Mandanten: Server-Prefix und Audience am Company-Record, einen neu
+// eingegebenen API-Key verschlüsselt auf dem Server (nie im Record, nie im Browser-Cache).
 async function _mcSaveCompany(companyId, btnEl) {
   if (!companyId) return;
   const vals = _mcReadRowInputs(companyId);
@@ -17185,37 +16279,45 @@ async function _mcSaveCompany(companyId, btnEl) {
     const m = vals.api_key.match(/-([a-z]{2,3}\d{1,2})$/i);
     if (m) vals.server_prefix = m[1].toLowerCase();
   }
-  if (vals.api_key && !/^[a-z]{2,3}\d{1,2}$/.test(vals.server_prefix)) {
+  if ((vals.api_key || vals.server_prefix) && !/^[a-z]{2,3}\d{1,2}$/.test(vals.server_prefix)) {
     if (status) status.innerHTML = '<span class="text-red-700">Server-Prefix ungültig (Erwartet z.B. us21, eu1)</span>';
     return;
   }
+  const c = APP_KEYS.companies.find(x => x.id === companyId);
+  // Der Name kommt aus der Audience-Auswahl; bei unveränderter List-ID bleibt der gespeicherte Name.
+  const listName = vals.list_name || (c && vals.list_id === c.mailchimp_list_id ? (c.mailchimp_list_name || '') : '');
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
   try {
-    await ensureFields('Company', [
-      { name: 'mailchimp_api_key',       type: 'singleLineText' },
-      { name: 'mailchimp_server_prefix', type: 'singleLineText' },
-      { name: 'mailchimp_list_id',       type: 'singleLineText' },
-      { name: 'mailchimp_list_name',     type: 'singleLineText' }
-    ]).catch(e => console.warn('[mc] ensureFields:', e.message));
     await updateData('Company', companyId, {
-      mailchimp_api_key:       vals.api_key,
       mailchimp_server_prefix: vals.server_prefix,
       mailchimp_list_id:       vals.list_id,
-      mailchimp_list_name:     vals.list_name
+      mailchimp_list_name:     listName
     });
-    // Lokalen Cache updaten
-    const c = APP_KEYS.companies.find(c => c.id === companyId);
+    let hasKey = !!(c && c.has_mailchimp_key);
+    if (vals.api_key) {
+      const r = await _api('PATCH', '/admin/companies/' + encodeURIComponent(companyId) + '/secrets', {
+        body: { mailchimp_api_key: vals.api_key }
+      });
+      hasKey = !!(r && r.has_mailchimp_key);
+    }
+    // Lokalen Cache updaten (ohne Key)
     if (c) {
-      c.mailchimp_api_key = vals.api_key;
+      c.has_mailchimp_key = hasKey;
       c.mailchimp_server_prefix = vals.server_prefix;
       c.mailchimp_list_id = vals.list_id;
-      c.mailchimp_list_name = vals.list_name;
+      c.mailchimp_list_name = listName;
     }
+    // Key-Feld leeren: der Key wird nicht mehr angezeigt
+    const row = document.querySelector('[data-mc-row-company="' + companyId + '"]');
+    const keyInp = row?.querySelector('[data-mc-input="api_key"]');
+    if (keyInp && vals.api_key) { keyInp.value = ''; keyInp.placeholder = 'leer = unverändert'; }
+    const prefixInp = row?.querySelector('[data-mc-input="server_prefix"]');
+    if (prefixInp) prefixInp.value = vals.server_prefix;
     toast('Mailchimp-Config gespeichert', 'success', 2500);
     if (status) status.innerHTML = '<span class="text-emerald-700">✓ Gespeichert</span>';
   } catch (e) {
-    toast(e.message, 'error', 7000);
+    toast(escapeHtml(e.message), 'error', 7000);
     if (status) status.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message) + '</span>';
   } finally {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="save" class="w-3 h-3"></i> Speichern'; if (window.lucide) lucide.createIcons(); }
@@ -17224,14 +16326,8 @@ async function _mcSaveCompany(companyId, btnEl) {
 
 // Verbindung testen — ruft /3.0/ping auf
 async function _mcTestConnection(companyId, btnEl) {
-  const vals = _mcReadRowInputs(companyId);
+  const vals = _mcCallValues(companyId);
   if (!vals) return;
-  if (!vals.api_key) { toast('API-Key fehlt', 'warn'); return; }
-  if (vals.api_key && !vals.server_prefix) {
-    const m = vals.api_key.match(/-([a-z]{2,3}\d{1,2})$/i);
-    if (m) vals.server_prefix = m[1].toLowerCase();
-  }
-  if (!vals.server_prefix) { toast('Server-Prefix fehlt (oder im Key nicht erkennbar)', 'warn'); return; }
   const status = document.querySelector('[data-mc-status="' + companyId + '"]');
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Teste…'; if (window.lucide) lucide.createIcons(); }
@@ -17239,14 +16335,14 @@ async function _mcTestConnection(companyId, btnEl) {
   try {
     const res = await proxyFetch('mailchimp/3.0/ping', {
       method: 'GET',
-      headers: { 'x-mailchimp-key': vals.api_key, 'x-mailchimp-server': vals.server_prefix }
+      headers: _mcRequestHeaders(companyId, vals)
     });
     const msg = res?.health_status || (typeof res === 'string' ? res : JSON.stringify(res));
     if (status) status.innerHTML = '<span class="text-emerald-700">✓ Verbindung OK: ' + escapeHtml(String(msg).slice(0, 80)) + '</span>';
     toast('Mailchimp-Verbindung OK', 'success', 3000);
   } catch (e) {
     if (status) status.innerHTML = '<span class="text-red-700">✗ ' + escapeHtml(e.message || String(e)) + '</span>';
-    toast('Verbindung fehlgeschlagen: ' + (e.message || e), 'error', 7000);
+    toast('Verbindung fehlgeschlagen: ' + escapeHtml(e.message || String(e)), 'error', 7000);
   } finally {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="zap" class="w-3 h-3"></i> Verbindung testen'; if (window.lucide) lucide.createIcons(); }
   }
@@ -17271,18 +16367,13 @@ function _mcSelectAudienceFromButton(btn) {
   // Audiences-Liste schließen + Hinweis zur Speicherung
   const wrap = document.querySelector('[data-mc-audiences="' + companyId + '"]');
   if (wrap) wrap.innerHTML = '<p class="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5">✓ <strong>' + escapeHtml(listName || listId) + '</strong> ausgewählt — bitte „Speichern" klicken</p>';
-  toast('Audience „' + (listName || listId) + '" übernommen — bitte Speichern klicken', 'info', 3500);
+  toast('Audience „' + escapeHtml(listName || listId) + '" übernommen — bitte Speichern klicken', 'info', 3500);
 }
 
 // Lädt alle Audiences (Lists) des Mandanten und zeigt sie zur Auswahl an
 async function _mcLoadAudiences(companyId, btnEl) {
-  const vals = _mcReadRowInputs(companyId);
+  const vals = _mcCallValues(companyId);
   if (!vals) return;
-  if (!vals.api_key) { toast('API-Key fehlt', 'warn'); return; }
-  if (vals.api_key && !vals.server_prefix) {
-    const m = vals.api_key.match(/-([a-z]{2,3}\d{1,2})$/i);
-    if (m) vals.server_prefix = m[1].toLowerCase();
-  }
   const wrap = document.querySelector('[data-mc-audiences="' + companyId + '"]');
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i>'; if (window.lucide) lucide.createIcons(); }
@@ -17290,7 +16381,7 @@ async function _mcLoadAudiences(companyId, btnEl) {
   try {
     const res = await proxyFetch('mailchimp/3.0/lists?count=50&fields=lists.id,lists.name,lists.stats.member_count', {
       method: 'GET',
-      headers: { 'x-mailchimp-key': vals.api_key, 'x-mailchimp-server': vals.server_prefix }
+      headers: _mcRequestHeaders(companyId, vals)
     });
     const lists = res?.lists || [];
     if (!lists.length) {
@@ -17320,98 +16411,21 @@ async function _mcLoadAudiences(companyId, btnEl) {
   }
 }
 
-async function loadFreshdeskGroupsList(btnEl) {
-  const wrap = document.getElementById('fdGroupsListHelper');
-  if (!wrap) return;
-  const origHtml = btnEl?.innerHTML;
-  if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Lade…'; if (window.lucide) lucide.createIcons(); }
-  wrap.innerHTML = '';
-  try {
-    const groups = await proxyFetch('freshdesk/api/v2/groups', { method: 'GET' });
-    if (!Array.isArray(groups) || !groups.length) {
-      wrap.innerHTML = '<p class="text-xs text-amber-700">Keine Gruppen zurückbekommen.</p>';
-      return;
-    }
-    wrap.innerHTML = `
-      <div class="bg-ink-50 border border-ink-200 rounded-lg p-2 space-y-1">
-        <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-1">${groups.length} Gruppe${groups.length===1?'':'n'} in Freshdesk</p>
-        ${groups.map(g => `
-          <div class="flex items-center justify-between gap-2 bg-white border border-ink-200 rounded px-2 py-1">
-            <div class="flex-1 min-w-0">
-              <div class="text-xs font-medium text-ink-900 truncate">${escapeHtml(g.name || '')}</div>
-              <div class="text-[10px] text-ink-500 truncate">ID: <code class="font-mono">${g.id}</code>${g.description ? ' · ' + escapeHtml(g.description) : ''}</div>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    `;
-  } catch (e) {
-    wrap.innerHTML = '<p class="text-xs text-red-700">Fehler: ' + escapeHtml(e.message) + '</p>';
-  } finally {
-    if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="list" class="w-3.5 h-3.5"></i> Verfügbare Freshdesk-Gruppen laden'; if (window.lucide) lucide.createIcons(); }
-  }
-}
-
 // Legacy-Helper (eingebaute Bestandscompat — nutzt saveFreshsalesSetup)
 async function saveFreshsalesSubdomain() { return saveFreshsalesSetup(); }
 
-// Speichert Subdomain in Master-Base + optional API-Token direkt als Val.town-Env-Var.
+// Speichert die Freshsales-Subdomain auf dem Server. Der API-Token ist die Railway-Variable FRESHSALES_API_KEY.
 async function saveFreshsalesSetup(btnEl) {
   const inp = document.getElementById('settingsFsDomain');
-  const tokInp = document.getElementById('settingsFsApiKey');
   if (!inp) return;
   const subdomain = (inp.value || '').trim()
     .replace(/^https?:\/\//i, '')
     .replace(/\.freshworks\.com\/?.*$/i, '')
     .replace(/\/+$/, '');
-  const apiToken = (tokInp?.value || '').trim();
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
   try {
-    // 1. Subdomain in Master-Base (idempotent)
-    const keys = await _fetchMasterBaseKeys();
-    const existing = keys.find(r => r.fields.key_name === 'freshsalesSubdomain');
-    if (subdomain) {
-      await _writeMasterBaseKey('freshsalesSubdomain', subdomain, existing?.id || null);
-      APP_KEYS.freshsalesSubdomain = subdomain;
-    } else if (existing) {
-      await _deleteMasterBaseKey(existing.id);
-      APP_KEYS.freshsalesSubdomain = null;
-    }
-
-    // 2. API-Token direkt in Val.town als Env-Var pushen (falls Token + Val-Token vorhanden)
-    let valtownPushed = false;
-    if (apiToken && APP_KEYS.valtownKey && APP_KEYS.valtownValId) {
-      try {
-        await valtownSetEnvVar(APP_KEYS.valtownKey, APP_KEYS.valtownValId, 'FRESHSALES_API_KEY', apiToken, 'Freshsales API-Token (vom ERP-Wizard gesetzt)');
-        // Zusätzlich Subdomain als Env-Var (falls geändert)
-        if (subdomain) {
-          await valtownSetEnvVar(APP_KEYS.valtownKey, APP_KEYS.valtownValId, 'FRESHSALES_SUBDOMAIN', subdomain, 'Freshsales-Subdomain');
-        }
-        valtownPushed = true;
-      } catch (eVt) {
-        console.warn('[Val.town] FS-Env-Var setzen fehlgeschlagen:', eVt.message);
-        toast('Subdomain gespeichert, aber Val.town-Env-Push fehlgeschlagen: ' + eVt.message, 'warn', 8000);
-      }
-    } else if (subdomain && !apiToken && APP_KEYS.valtownKey && APP_KEYS.valtownValId) {
-      // Subdomain wurde aktualisiert, aber kein neuer Token → trotzdem Subdomain-Env-Var aktualisieren
-      try {
-        await valtownSetEnvVar(APP_KEYS.valtownKey, APP_KEYS.valtownValId, 'FRESHSALES_SUBDOMAIN', subdomain, 'Freshsales-Subdomain');
-        valtownPushed = true;
-      } catch (_) {}
-    }
-
-    if (subdomain) {
-      toast(valtownPushed
-        ? '✓ Freshsales-Setup gespeichert (App + Val.town aktualisiert)'
-        : 'Subdomain gespeichert. Bitte FRESHSALES_API_KEY manuell in Val.town setzen.',
-        'success', 4500);
-    } else {
-      toast('Subdomain entfernt', 'success');
-    }
-    renderAdminSettings();
-  } catch (e) {
-    toast(e.message, 'error', 7000);
+    await _saveSettingFromForm('freshsalesSubdomain', subdomain, 'Freshsales-Subdomain gespeichert', 'Subdomain entfernt');
   } finally {
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
@@ -17430,13 +16444,13 @@ async function testFreshsalesConnection(btnEl) {
     const m = e.message || String(e);
     let msg = 'Verbindung fehlgeschlagen: ' + m;
     if (/FRESHSALES_SUBDOMAIN|FRESHSALES_API_KEY/i.test(m)) {
-      msg = 'Env-Vars in Val.town fehlen — Subdomain + Token im Step 9 unten neu eintragen und „Speichern".';
+      msg = 'Freshsales ist auf dem Server nicht eingerichtet — Railway-Variablen FRESHSALES_SUBDOMAIN und FRESHSALES_API_KEY setzen.';
     } else if (/401|403|Incorrect or expired/i.test(m)) {
-      msg = 'Token ungültig oder abgelaufen — neuen Token aus Freshsales (Profil → API-Einstellungen) holen und in Step 9 eintragen.';
+      msg = 'Token ungültig oder abgelaufen — neuen Token aus Freshsales (Profil → API-Einstellungen) holen und als Railway-Variable FRESHSALES_API_KEY setzen.';
     } else if (/404/.test(m)) {
       msg = 'Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht. Prüfe deine Freshworks-CRM-URL.';
     }
-    toast(msg, 'error', 10000);
+    toast(escapeHtml(msg), 'error', 10000);
   } finally {
     if (btnEl) { btnEl.disabled = false; if (origHtml) btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
@@ -17450,25 +16464,10 @@ async function saveFreshdeskDomain() {
     .replace(/^https?:\/\//i, '')
     .replace(/\.freshdesk\.com\/?$/i, '')
     .replace(/\/+$/, '');
-  try {
-    const keys = await _fetchMasterBaseKeys();
-    const existing = keys.find(r => r.fields.key_name === 'freshdeskDomain');
-    if (val) {
-      await _writeMasterBaseKey('freshdeskDomain', val, existing?.id || null);
-      APP_KEYS.freshdeskDomain = val;
-      toast('Freshdesk-Domain gespeichert', 'success');
-    } else if (existing) {
-      await _deleteMasterBaseKey(existing.id);
-      APP_KEYS.freshdeskDomain = null;
-      toast('Domain entfernt', 'success');
-    }
-    renderAdminSettings();
-  } catch (e) {
-    toast(e.message, 'error', 7000);
-  }
+  await _saveSettingFromForm('freshdeskDomain', val, 'Freshdesk-Domain gespeichert', 'Domain entfernt');
 }
 
-// FD Email-Inbox-ID (für Outbound-Email) speichern — nur localStorage, kein Master-Base-Key
+// FD Email-Inbox-ID (für Outbound-Email) speichern — nur localStorage
 function saveFdEmailConfigId(btnEl) {
   const inp = document.getElementById('settingsFdEmailConfigId');
   if (!inp) return;
@@ -17523,80 +16522,14 @@ async function listFdEmailConfigs(btnEl) {
   }
 }
 
-/* ============================================================
-   VAL.TOWN SCHNELL-SETUP — Single-Click-Action
-   ============================================================ */
-async function valtownStartSetup(btnEl) {
-  const inp = document.getElementById('valtownKeyInput');
-  const token = (inp?.value || '').trim();
-  if (!token || token.startsWith('••')) { toast('Val.town API-Key fehlt', 'warn'); inp?.focus(); return; }
-  const progressBox = document.getElementById('valtownProgress');
-  const progressList = document.getElementById('valtownProgressList');
-  const scrollBox = document.getElementById('valtownProgressBox');
-  if (progressBox) progressBox.classList.remove('hidden');
-  if (progressList) progressList.innerHTML = '';
-  if (btnEl) { btnEl.disabled = true; btnEl.dataset._origHtml = btnEl.innerHTML; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Läuft…'; if (window.lucide) lucide.createIcons(); }
-  const onProgress = (msg, kind = 'info') => {
-    if (!progressList) return;
-    const li = document.createElement('li');
-    const icon = kind === 'ok' ? '✓' : kind === 'warn' ? '!' : '›';
-    const cls  = kind === 'ok' ? 'text-emerald-300' : kind === 'warn' ? 'text-amber-300' : 'text-ink-300';
-    li.innerHTML = `<span class="${cls} inline-block w-3">${icon}</span> <span class="${cls}">${escapeHtml(msg)}</span>`;
-    progressList.appendChild(li);
-    if (scrollBox) scrollBox.scrollTop = 999999;
-  };
-  try {
-    const result = await valtownAutoSetup({ token, onProgress });
-    onProgress(result.isUpdate ? 'Fertig — Proxy aktualisiert' : 'Fertig — Proxy live unter ' + result.endpointUrl, 'ok');
-    toast(result.isUpdate ? 'Proxy aktualisiert' : 'Proxy eingerichtet', 'success', 5000);
-    // Nach Deploy /health pingen für proxyV2-Detection
-    try {
-      const hres = await fetch(result.endpointUrl + '/health', {
-        headers: { 'Authorization': 'Bearer ' + _bearerForProxy() }
-      });
-      if (hres.ok) {
-        const hj = await hres.json();
-        if (Array.isArray(hj?.user?.freshdesk_company_keys)) {
-          APP_KEYS.proxyV2 = true;
-          onProgress('Proxy v2 ist live — Titel-Umschreiben + Status-Wechsel verfügbar', 'ok');
-        }
-      }
-    } catch (_) {}
-    setTimeout(() => renderAdminSettings(), 1800);
-  } catch (e) {
-    onProgress('Fehler: ' + (e.message || e), 'warn');
-    toast('Setup fehlgeschlagen: ' + (e.message || e), 'error', 9000);
-  } finally {
-    if (btnEl) { btnEl.disabled = false; if (btnEl.dataset._origHtml) btnEl.innerHTML = btnEl.dataset._origHtml; if (window.lucide) lucide.createIcons(); }
-  }
-}
-
-
 async function saveTicketTypes() {
   const inp = document.getElementById('settingsTicketTypes');
   if (!inp) return;
   // Eingabe normalisieren: Whitespace trimmen, leere Einträge raus, Komma-getrennt
   const val = String(inp.value || '')
     .split(',').map(s => s.trim()).filter(Boolean).join(', ');
-  try {
-    const keys = await _fetchMasterBaseKeys();
-    const existing = keys.find(r => r.fields.key_name === 'freshdeskTicketTypes');
-    if (val) {
-      await _writeMasterBaseKey('freshdeskTicketTypes', val, existing?.id || null);
-      APP_KEYS.freshdeskTicketTypes = val;
-      toast('Ticket-Typen-Filter gespeichert', 'success');
-    } else if (existing) {
-      // Leerer Wert + bestehender Record → Record löschen (= alle Typen)
-      await _deleteMasterBaseKey(existing.id);
-      APP_KEYS.freshdeskTicketTypes = null;
-      toast('Filter entfernt — alle Tickettypen', 'success');
-    } else {
-      toast('Kein Filter (alle Tickettypen)', 'info', 1500);
-    }
-    renderAdminSettings();
-  } catch (e) {
-    toast(e.message, 'error', 7000);
-  }
+  if (!val && !APP_KEYS.freshdeskTicketTypes) { toast('Kein Filter (alle Tickettypen)', 'info', 1500); return; }
+  await _saveSettingFromForm('freshdeskTicketTypes', val, 'Ticket-Typen-Filter gespeichert', 'Filter entfernt — alle Tickettypen');
 }
 
 // Lädt alle Tickettypen aus Freshdesk und zeigt sie als anklickbare Chips.
@@ -17657,17 +16590,16 @@ function toggleTicketTypeChip(typeName) {
 async function testProxyConnection() {
   const wrap = document.getElementById('proxyTestResult');
   if (!wrap) return;
-  if (!_proxyBase()) {
-    wrap.innerHTML = '<p class="text-xs text-amber-700 italic">Bitte erst Proxy-URL eintragen (Step 4).</p>';
-    return;
-  }
   wrap.innerHTML = '<p class="text-xs text-ink-500 italic flex items-center gap-2"><i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Teste…</p>';
   if (window.lucide) lucide.createIcons();
   try {
     const data = await proxyFetch('health');
+    const fdCompanies = (data?.user?.freshdesk_company_keys || []).length;
     const fdInfo = data?.user?.has_freshdesk_key
       ? '<span class="inline-flex items-center gap-1 mt-1.5 text-[10px] uppercase tracking-wider bg-emerald-200 text-emerald-800 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="headphones" class="w-3 h-3"></i> persönlicher Freshdesk-Key gesetzt</span>'
-      : '<p class="text-[11px] mt-1.5 text-emerald-700">Hinweis: Du hast keinen persönlichen Freshdesk-Key am User-Record — Calls laufen über den env-var-Fallback (sofern gesetzt).</p>';
+      : fdCompanies
+        ? '<span class="inline-flex items-center gap-1 mt-1.5 text-[10px] uppercase tracking-wider bg-emerald-200 text-emerald-800 px-1.5 py-0.5 rounded font-semibold"><i data-lucide="headphones" class="w-3 h-3"></i> Freshdesk-Keys für ' + fdCompanies + ' Mandant(en)</span>'
+        : '<p class="text-[11px] mt-1.5 text-emerald-700">Hinweis: Du hast keinen persönlichen Freshdesk-Key — Freshdesk-Aufrufe laufen über den Server-Fallback <code>FRESHDESK_API_KEY</code> (sofern gesetzt).</p>';
     wrap.innerHTML = `
       <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-900">
         <p class="font-semibold flex items-center gap-1.5"><i data-lucide="check-circle-2" class="w-4 h-4"></i> Verbindung erfolgreich</p>
@@ -17680,7 +16612,7 @@ async function testProxyConnection() {
       <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-xs text-red-900">
         <p class="font-semibold flex items-center gap-1.5"><i data-lucide="alert-circle" class="w-4 h-4"></i> Fehler</p>
         <p class="mt-1 break-words">${escapeHtml(e.message)}</p>
-        <p class="mt-2 text-red-700">Mögliche Ursachen: URL falsch, Code in Val.town fehlt/alt, Env-Vars fehlen, Read-Key hat keinen Scope auf User-Tabelle.</p>
+        <p class="mt-2 text-red-700">Mögliche Ursachen: Server nicht erreichbar oder Sitzung abgelaufen.</p>
       </div>
     `;
   }
@@ -18828,13 +17760,13 @@ async function syncCustomerToFreshdesk(customerId, btnEl, opts) {
     const m = (e.message || String(e));
     let userMsg = 'Sync fehlgeschlagen: ' + m;
     if (/FRESHDESK_DOMAIN|FRESHDESK_API_KEY/i.test(m)) {
-      userMsg = 'Freshdesk-Setup unvollständig — Admin → Einstellungen → Step 7 (Subdomain) prüfen + Freshdesk-API-Key im User-Profil.';
+      userMsg = 'Freshdesk ist auf dem Server nicht eingerichtet — Railway-Variablen FRESHDESK_DOMAIN und FRESHDESK_API_KEY setzen oder unter Admin → Benutzer einen eigenen Freshdesk-Key eintragen.';
     } else if (/401|403/.test(m)) {
       userMsg = 'Freshdesk-Token ungültig — bitte unter Admin → Benutzer einen aktuellen Freshdesk-API-Key beim eigenen Profil eintragen.';
     } else if (/404/.test(m)) {
-      userMsg = 'Freshdesk 404 — bitte prüfe ob die Freshdesk-Subdomain in Step 7 stimmt. Volle Antwort: ' + m;
+      userMsg = 'Freshdesk 404 — bitte prüfe, ob die Railway-Variable FRESHDESK_DOMAIN stimmt. Volle Antwort: ' + m;
     }
-    if (!silent) toast(userMsg, 'error', 12000);
+    if (!silent) toast(escapeHtml(userMsg), 'error', 12000);
     else console.warn('[Lazy-Push FD] customer=' + customerId + ': ' + m);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
     return false;
@@ -18845,7 +17777,7 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
   const silent = !!(opts && opts.silent);
   if (!_proxyBase())                  { if (!silent) toast('API-Proxy nicht konfiguriert', 'error'); return false; }
   if (!APP_KEYS.proxyV2)              { if (!silent) toast('Sync benötigt Val.town-Proxy v2 — bitte Setup aktualisieren', 'error', 8000); return false; }
-  if (!APP_KEYS.freshsalesSubdomain)  { if (!silent) toast('Freshsales nicht konfiguriert — Admin → Einstellungen → Step 9', 'error', 8000); return false; }
+  if (!APP_KEYS.freshsalesSubdomain)  { if (!silent) toast('Freshsales nicht konfiguriert — Admin → Einstellungen → Step 6', 'error', 8000); return false; }
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Sync…'; if (window.lucide) lucide.createIcons(); }
   try {
@@ -18926,15 +17858,15 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
     const m = (e.message || String(e));
     let userMsg = 'Sync fehlgeschlagen: ' + m;
     if (/FRESHSALES_SUBDOMAIN|FRESHSALES_API_KEY/i.test(m)) {
-      userMsg = 'Freshsales-Setup unvollständig — Admin → Einstellungen → Step 9: Subdomain + API-Token eintragen.';
+      userMsg = 'Freshsales ist auf dem Server nicht eingerichtet — Railway-Variablen FRESHSALES_SUBDOMAIN und FRESHSALES_API_KEY setzen.';
     } else if (/404/.test(m)) {
-      userMsg = 'Freshsales 404 — Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht im Freshworks-CRM. Logge dich in Freshsales ein, schau auf die URL (z.B. <bundle>.freshworks.com) und korrigiere die Subdomain in Admin → Einstellungen → Step 9.';
+      userMsg = 'Freshsales 404 — Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht im Freshworks-CRM. Logge dich in Freshsales ein, schau auf die URL (z.B. <bundle>.freshworks.com) und korrigiere die Subdomain in Admin → Einstellungen → Step 6 (für die API-Aufrufe: Railway-Variable FRESHSALES_SUBDOMAIN).';
     } else if (/401|403/.test(m)) {
-      userMsg = 'Freshsales-Token ungültig (' + m.match(/40[13]/)[0] + ') — neuen Token in Freshsales generieren und in Step 9 eintragen.';
+      userMsg = 'Freshsales-Token ungültig (' + m.match(/40[13]/)[0] + ') — neuen Token in Freshsales generieren und als Railway-Variable FRESHSALES_API_KEY setzen.';
     } else if (/not unique|Name existiert|Company is not unique/i.test(m)) {
       userMsg = 'Firma „' + (fs?.name || '?') + '" existiert in Freshsales, konnte aber per Lookup nicht gefunden werden. Schau in die Browser-Konsole (F12) → suche nach „[FS Lookup] response shape" → schick mir die Ausgabe.';
     }
-    if (!silent) toast(userMsg, 'error', 12000);
+    if (!silent) toast(escapeHtml(userMsg), 'error', 12000);
     else console.warn('[Lazy-Push FS] customer=' + customerId + ': ' + m);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
     return false;

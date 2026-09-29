@@ -1,0 +1,253 @@
+// test/e2e/settings.e2e.ts
+import type { Page } from 'playwright-core';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { jsonResponse } from '../helpers/fakeFetch.js';
+import { startHarness, type Harness } from './harness.js';
+
+const FD = 'https://flptest.freshdesk.com/api/v2/';
+const basic = (user: string, password: string): string => 'Basic ' + Buffer.from(`${user}:${password}`).toString('base64');
+
+let h: Harness;
+beforeAll(async () => {
+  h = await startHarness();
+  // Every render of the settings page loads the Freshdesk groups for the dropdowns.
+  h.fake.on('GET', FD + 'groups', () => jsonResponse([{ id: 11, name: 'Vertrieb' }, { id: 12, name: 'Bestellungen' }]));
+});
+afterEach(async () => {
+  await h.resetContexts();
+});
+afterAll(async () => {
+  await h.close();
+});
+
+const callsTo = (prefix: string) => h.fake.calls.filter((c) => c.url.startsWith(prefix));
+const settings = async (): Promise<Record<string, string>> =>
+  (await h.apiAs<{ settings: Record<string, string> }>('admin', 'GET', '/api/settings')).settings;
+const companyFields = async (id: string): Promise<Record<string, unknown>> =>
+  (await h.deps.records.get('Company', id))?.fields ?? {};
+// Headers of the page's own /api requests whose URL contains `part`, collected from now on.
+const apiRequests = (page: Page, part: string): Record<string, string>[] => {
+  const seen: Record<string, string>[] = [];
+  page.on('request', (r) => {
+    if (r.url().startsWith(h.baseUrl + '/api/') && r.url().includes(part)) seen.push(r.headers());
+  });
+  return seen;
+};
+const toast = (page: Page, text: string): Promise<void> => page.locator('#toastWrap', { hasText: text }).waitFor();
+// Opens the settings page as the admin. showApp() renders the start page synchronously, so nothing
+// overwrites the settings page afterwards. The 5 s limit lets a page that never renders fail fast.
+const openSettings = async (page: Page): Promise<void> => {
+  await h.openApp(page, 'admin');
+  await h.run(page, 'await renderAdminSettings();');
+  await page.locator('#settingsFdDomain').waitFor({ timeout: 5_000 });
+};
+// A save re-renders the page. The toast appears in the same task that starts the re-render,
+// so after the toast the old input is gone, and this waits for the fresh one.
+const inputShows = (page: Page, selector: string, value: string): Promise<unknown> =>
+  page.waitForFunction(
+    ([sel, want]) => document.querySelector<HTMLInputElement | HTMLSelectElement>(sel)?.value === want,
+    [selector, value] as const,
+  );
+
+describe('settings page', () => {
+  it('saves the Freshdesk domain on the server, and it survives a reload (scenario 9)', async () => {
+    const page = await h.newPage();
+    await openSettings(page);
+    await page.fill('#settingsFdDomain', 'https://flpliftparts.freshdesk.com/');
+    await page.click('button[onclick="saveFreshdeskDomain()"]');
+    await toast(page, 'Freshdesk-Domain gespeichert');
+    expect((await settings()).freshdeskDomain).toBe('flpliftparts');
+    expect(await h.run(page, 'return APP_KEYS.freshdeskDomain;')).toBe('flpliftparts');
+    // Let the re-render finish before reloading, so no request is cut off.
+    await inputShows(page, '#settingsFdDomain', 'flpliftparts');
+
+    await page.reload();
+    await page.waitForSelector('#appShell:not(.hidden)', { state: 'visible' });
+    // The boot loads the settings before it shows the app shell.
+    expect(await h.run(page, 'return APP_KEYS.freshdeskDomain;')).toBe('flpliftparts');
+    await h.run(page, 'await renderAdminSettings();');
+    expect(await page.inputValue('#settingsFdDomain')).toBe('flpliftparts');
+    await h.assertClean(page);
+  });
+
+  it('shows no Val.town setup, offers the Freshdesk groups and tests the connection to the server', async () => {
+    const page = await h.newPage();
+    await openSettings(page);
+    const text = await page.locator('#pageContent').innerText();
+    expect(/val\.?town|Master-Base|Proxy-URL/i.test(text)).toBe(false);
+    expect(await page.locator('#valtownCodeBlock, #valtownKeyInput, #settingsProxyUrl, #settingsFsApiKey').count()).toBe(0);
+    expect(await page.locator('#settingsSalesGroupId option').allTextContents()).toEqual([
+      '— keine Default-Sales-Gruppe —',
+      'Bestellungen (#12)',
+      'Vertrieb (#11)',
+    ]);
+    await page.selectOption('#settingsSalesGroupId', '11');
+    await page.click('button[onclick="saveSalesGroupId()"]');
+    await toast(page, 'Sales-Group-ID gespeichert');
+    expect((await settings()).freshdeskSalesGroupId).toBe('11');
+    await inputShows(page, '#settingsSalesGroupId', '11');
+
+    await page.click('button[onclick="testProxyConnection()"]');
+    const result = page.locator('#proxyTestResult', { hasText: 'Verbindung erfolgreich' });
+    await result.waitFor();
+    const resultText = await result.innerText();
+    expect(resultText.includes('Authentifiziert als Ada Admin (admin).')).toBe(true);
+    // The admin has no Freshdesk key, so the page points to the server's fallback key.
+    expect(resultText.includes('FRESHDESK_API_KEY')).toBe(true);
+    await h.assertClean(page);
+  });
+
+  it('normalizes the ticket types, deletes the setting when emptied, and skips a save without change', async () => {
+    const page = await h.newPage();
+    await openSettings(page);
+    await page.fill('#settingsTicketTypes', ' Anfrage ,, Bestellung ');
+    await page.click('button[onclick="saveTicketTypes()"]');
+    await toast(page, 'Ticket-Typen-Filter gespeichert');
+    expect((await settings()).freshdeskTicketTypes).toBe('Anfrage, Bestellung');
+    await inputShows(page, '#settingsTicketTypes', 'Anfrage, Bestellung');
+
+    await page.fill('#settingsTicketTypes', '');
+    await page.click('button[onclick="saveTicketTypes()"]');
+    await toast(page, 'Filter entfernt — alle Tickettypen');
+    expect('freshdeskTicketTypes' in (await settings())).toBe(false);
+    expect(await h.run(page, 'return APP_KEYS.freshdeskTicketTypes;')).toBe(null);
+    await inputShows(page, '#settingsTicketTypes', '');
+
+    // Nothing set and nothing typed: no request at all.
+    const puts = apiRequests(page, '/settings/');
+    await page.click('button[onclick="saveTicketTypes()"]');
+    await toast(page, 'Kein Filter (alle Tickettypen)');
+    expect(puts).toEqual([]);
+    await h.assertClean(page);
+  });
+
+  it('refuses settings changes by a non-admin', async () => {
+    const before = (await settings()).freshdeskDomain;
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    expect(await h.runError(page, "await saveSetting('freshdeskDomain', 'fremd');")).toEqual({
+      message: 'Nur für Admins',
+      status: 403,
+      type: 'FORBIDDEN',
+    });
+    expect((await settings()).freshdeskDomain).toBe(before);
+    await h.run(page, 'await renderAdminSettings();');
+    expect((await page.locator('#pageContent').innerText()).includes('Nur für Admins.')).toBe(true);
+    await h.assertClean(page);
+  });
+
+  it('stores a Mailchimp key encrypted on the server and never shows it again (scenario 11)', async () => {
+    h.fake.on('GET', 'https://us21.api.mailchimp.com/3.0/ping', () => jsonResponse({ health_status: "Everything's Chimpy!" }));
+    h.fake.on('GET', 'https://us21.api.mailchimp.com/3.0/lists', () =>
+      jsonResponse({ lists: [{ id: 'l1', name: 'Newsletter', stats: { member_count: 3 } }] }),
+    );
+    const alpha = h.companies.alpha;
+    const row = `[data-mc-row-company="${alpha}"]`;
+    const page = await h.newPage();
+    await openSettings(page);
+    const secretCalls = apiRequests(page, '/admin/companies/');
+    const mailchimpCalls = apiRequests(page, '/mailchimp/');
+    const statusShows = (text: string) => page.locator(`[data-mc-status="${alpha}"]`, { hasText: text }).waitFor();
+
+    await page.fill(`${row} [data-mc-input="api_key"]`, 'mc-key-alpha-us21');
+    await page.fill(`${row} [data-mc-input="list_id"]`, 'list-alpha');
+    await page.click(`${row} button[onclick^="_mcSaveCompany"]`);
+    await statusShows('✓ Gespeichert');
+    const fields = await companyFields(alpha);
+    expect([fields.mailchimp_server_prefix, fields.mailchimp_list_id, 'mailchimp_api_key' in fields]).toEqual([
+      'us21',
+      'list-alpha',
+      false,
+    ]);
+    expect(await h.deps.secrets.mailchimpKey(alpha)).toBe('mc-key-alpha-us21');
+    expect(secretCalls.length).toBe(1);
+    // The browser keeps no key: the cache has the flag only, and the input is empty again.
+    expect(
+      await h.run(
+        page,
+        `const c = APP_KEYS.companies.find(x => x.id === ${JSON.stringify(alpha)});
+         return [c.has_mailchimp_key, 'mailchimp_api_key' in c];`,
+      ),
+    ).toEqual([true, false]);
+    expect(await page.inputValue(`${row} [data-mc-input="api_key"]`)).toBe('');
+    expect(await page.getAttribute(`${row} [data-mc-input="api_key"]`, 'placeholder')).toBe('leer = unverändert');
+    expect(await page.inputValue(`${row} [data-mc-input="server_prefix"]`)).toBe('us21');
+
+    // Test and audience list use the stored key; a second save keeps it.
+    await page.click(`${row} button[onclick^="_mcTestConnection"]`);
+    await statusShows("Verbindung OK: Everything's Chimpy!");
+    await page.click(`${row} button[onclick^="_mcLoadAudiences"]`);
+    await page.click(`${row} [data-mc-pick-list-id="l1"]`);
+    // The status reads "Verbindung OK" now, so "Gespeichert" comes from this save.
+    await page.click(`${row} button[onclick^="_mcSaveCompany"]`);
+    await statusShows('✓ Gespeichert');
+    const after = await companyFields(alpha);
+    expect([after.mailchimp_server_prefix, after.mailchimp_list_id, after.mailchimp_list_name]).toEqual([
+      'us21',
+      'l1',
+      'Newsletter',
+    ]);
+    expect(await h.deps.secrets.mailchimpKey(alpha)).toBe('mc-key-alpha-us21');
+    expect(secretCalls.length).toBe(1);
+    expect(mailchimpCalls.map((s) => [s['x-company-id'], s['x-mailchimp-key'], s['x-mailchimp-server']])).toEqual([
+      [alpha, undefined, undefined],
+      [alpha, undefined, undefined],
+    ]);
+    expect(callsTo('https://us21.api.mailchimp.com/3.0/').map((c) => c.headers.get('authorization'))).toEqual([
+      basic('anystring', 'mc-key-alpha-us21'),
+      basic('anystring', 'mc-key-alpha-us21'),
+    ]);
+    await h.assertClean(page);
+  });
+
+  it('tests Mailchimp with the stored key while the key input is empty, and with a typed key without saving it', async () => {
+    const beta = h.companies.beta;
+    await h.apiAs('admin', 'PATCH', `/api/admin/companies/${beta}/secrets`, { mailchimp_api_key: 'mc-key-beta-us19' });
+    h.fake.on('GET', 'https://us19.api.mailchimp.com/3.0/ping', () => jsonResponse({ health_status: 'Gespeicherter Key OK' }));
+    h.fake.on('GET', 'https://us5.api.mailchimp.com/3.0/ping', () => jsonResponse({ health_status: 'Neuer Key OK' }));
+    const row = `[data-mc-row-company="${beta}"]`;
+    const page = await h.newPage();
+    await openSettings(page);
+    const sent = apiRequests(page, '/mailchimp/');
+    const statusShows = (text: string) => page.locator(`[data-mc-status="${beta}"]`, { hasText: text }).waitFor();
+    expect(await page.inputValue(`${row} [data-mc-input="api_key"]`)).toBe('');
+
+    await page.click(`${row} button[onclick^="_mcTestConnection"]`);
+    await statusShows('Verbindung OK: Gespeicherter Key OK');
+    await page.fill(`${row} [data-mc-input="api_key"]`, 'mc-key-neu-us5');
+    await page.click(`${row} button[onclick^="_mcTestConnection"]`);
+    await statusShows('Verbindung OK: Neuer Key OK');
+
+    expect(sent.map((s) => [s['x-company-id'], s['x-mailchimp-key'], s['x-mailchimp-server']])).toEqual([
+      [beta, undefined, undefined],
+      [beta, 'mc-key-neu-us5', 'us5'],
+    ]);
+    expect(callsTo('https://us19.api.mailchimp.com/').map((c) => c.headers.get('authorization'))).toEqual([
+      basic('anystring', 'mc-key-beta-us19'),
+    ]);
+    expect(callsTo('https://us5.api.mailchimp.com/').map((c) => c.headers.get('authorization'))).toEqual([
+      basic('anystring', 'mc-key-neu-us5'),
+    ]);
+    // Testing saves nothing.
+    expect(await h.deps.secrets.mailchimpKey(beta)).toBe('mc-key-beta-us19');
+    await h.assertClean(page);
+  });
+
+  it('saves the Freshsales subdomain without a token field and tests the server key', async () => {
+    h.fake.on('GET', 'https://gilt.freshworks.com/crm/sales/api/lookup', () => jsonResponse({}));
+    const page = await h.newPage();
+    await openSettings(page);
+    expect(await page.locator('#settingsFsApiKey').count()).toBe(0);
+    await page.fill('#settingsFsDomain', 'https://gilt.freshworks.com/crm/sales/');
+    await page.click('button[onclick="saveFreshsalesSetup(this)"]');
+    await toast(page, 'Freshsales-Subdomain gespeichert');
+    expect((await settings()).freshsalesSubdomain).toBe('gilt');
+    // The test button is rendered once a subdomain is set; click waits for the re-render.
+    await page.click('button[onclick="testFreshsalesConnection(this)"]');
+    await toast(page, '✓ Freshsales-API erreichbar · Auth + Subdomain OK');
+    const [lookup] = callsTo('https://gilt.freshworks.com/crm/sales/api/lookup');
+    expect(lookup?.headers.get('authorization')).toBe('Token token=test-freshsales-key');
+    expect((await page.locator('#pageContent').innerText()).includes('FRESHSALES_API_KEY')).toBe(true);
+    await h.assertClean(page);
+  });
+});

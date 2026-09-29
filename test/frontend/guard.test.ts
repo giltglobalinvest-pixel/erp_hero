@@ -18,4 +18,14 @@ describe('index.html', () => {
     expect(html.includes('_TKP')).toBe(false);
     expect(/AIRTABLE_READ_KEY\s*:/.test(html)).toBe(false);
   });
+
+  it('has no Val.town setup or Master-Base code left', () => {
+    for (const name of [
+      'VALTOWN_PROXY_CODE', '_fetchMasterBaseKeys', '_writeMasterBaseKey', '_deleteMasterBaseKey', '_valtownEnvVars',
+      '_applyKeyToAppState', 'api.val.town', 'valtownStartSetup', 'valtownAutoSetup', 'valtownSetEnvVar',
+      '_bearerForProxy', 'settingsFsApiKey',
+    ]) {
+      expect(html.includes(name), name).toBe(false);
+    }
+  });
 });
