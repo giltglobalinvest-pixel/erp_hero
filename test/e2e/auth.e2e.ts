@@ -15,6 +15,10 @@ afterAll(async () => {
 
 // APP_CONFIG.PROJECT_ID in index.html; the old token keys were named after it.
 const PROJECT_ID = 'p_1778057282571';
+// The login screen's note when /api/me fails at boot for another reason than 401.
+const BOOT_NOTE = 'Server nicht erreichbar – bitte gleich neu laden. Deine Anmeldung bleibt bestehen.';
+// What the edge answers while the server restarts during a deploy.
+const EDGE_502 = '<!DOCTYPE html><html><head><title>502</title></head><body><h1>Application failed to respond</h1></body></html>';
 
 describe('login and session', () => {
   it('logs in through the form and keeps a long-lived cookie when asked', async () => {
@@ -123,12 +127,44 @@ describe('login and session', () => {
     await page.route('**/api/me', (route) => route.abort());
     await h.openApp(page);
     expect(await page.locator('#loginScreen').isVisible()).toBe(true);
+    expect(await page.locator('#loginError').textContent()).toBe(BOOT_NOTE);
     await page.route('**/api/auth', (route) => route.abort());
     await page.fill('#loginKey', h.users.vera.key);
     await page.click('#loginBtn');
     await page.waitForSelector('#loginError:not(.hidden)', { state: 'visible' });
     expect(await page.locator('#loginError').textContent()).toBe('Server nicht erreichbar – bitte Verbindung prüfen');
     expect(await page.locator('#appShell').isVisible()).toBe(false);
+    await h.assertClean(page);
+  });
+
+  it('an HTML 502 from the edge at boot shows a note instead of looking logged out, and a reload after it logs in', async () => {
+    // Without a session (401) the login screen shows no note.
+    const fresh = await h.newPage();
+    await h.openApp(fresh);
+    expect(await fresh.locator('#loginError').isVisible()).toBe(false);
+
+    const page = await h.newPage();
+    await h.login(page, 'vera', true);
+    for (const path of ['/api/me', '/api/auth']) {
+      await page.route(`${h.baseUrl}${path}`, (route) => route.fulfill({ status: 502, contentType: 'text/html', body: EDGE_502 }));
+    }
+    await page.goto(`${h.baseUrl}/`);
+    await page.waitForSelector('#loginScreen:not(.hidden)', { state: 'visible' });
+    expect(await page.locator('#loginError').isVisible()).toBe(true);
+    expect(await page.locator('#loginError').textContent()).toBe(BOOT_NOTE);
+
+    // A login during the outage keeps its "HTTP <status>" for an HTML answer (spec §5 step 6).
+    await page.fill('#loginKey', h.users.vera.key);
+    await page.click('#loginBtn');
+    await page.locator('#loginError', { hasText: 'HTTP 502' }).waitFor();
+    expect(await page.locator('#loginError').textContent()).toBe('HTTP 502');
+
+    // The outage ends: a reload opens the app with the same cookie, no key needed.
+    await page.unrouteAll();
+    await page.reload();
+    await page.waitForSelector('#appShell:not(.hidden)', { state: 'visible' });
+    expect(await page.locator('#sidebarUserName').textContent()).toBe('Vera Vertrieb');
+    await h.assertClean(fresh);
     await h.assertClean(page);
   });
 
