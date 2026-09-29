@@ -21,6 +21,10 @@ const RAILWAY = 'https://erp-hero-production.up.railway.app/';
 // The old home on GitHub Pages, and the localStorage key of the old loader's copy of index.html.
 const PAGES = 'https://giltglobalinvest-pixel.github.io';
 const LOADER_CACHE_KEY = 'app_cache_giltglobalinvest-pixel/erp_hero';
+// A link to a quote as the app writes it into Freshdesk notes (appQuoteDeepLink).
+const DEEP_LINK = '#quote/recAAAAAAAAAAAAAA';
+// Railway with the deep link kept.
+const railwayWithLink = (url: URL): boolean => url.href === RAILWAY + DEEP_LINK;
 
 // What the service worker must leave to the network.
 const isApi = (pathname: string): boolean => pathname.startsWith('/api/') || pathname === '/healthz';
@@ -92,11 +96,11 @@ describe('service worker', () => {
 describe('GitHub Pages', () => {
   const indexHtml = readFileSync(path.join(ROOT_DIR, 'index.html'), 'utf8');
 
-  it('a copy of index.html there moves on to Railway before the app starts', async () => {
+  it('a copy of index.html there moves on to Railway before the app starts, keeping the deep link', async () => {
     const page = await h.newPage();
     const requested = await playPagesAndRailway(page, { '/erp_hero/': indexHtml });
-    await page.goto(`${PAGES}/erp_hero/`, { waitUntil: 'commit' });
-    await page.waitForURL(RAILWAY, { timeout: 5_000 });
+    await page.goto(`${PAGES}/erp_hero/${DEEP_LINK}`, { waitUntil: 'commit' });
+    await page.waitForURL(railwayWithLink, { timeout: 5_000 });
     expect(await page.locator('#railway').textContent()).toBe('Railway');
     // Once started, the app would ask github.io for /api/me at once.
     expect(requested.filter(isApi)).toEqual([]);
@@ -113,13 +117,13 @@ describe('GitHub Pages', () => {
       '/erp_hero/loader.html': oldLoader,
       '/erp_hero/index.html': indexHtml,
     });
-    await page.goto(`${PAGES}/erp_hero/loader.html`, { waitUntil: 'commit' });
-    await page.waitForURL(RAILWAY, { timeout: 5_000 });
+    await page.goto(`${PAGES}/erp_hero/loader.html${DEEP_LINK}`, { waitUntil: 'commit' });
+    await page.waitForURL(railwayWithLink, { timeout: 5_000 });
     expect(requested.filter(isApi)).toEqual([]);
     await h.assertClean(page);
   });
 
-  it.each(['loader.html', 'loader-admin.html'])('%s deletes the old copy of the app and moves on to Railway', async (file) => {
+  it.each(['loader.html', 'loader-admin.html'])('%s deletes the old copy of the app and moves on to Railway with the deep link', async (file) => {
     const loader = readFileSync(path.join(ROOT_DIR, file), 'utf8');
     // The fallback when the redirect does not run.
     expect(loader.includes('<a href="https://erp-hero-production.up.railway.app/">Weiter zu ERP Hero</a>')).toBe(true);
@@ -132,8 +136,8 @@ describe('GitHub Pages', () => {
        localStorage.setItem('${LOADER_CACHE_KEY}_at', '2026-01-01T00:00:00.000Z');
        localStorage.setItem('e2e_bleibt', '1');`,
     );
-    await page.goto(`${PAGES}/erp_hero/${file}`, { waitUntil: 'commit' });
-    await page.waitForURL(RAILWAY, { timeout: 5_000 });
+    await page.goto(`${PAGES}/erp_hero/${file}${DEEP_LINK}`, { waitUntil: 'commit' });
+    await page.waitForURL(railwayWithLink, { timeout: 5_000 });
     await page.goto(`${PAGES}/erp_hero/`);
     expect(await h.run<string[]>(page, 'return Object.keys(localStorage);')).toEqual(['e2e_bleibt']);
     await h.assertClean(page);

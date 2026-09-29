@@ -83,7 +83,7 @@ describe('files', () => {
     await h.openApp(page, 'vera');
     const uploads: string[] = [];
     page.on('request', (r) => {
-      if (r.url().includes('/files/')) uploads.push(r.url());
+      if (r.method() === 'POST' && r.url().includes('/files/')) uploads.push(r.url());
     });
     expect(
       await h.runError(
@@ -97,6 +97,24 @@ describe('files', () => {
     );
     expect(tooBig.message).toBe('Datei zu groß (max 5 MB)');
     expect(uploads.length).toBe(1);
+    await h.assertClean(page);
+  });
+
+  it('a file the browser cannot read gives a clear error and no request', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    const uploads: string[] = [];
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().includes('/files/')) uploads.push(r.url());
+    });
+    // As when the file was deleted or moved after it was picked.
+    const err = await h.runError(
+      page,
+      `FileReader.prototype.readAsDataURL = function () { setTimeout(() => this.onerror(new ProgressEvent('error'))); };
+       await uploadFileToRecord('Attachment', 'recNichtVorhanden0', 'file', new File(['x'], 'kaputt.txt'));`,
+    );
+    expect(err.message).toBe('Datei konnte nicht gelesen werden');
+    expect(uploads).toEqual([]);
     await h.assertClean(page);
   });
 

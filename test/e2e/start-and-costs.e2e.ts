@@ -92,7 +92,7 @@ describe('AI costs page', () => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',
-        body: JSON.stringify({ error: { type: 'INTERNAL', message: 'Datenbank nicht lesbar' } }),
+        body: JSON.stringify({ error: { type: 'INTERNAL', message: 'Datenbank <b>nicht</b> lesbar' } }),
       }),
     );
     const shown = await h.run<{ error: string | null; text: string }>(
@@ -103,9 +103,24 @@ describe('AI costs page', () => {
          text: document.getElementById('pageContent').innerText,
        };`,
     );
-    expect(shown.error).toBe('Lesen fehlgeschlagen: Datenbank nicht lesbar');
+    expect(shown.error).toBe('Lesen fehlgeschlagen: Datenbank <b>nicht</b> lesbar');
+    expect(await page.locator('#aiCostsError b').count()).toBe(0);
     expect(shown.text.includes('Airtable')).toBe(false);
     expect(shown.text.includes('Tabelle jetzt anlegen')).toBe(false);
+    await h.assertClean(page);
+  });
+
+  it('skips a log row whose date cannot be read instead of breaking the chart', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'admin');
+    const days = await h.run<string[]>(
+      page,
+      `return _aiCostsAggregateByDay([
+         { created_at: 'kein Datum', cost_usd: 1 },
+         { created_at: '2026-09-01T10:00:00.000Z', cost_usd: 2 },
+       ]).map((d) => d.key);`,
+    );
+    expect(days).toEqual(['2026-09-01']);
     await h.assertClean(page);
   });
 });

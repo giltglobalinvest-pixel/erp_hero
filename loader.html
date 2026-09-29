@@ -22,7 +22,7 @@ try {
     if (k.indexOf('app_cache_') === 0) localStorage.removeItem(k);
   });
 } catch (e) {}
-location.replace('https://erp-hero-production.up.railway.app/');
+location.replace('https://erp-hero-production.up.railway.app/' + location.hash);
 </script>
 </body>
 </html>

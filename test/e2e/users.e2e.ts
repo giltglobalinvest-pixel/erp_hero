@@ -56,6 +56,11 @@ const openForm = async (page: Page, id?: string): Promise<void> => {
 // The form is a long modal: the harness stubs Tailwind, so its controls lie outside the viewport and a real click fails.
 // Every click inside the form therefore goes through dispatchEvent.
 const save = (page: Page): Promise<void> => page.dispatchEvent('#modalBox button[type="submit"]', 'click');
+// The autocomplete attribute of every Freshdesk key field in the open form.
+const keyAutocomplete = (page: Page): Promise<(string | null)[]> =>
+  page.$$eval('#modalBox input[name^="fd_key__"], #modalBox input[name="freshdesk_api_key"]', (els) =>
+    els.map((e) => e.getAttribute('autocomplete')),
+  );
 // A successful save closes the form before it shows its toast.
 const saved = async (page: Page): Promise<void> => {
   await save(page);
@@ -193,7 +198,12 @@ describe('user admin', () => {
     await openForm(page, id);
     expect((await page.content()).includes('fd-key-fred-alpha')).toBe(false);
     expect(await page.locator('#modalBox [data-fd-default]').count()).toBe(0);
+    // A password manager must not fill the saved login key into a Freshdesk key field.
+    expect(await keyAutocomplete(page)).toEqual(['new-password', 'new-password', 'new-password']);
     await page.dispatchEvent(`#modalBox [data-fd-company="${alpha}"] button`, 'click');
+    // The marked field is read-only: typing there does not turn the removal into a key.
+    await page.focus(`#modalBox [name="fd_key__${alpha}"]`);
+    await page.keyboard.type('abc');
     await page.fill('#modalBox [name="freshdesk_api_key"]', 'fd-default-fred');
     await saved(page);
     expect(secretCalls.map((c) => c.body)).toEqual([
@@ -206,6 +216,7 @@ describe('user admin', () => {
     await page.locator(`[data-user-row="${id}"]`).waitFor();
     await openForm(page, id);
     expect((await page.content()).includes('fd-default-fred')).toBe(false);
+    expect(await keyAutocomplete(page)).toEqual(['new-password', 'new-password', 'new-password']);
     await page.dispatchEvent('#modalBox [data-fd-default] button', 'click');
     await saved(page);
     expect(secretCalls.map((c) => c.body)[1]).toEqual({ freshdesk_api_key: null });

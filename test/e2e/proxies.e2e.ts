@@ -104,7 +104,8 @@ describe('upstream proxies', () => {
   });
 
   it('keeps the old error format "Proxy <status>: …" and resolves a 204', async () => {
-    // Freshdesk's answer to a duplicate company name. _tcmCreateFdCompany reads the id out of the message.
+    // Freshdesk's answer to a duplicate company name. _tcmCreateCompanyFromCtx and _tcmCreateFdCompany read the id
+    // out of the message.
     // The body is shorter than 200 characters, so the message carries all of it.
     const duplicate = {
       description: 'Validation failed',
@@ -129,7 +130,7 @@ describe('upstream proxies', () => {
   });
 
   it('an HTML error page from upstream becomes "Proxy <status>" without the page', async () => {
-    // toast() renders HTML, and the server passes upstream bodies through unchanged: a 502 page must not reach the message.
+    // The server passes upstream bodies through unchanged: the markup of a 502 page must not reach the message.
     h.fake.on(
       'GET',
       FD + 'tickets/502',

@@ -110,4 +110,51 @@ describe('record locks', () => {
     expect(await lockHolder(id)).toBe(h.users.admin.id);
     await h.assertClean(page);
   });
+
+  it('names a lock holder whose name has an ampersand exactly as written', async () => {
+    const mueller = await h.deps.db.write((tx) => h.deps.records.insert(tx, 'User', { name: 'Müller & Söhne', status: 'aktiv' }));
+    const until = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const lockFor = (id: string) =>
+      h.deps.db.write((tx) => h.deps.records.update(tx, 'Customer', id, { lock_user_id: mueller.id, lock_until: until }, []));
+    const held = await newCustomer('Ampersand KG');
+    await lockFor(held);
+    const page = await openAsVera(held);
+    expect((await toasts(page)).includes('Wird gerade von Müller & Söhne bearbeitet — bitte später nochmal')).toBe(true);
+    const taken = await newCustomer('Übernahme GmbH');
+    await h.run(page, `await openCustomerModal(${JSON.stringify(taken)});`);
+    await lockFor(taken);
+    await h.run(page, `await _lockHeartbeatTick('Customer', ${JSON.stringify(taken)});`);
+    const text = await toasts(page);
+    expect(text.includes('Sperre verloren – der Datensatz wird jetzt von Müller & Söhne bearbeitet')).toBe(true);
+    expect(text.includes('&amp;')).toBe(false);
+    await h.assertClean(page);
+  });
+
+  it('a late heartbeat for a record that was closed leaves the open record alone', async () => {
+    const first = await newCustomer('Erste GmbH');
+    const second = await newCustomer('Zweite GmbH');
+    const page = await openAsVera(first);
+    await h.run(page, 'closeModal();');
+    await eventually(async () => (await lockHolder(first)) === undefined);
+    await h.run(page, `await openCustomerModal(${JSON.stringify(second)});`);
+    // The admin opens the first record, and a tick for it that was already under way arrives now.
+    await h.apiAs('admin', 'POST', `/api/locks/Customer/${first}`);
+    await h.run(page, `await _lockHeartbeatTick('Customer', ${JSON.stringify(first)});`);
+    expect(await h.run(page, 'return { lock: _currentLock, timer: _lockRefreshTimer !== null };')).toEqual({
+      lock: { table: 'Customer', recordId: second },
+      timer: true,
+    });
+    expect((await toasts(page)).includes('Sperre verloren')).toBe(false);
+    expect(await lockHolder(second)).toBe(h.users.vera.id);
+    await h.assertClean(page);
+  });
+
+  it('pagehide releases the lock too (iOS Safari fires no beforeunload)', async () => {
+    const id = await newCustomer('Pagehide GmbH');
+    const page = await openAsVera(id);
+    expect(await lockHolder(id)).toBe(h.users.vera.id);
+    await h.run(page, `window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));`);
+    await eventually(async () => (await lockHolder(id)) === undefined);
+    await h.assertClean(page);
+  });
 });

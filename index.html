@@ -6,7 +6,7 @@
 <script>
   if (/(^|\.)github\.io$/i.test(location.hostname)) {
     window.stop();
-    location.replace('https://erp-hero-production.up.railway.app/');
+    location.replace('https://erp-hero-production.up.railway.app/' + location.hash);
   }
 </script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
@@ -678,7 +678,7 @@
 <!-- ========================================================== -->
 <div id="toastWrap" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] space-y-2 w-[min(92vw,420px)] pointer-events-none pb-safe" style="bottom: calc(1rem + env(safe-area-inset-bottom));"></div>
 
-<!-- App-eigenes Update-Banner entfernt — der Loader kümmert sich um Update-Hinweise -->
+<!-- Kein eigenes Update-Banner (leerer Platzhalter): jeder Start lädt die aktuelle Version vom Server (Service Worker: Network-first), forceAppUpdate() leert zusätzlich alle Caches. -->
 <div id="updateBanner" class="hidden">
   <span id="updateVersion" class="hidden"></span>
 </div>
@@ -968,6 +968,7 @@ async function loginWithUserKey(userKey, longLived = false) {
     body: { user_key: userKey, long_lived: !!longLived },
     reauth: false
   });
+  if (!data || !data.user) throw new Error('Ungültige Antwort vom Server');
   _applyServerUser(data.user);
   await _afterLogin();
   return APP_KEYS.user;
@@ -982,6 +983,7 @@ async function tryAutoLogin() {
   } catch (_) {
     return false;
   }
+  if (!data || !data.user) return false;
   _applyServerUser(data.user);
   await _afterLogin();
   return true;
@@ -1199,9 +1201,9 @@ function _isCurrentLock(table, recordId) {
 async function acquireLock(table, recordId, currentRecord) {
   const res = await _api('POST', _lockPath(table, recordId));
   if (!res || !res.ok) {
-    // Alle Aufrufer zeigen lockedBy per toast() an, also als HTML: deshalb escaped.
+    // Die Aufrufer zeigen lockedBy per toast() an; toast() setzt Text, kein HTML.
     const who = (res && res.locked_by && res.locked_by.name) || 'einem anderen Benutzer';
-    return { ok: false, lockedBy: escapeHtml(who) };
+    return { ok: false, lockedBy: who };
   }
   startLockHeartbeat(table, recordId);
   return { ok: true };
@@ -1224,10 +1226,12 @@ async function _lockHeartbeatTick(table, recordId) {
     return;
   }
   if (!res || res.ok !== false) return;
+  // Ein später Takt für einen Datensatz, der nicht mehr offen ist, ändert nichts.
+  if (!_isCurrentLock(table, recordId)) return;
   stopLockHeartbeat();
-  if (_isCurrentLock(table, recordId)) _currentLock = null;
+  _currentLock = null;
   const who = (res.locked_by && res.locked_by.name) || 'einem anderen Benutzer';
-  toast('Sperre verloren – der Datensatz wird jetzt von ' + escapeHtml(who) + ' bearbeitet', 'warn', 8000);
+  toast('Sperre verloren – der Datensatz wird jetzt von ' + who + ' bearbeitet', 'warn', 8000);
 }
 
 function startLockHeartbeat(table, recordId) {
@@ -1243,10 +1247,13 @@ function stopLockHeartbeat() {
 
 // Sperre auch beim Schließen des Tabs freigeben (Best-Effort). sendBeacon schickt das
 // Session-Cookie mit und überlebt das Schließen; der Server ignoriert den leeren Body.
-window.addEventListener('beforeunload', () => {
+// pagehide zusätzlich, weil iOS Safari beforeunload nicht auslöst; eine zweite Freigabe schadet nicht.
+function _releaseLockOnUnload() {
   if (!_currentLock || !navigator.sendBeacon) return;
   try { navigator.sendBeacon(API_BASE + _lockPath(_currentLock.table, _currentLock.recordId) + '/release'); } catch (e) {}
-});
+}
+window.addEventListener('beforeunload', _releaseLockOnUnload);
+window.addEventListener('pagehide', _releaseLockOnUnload);
 
 async function logout() {
   // Offene Sperre freigeben, Sitzung serverseitig beenden (best effort), dann neu laden.
@@ -1358,32 +1365,58 @@ function _showReauthOverlay() {
     el.id = 'reauthOverlay';
     el.setAttribute('role', 'dialog');
     el.setAttribute('aria-modal', 'true');
+    el.setAttribute('aria-labelledby', 'reauthTitle');
     // Über den Lade-Overlays (z-index 99999) und beiden Modal-Ebenen.
     el.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,0.55);display:flex;align-items:center;justify-content:center;padding:16px;';
     el.innerHTML = `
       <form id="reauthForm" autocomplete="off" style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:380px;box-shadow:0 20px 50px rgba(15,23,42,0.35);">
-        <p style="font-weight:600;font-size:16px;margin:0 0 6px;">Sitzung abgelaufen – bitte Login-Key erneut eingeben</p>
+        <p id="reauthTitle" style="font-weight:600;font-size:16px;margin:0 0 6px;">Sitzung abgelaufen – bitte Login-Key erneut eingeben</p>
         <p style="font-size:13px;color:#64748b;margin:0 0 16px;">Deine Eingaben bleiben erhalten. Nach dem Anmelden geht es an derselben Stelle weiter.</p>
-        <input id="reauthKey" type="password" autocomplete="current-password" placeholder="Login-Key" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;">
+        <input id="reauthKey" type="password" autocomplete="current-password" placeholder="Login-Key" aria-label="Login-Key" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;">
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;color:#334155;">
           <input id="reauthRemember" type="checkbox"> Angemeldet bleiben
         </label>
-        <p id="reauthError" class="hidden" style="color:#b91c1c;font-size:13px;margin:12px 0 0;"></p>
+        <p id="reauthError" role="alert" class="hidden" style="color:#b91c1c;font-size:13px;margin:12px 0 0;"></p>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
           <button id="reauthCancel" type="button" style="padding:8px 14px;border-radius:10px;border:1px solid #cbd5e1;background:#fff;font-size:14px;">Abbrechen</button>
           <button id="reauthSubmit" type="submit" style="padding:8px 14px;border-radius:10px;border:0;background:#0f172a;color:#fff;font-size:14px;">Anmelden</button>
         </div>
       </form>`;
+    // Solange das Overlay offen ist, ist alles dahinter inert: kein Fokus, keine Klicks.
+    const previousFocus = document.activeElement;
+    const inerted = [...document.body.children].filter((c) => !c.inert);
+    inerted.forEach((c) => { c.inert = true; });
     document.body.appendChild(el);
     const keyEl = el.querySelector('#reauthKey');
     const rememberEl = el.querySelector('#reauthRemember');
     const errEl = el.querySelector('#reauthError');
     const submitEl = el.querySelector('#reauthSubmit');
+    const cancelEl = el.querySelector('#reauthCancel');
+    // Tasten erreichen nichts hinter dem Overlay (z.B. Escape und Pfeiltasten in der Galerie):
+    // Tab bleibt im Overlay, Escape bricht ab.
+    const onKey = (ev) => {
+      ev.stopPropagation();
+      if (ev.key === 'Escape') { ev.preventDefault(); cancelEl.click(); return; }
+      if (ev.key !== 'Tab') return;
+      ev.preventDefault();
+      const order = [keyEl, rememberEl, cancelEl, submitEl].filter((f) => !f.disabled);
+      const i = order.indexOf(document.activeElement);
+      const next = ev.shiftKey ? (i <= 0 ? order.length - 1 : i - 1) : (i + 1) % order.length;
+      order[next].focus();
+    };
+    window.addEventListener('keydown', onKey, true);
+    // Jeder Weg aus dem Overlay: Tasten und Seite freigeben, Fokus zurück an seinen alten Platz.
+    const close = () => {
+      window.removeEventListener('keydown', onKey, true);
+      inerted.forEach((c) => { c.inert = false; });
+      el.remove();
+      if (previousFocus && previousFocus.isConnected && previousFocus.focus) previousFocus.focus();
+    };
     // Wie beim letzten Login: „Angemeldet bleiben" aus dem Login-Formular übernehmen.
     rememberEl.checked = !!document.getElementById('loginRememberMe')?.checked;
     const showError = (msg) => { errEl.textContent = msg; errEl.classList.remove('hidden'); };
-    el.querySelector('#reauthCancel').addEventListener('click', () => {
-      el.remove();
+    cancelEl.addEventListener('click', () => {
+      close();
       reject(new Error('Sitzung abgelaufen'));
     });
     el.querySelector('#reauthForm').addEventListener('submit', async (ev) => {
@@ -1396,11 +1429,12 @@ function _showReauthOverlay() {
           body: { user_key: key, long_lived: rememberEl.checked },
           reauth: false
         });
+        if (!data || !data.user) throw new Error('Ungültige Antwort vom Server');
         keyEl.value = '';
         if (!APP_KEYS.user || data.user.id !== APP_KEYS.user._id) { location.reload(); return; }
         _applyServerUser(data.user);
         _loginGeneration++;
-        el.remove();
+        close();
         resolve();
       } catch (e) {
         showError(e.message);
@@ -1540,7 +1574,7 @@ async function uploadFileToRecord(table, recordId, attachmentField, file) {
   const base64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
-    reader.onerror = reject;
+    reader.onerror = () => reject(new Error('Datei konnte nicht gelesen werden'));
     reader.readAsDataURL(file);
   });
   return _api('POST', _dataPath(table, recordId) + '/files/' + encodeURIComponent(attachmentField), {
@@ -1591,8 +1625,15 @@ async function _recoverNumberConflict(table, fields, opts, e) {
   const retry = /^Q-\d+\.\d+$/.test(value) ? { variantOf: value } : { assignNumber: true };
   const created = await _api('POST', _dataPath(table), { body: _writeBody(fields, retry) });
   const stored = created && created.fields ? String(created.fields[field] || '') : '';
-  toast('Nummer ' + escapeHtml(value) + ' war inzwischen vergeben – gespeichert als ' + escapeHtml(stored), 'warn', 8000);
+  toast('Nummer ' + value + ' war inzwischen vergeben – gespeichert als ' + stored, 'warn', 8000);
   return created;
+}
+
+// Nach einer neu vergebenen Nummer (siehe _recoverNumberConflict) zeigt das offene Formular die gespeicherte.
+function _syncNumberInput(form, table, created) {
+  const field = NUMBER_FIELDS[table];
+  const el = form && form.querySelector(`input[name="${field}"]`);
+  if (el && created && created.fields && created.fields[field]) el.value = created.fields[field];
 }
 
 /* ============================================================
@@ -2896,7 +2937,7 @@ async function _memSend(ticketId, toEmail, fsContactId, btnEl) {
     if (/email_config_id/i.test(m)) {
       msg = 'Freshdesk akzeptiert nicht den Default-Absender. Bitte in Freshdesk → Admin → Email Settings prüfen ob ein Default-Email-Config aktiv ist.';
     }
-    toast(escapeHtml(msg), 'error', 10000);
+    toast(msg, 'error', 10000);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
 }
@@ -10200,7 +10241,7 @@ async function _tcmCreateFdCompany(btnEl) {
       //  b) "company id:36001035511"          (Klartext-Stil)
       //  c) "company id 36001035511"          (mit Leerzeichen)
       const m = String(e?.message || '');
-      const idMatch = m.match(/company[\s_]?id\s*[:=]?\s*(\d+)/i);
+      const idMatch = m.match(/company[\s_]?id"?\s*[:=]?\s*(\d+)/i);
       if (/409|duplicate/i.test(m) && idMatch) {
         createdId = Number(idMatch[1]);
         wasDuplicate = true;
@@ -12062,12 +12103,12 @@ function _proxyBase() {
 }
 
 // Fehlertext im Format des alten Proxys — Aufrufer werten ihn aus
-// (z.B. sucht _tcmCreateFdCompany /409/ und "company_id" in einem Freshdesk-409):
+// (z.B. suchen _tcmCreateCompanyFromCtx und _tcmCreateFdCompany /409/ und "company_id" in einem Freshdesk-409):
 // 'Proxy <Status>: ' + error.message bzw. error aus JSON, sonst die ersten 200 Zeichen der Antwort; eine HTML-Seite ergibt nur 'Proxy <Status>'.
 function _proxyErrorMessage(e) {
   if (!e.status) return e.message;
   let msg = 'Proxy ' + e.status;
-  // Eine HTML-Fehlerseite (z.B. 502 vom Edge) gehört nicht in den Toast: toast() rendert HTML.
+  // Eine HTML-Fehlerseite (z.B. 502 vom Edge) gehört nicht in den Toast: dort stünde sonst ihr Quelltext.
   if (e.text && !e.text.trim().startsWith('<')) {
     const j = e.body;
     if (j && typeof j === 'object' && j.error) msg += ': ' + (j.error.message || j.error);
@@ -12270,7 +12311,9 @@ function toast(msg, type = 'info', timeout = 3200) {
   const icons = { info: 'info', success: 'check-circle-2', error: 'alert-circle', warn: 'triangle-alert' };
   const el = document.createElement('div');
   el.className = `pointer-events-auto ${colors[type] || colors.info} rounded-xl shadow-lg px-4 py-3 text-sm flex items-center gap-3 slide-up`;
-  el.innerHTML = `<i data-lucide="${icons[type] || 'info'}" class="w-4 h-4 shrink-0"></i><span class="flex-1">${msg}</span>`;
+  // Die Nachricht ist immer Text, nie HTML (Namen und Serverfehler kommen ungeprüft hier an).
+  el.innerHTML = `<i data-lucide="${icons[type] || 'info'}" class="w-4 h-4 shrink-0"></i><span class="flex-1"></span>`;
+  el.querySelector('span').textContent = String(msg ?? '');
   wrap.appendChild(el);
   if (window.lucide) lucide.createIcons();
   setTimeout(() => {
@@ -14285,7 +14328,7 @@ async function renderAdminUsers() {
   let all = [];
   try {
     all = await readData('User', null, { sort: [{ field: 'name', direction: 'asc' }] });
-  } catch (e) { toast(escapeHtml(e.message), 'error'); }
+  } catch (e) { toast(e.message, 'error'); }
   const html = `
     <div class="max-w-3xl mx-auto">
       <div class="flex items-center justify-between mb-4">
@@ -14351,6 +14394,15 @@ function generateApiKey() {
   return s;
 }
 
+// „Diesen Key entfernen“: Feld auf __CLEAR__ setzen und sperren, damit Tippen die Markierung nicht verändert.
+function _markFdKeyForRemoval(btn) {
+  const input = btn.closest('div').querySelector('input');
+  input.value = '__CLEAR__';
+  input.readOnly = true;
+  btn.textContent = '✓ wird beim Speichern gelöscht';
+  btn.disabled = true;
+}
+
 async function openUserModal(id) {
   let f = {};
   if (id) {
@@ -14409,8 +14461,8 @@ async function openUserModal(id) {
             <div class="mb-2" data-fd-company="${c.id}">
               <label class="block text-[11px] font-medium text-ink-700 mb-0.5">${escapeHtml(c.fields.name || '–')}</label>
               ${existing ? '<p class="text-[10px] text-emerald-700 mb-1">Key gespeichert</p>' : ''}
-              <input type="password" name="fd_key__${c.id}" value="" placeholder="${existing ? 'leer = beibehalten · neuer Wert überschreibt' : 'leer = Default-Key verwenden'}" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
-              ${existing ? `<button type="button" onclick="this.closest('div').querySelector('input').value='__CLEAR__'; this.textContent='✓ wird beim Speichern gelöscht'; this.disabled=true;" class="text-[10px] text-red-600 hover:text-red-700 mt-0.5 underline">Diesen Key entfernen</button>` : ''}
+              <input type="password" name="fd_key__${c.id}" value="" autocomplete="new-password" placeholder="${existing ? 'leer = beibehalten · neuer Wert überschreibt' : 'leer = Default-Key verwenden'}" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+              ${existing ? `<button type="button" onclick="_markFdKeyForRemoval(this)" class="text-[10px] text-red-600 hover:text-red-700 mt-0.5 underline">Diesen Key entfernen</button>` : ''}
             </div>`;
         }).join('')}
 
@@ -14420,11 +14472,11 @@ async function openUserModal(id) {
           ${id && f.has_freshdesk_key ? `
             <div data-fd-default>
               <p class="text-[10px] text-emerald-700 mb-1">Key gespeichert</p>
-              <input type="password" name="freshdesk_api_key" value="" placeholder="leer = beibehalten · neuer Wert überschreibt" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
-              <button type="button" onclick="this.closest('div').querySelector('input').value='__CLEAR__'; this.textContent='✓ wird beim Speichern gelöscht'; this.disabled=true;" class="text-[10px] text-red-600 hover:text-red-700 mt-0.5 underline">Diesen Key entfernen</button>
+              <input type="password" name="freshdesk_api_key" value="" autocomplete="new-password" placeholder="leer = beibehalten · neuer Wert überschreibt" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+              <button type="button" onclick="_markFdKeyForRemoval(this)" class="text-[10px] text-red-600 hover:text-red-700 mt-0.5 underline">Diesen Key entfernen</button>
             </div>
           ` : `
-            <input type="password" name="freshdesk_api_key" value="" placeholder="optional — z.B. aBcDeFgHiJ123456" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
+            <input type="password" name="freshdesk_api_key" value="" autocomplete="new-password" placeholder="optional — z.B. aBcDeFgHiJ123456" class="w-full px-3 py-1.5 border border-ink-200 rounded-lg font-mono text-xs bg-white">
           `}
         </div>
       </div>
@@ -14495,7 +14547,7 @@ async function saveUser(e, id) {
   try {
     if (id) await updateData('User', id, fields);
     else    userId = (await writeData('User', fields)).id;
-  } catch (err) { return toast(escapeHtml(err.message), 'error'); }
+  } catch (err) { return toast(err.message, 'error'); }
 
   if (Object.keys(secrets).length > 0) {
     try {
@@ -14503,9 +14555,9 @@ async function saveUser(e, id) {
     } catch (err) {
       if (!id) {
         await deleteData('User', userId).catch(() => {});
-        return toast('Benutzer nicht angelegt: ' + escapeHtml(err.message), 'error', 8000);
+        return toast('Benutzer nicht angelegt: ' + err.message, 'error', 8000);
       }
-      return toast('Benutzer gespeichert, Keys aber nicht: ' + escapeHtml(err.message), 'error', 8000);
+      return toast('Benutzer gespeichert, Keys aber nicht: ' + err.message, 'error', 8000);
     }
   }
   closeModal();
@@ -14518,7 +14570,7 @@ async function toggleUserStatus(id, currentlyInactive) {
     await updateData('User', id, { status: currentlyInactive ? 'aktiv' : 'inaktiv' });
     renderAdminUsers();
     toast(currentlyInactive ? 'Aktiviert' : 'Deaktiviert', 'success');
-  } catch (err) { toast(escapeHtml(err.message), 'error'); }
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 // Alle Sitzungen eines Benutzers auf dem Server beenden.
@@ -14531,7 +14583,7 @@ async function revokeAllSessions(userId, userName) {
     const data = await _api('POST', '/sessions/revoke-user', { body: { user_id: userId } });
     toast(data.revoked + ' Sitzung(en) abgemeldet', 'success');
   } catch (e) {
-    toast(escapeHtml(e.message), 'error', 6000);
+    toast(e.message, 'error', 6000);
   }
 }
 
@@ -15332,7 +15384,7 @@ function _aiCostsAggregateByDay(rows) {
   const map = new Map();
   for (const r of rows) {
     const d = r.created_at ? new Date(r.created_at) : null;
-    if (!d) continue;
+    if (!d || Number.isNaN(d.getTime())) continue;
     const key = d.toISOString().slice(0, 10);
     if (!map.has(key)) map.set(key, { key, count: 0, cost: 0 });
     const e = map.get(key);
@@ -16142,7 +16194,7 @@ async function _saveSettingFromForm(key, val, savedText, removedText) {
     renderAdminSettings();
     return true;
   } catch (e) {
-    toast(escapeHtml(e.message), 'error', 7000);
+    toast(e.message, 'error', 7000);
     return false;
   }
 }
@@ -16294,7 +16346,7 @@ async function _mcSaveCompany(companyId, btnEl) {
     toast('Mailchimp-Config gespeichert', 'success', 2500);
     if (status) status.innerHTML = '<span class="text-emerald-700">✓ Gespeichert</span>';
   } catch (e) {
-    toast(escapeHtml(e.message), 'error', 7000);
+    toast(e.message, 'error', 7000);
     if (status) status.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message) + '</span>';
   } finally {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="save" class="w-3 h-3"></i> Speichern'; if (window.lucide) lucide.createIcons(); }
@@ -16319,7 +16371,7 @@ async function _mcTestConnection(companyId, btnEl) {
     toast('Mailchimp-Verbindung OK', 'success', 3000);
   } catch (e) {
     if (status) status.innerHTML = '<span class="text-red-700">✗ ' + escapeHtml(e.message || String(e)) + '</span>';
-    toast('Verbindung fehlgeschlagen: ' + escapeHtml(e.message || String(e)), 'error', 7000);
+    toast('Verbindung fehlgeschlagen: ' + (e.message || String(e)), 'error', 7000);
   } finally {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="zap" class="w-3 h-3"></i> Verbindung testen'; if (window.lucide) lucide.createIcons(); }
   }
@@ -16344,7 +16396,7 @@ function _mcSelectAudienceFromButton(btn) {
   // Audiences-Liste schließen + Hinweis zur Speicherung
   const wrap = document.querySelector('[data-mc-audiences="' + companyId + '"]');
   if (wrap) wrap.innerHTML = '<p class="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5">✓ <strong>' + escapeHtml(listName || listId) + '</strong> ausgewählt — bitte „Speichern" klicken</p>';
-  toast('Audience „' + escapeHtml(listName || listId) + '" übernommen — bitte Speichern klicken', 'info', 3500);
+  toast('Audience „' + (listName || listId) + '" übernommen — bitte Speichern klicken', 'info', 3500);
 }
 
 // Lädt alle Audiences (Lists) des Mandanten und zeigt sie zur Auswahl an
@@ -16427,7 +16479,7 @@ async function testFreshsalesConnection(btnEl) {
     } else if (/404/.test(m)) {
       msg = 'Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht. Prüfe deine Freshworks-CRM-URL.';
     }
-    toast(escapeHtml(msg), 'error', 10000);
+    toast(msg, 'error', 10000);
   } finally {
     if (btnEl) { btnEl.disabled = false; if (origHtml) btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
   }
@@ -17743,7 +17795,7 @@ async function syncCustomerToFreshdesk(customerId, btnEl, opts) {
     } else if (/404/.test(m)) {
       userMsg = 'Freshdesk 404 — bitte prüfe, ob die Railway-Variable FRESHDESK_DOMAIN stimmt. Volle Antwort: ' + m;
     }
-    if (!silent) toast(escapeHtml(userMsg), 'error', 12000);
+    if (!silent) toast(userMsg, 'error', 12000);
     else console.warn('[Lazy-Push FD] customer=' + customerId + ': ' + m);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
     return false;
@@ -17757,13 +17809,15 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
   if (!APP_KEYS.freshsalesSubdomain)  { if (!silent) toast('Freshsales nicht konfiguriert — Admin → Einstellungen → Step 6', 'error', 8000); return false; }
   const origHtml = btnEl?.innerHTML;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Sync…'; if (window.lucide) lucide.createIcons(); }
+  // Außerhalb des try, weil der catch-Block den Firmennamen daraus liest.
+  let fs;
   try {
     const all = await readData('Customer');
     const rec = all.find(r => r.id === customerId);
     if (!rec) throw new Error('Kunde nicht gefunden');
     const f = rec.fields || {};
     if (!(f.name1 || '').trim()) throw new Error('Name (Zeile 1) ist leer');
-    const fs = _buildFsAccountPayload(f);
+    fs = _buildFsAccountPayload(f);
     const existingFsId = (f.freshsales_account_id || '').trim();
     let result;
     if (existingFsId) {
@@ -17843,7 +17897,7 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
     } else if (/not unique|Name existiert|Company is not unique/i.test(m)) {
       userMsg = 'Firma „' + (fs?.name || '?') + '" existiert in Freshsales, konnte aber per Lookup nicht gefunden werden. Schau in die Browser-Konsole (F12) → suche nach „[FS Lookup] response shape" → schick mir die Ausgabe.';
     }
-    if (!silent) toast(escapeHtml(userMsg), 'error', 12000);
+    if (!silent) toast(userMsg, 'error', 12000);
     else console.warn('[Lazy-Push FS] customer=' + customerId + ': ' + m);
     if (btnEl && origHtml) { btnEl.disabled = false; btnEl.innerHTML = origHtml; if (window.lucide) lucide.createIcons(); }
     return false;
@@ -19723,8 +19777,9 @@ function _stopInquiriesAutoRefresh() {
 }
 function _onInquiriesVisibility() {
   // Beim Zurückkommen aus dem Hintergrund-Tab: einmal sofort neu laden,
-  // wenn das letzte Refresh schon länger her ist als das Intervall.
-  if (document.hidden) return;
+  // wenn das letzte Refresh schon länger her ist als das Intervall. Nicht, solange das
+  // Re-Login-Overlay offen ist (siehe _inquiriesAutoRefreshTick).
+  if (document.hidden || _reauthPromise) return;
   if (!document.getElementById('freshdeskTicketsWrap')) {
     // User ist nicht mehr auf der Anfragen-Seite — abräumen
     _stopInquiriesAutoRefresh();
@@ -19733,17 +19788,20 @@ function _onInquiriesVisibility() {
   const ageSec = (Date.now() - _inquiriesLastLoadedAt) / 1000;
   if (ageSec > _inquiriesRefreshIntervalSec) loadFreshdeskTicketsPreview();
 }
+// Ein Takt des Auto-Refresh. Nicht im Hintergrund-Tab und nicht, solange das Re-Login-Overlay
+// offen ist: sonst stauen sich dahinter Ladevorgänge, die nach dem Login alle auf einmal starten.
+function _inquiriesAutoRefreshTick() {
+  if (document.hidden || _reauthPromise) return;
+  if (!document.getElementById('freshdeskTicketsWrap')) {
+    _stopInquiriesAutoRefresh();
+    return;
+  }
+  loadFreshdeskTicketsPreview();
+}
 function _startInquiriesAutoRefresh() {
   _stopInquiriesAutoRefresh();
   // Hauptintervall: alle N Sekunden neu laden, aber nur wenn Tab sichtbar
-  _inquiriesRefreshTimer = setInterval(() => {
-    if (document.hidden) return;
-    if (!document.getElementById('freshdeskTicketsWrap')) {
-      _stopInquiriesAutoRefresh();
-      return;
-    }
-    loadFreshdeskTicketsPreview();
-  }, _inquiriesRefreshIntervalSec * 1000);
+  _inquiriesRefreshTimer = setInterval(_inquiriesAutoRefreshTick, _inquiriesRefreshIntervalSec * 1000);
   // Sekündlicher Ticker für die "vor X Sek."-Anzeige
   _inquiriesTickerTimer = setInterval(_renderInquiriesFreshness, 1000);
   document.addEventListener('visibilitychange', _onInquiriesVisibility);
@@ -25142,6 +25200,7 @@ async function _silentSaveQuoteHeader() {
   if (Object.keys(cv).length) fields.custom_values = JSON.stringify(cv);
   try {
     const created = await writeData('Quote', fields);
+    _syncNumberInput(form, 'Quote', created);
     return created.id;
   } catch (err) {
     toast(err.message, 'error');
@@ -28411,6 +28470,7 @@ async function _silentSaveOrderHeader() {
   _stripEmptyDateFields(fields, ['date','confirmation_date']);
   try {
     const created = await writeData('Order', fields);
+    _syncNumberInput(form, 'Order', created);
     return created.id;
   } catch (err) { toast(err.message, 'error'); return null; }
 }
@@ -29846,6 +29906,7 @@ async function _silentSavePurchaseHeader() {
   _stripEmptyDateFields(fields, ['date','expected_delivery']);
   try {
     const created = await writeData('SupplierOrder', fields);
+    _syncNumberInput(form, 'SupplierOrder', created);
     return created.id;
   } catch (err) { toast(err.message, 'error'); return null; }
 }
@@ -31054,6 +31115,7 @@ async function _silentSaveDeliveryHeader() {
   _stripEmptyDateFields(fields, ['date','delivery_date']);
   try {
     const created = await writeData('DeliveryNote', fields);
+    _syncNumberInput(form, 'DeliveryNote', created);
     return created.id;
   } catch (err) { toast(err.message, 'error'); return null; }
 }
@@ -32351,6 +32413,7 @@ async function _silentSaveInvoiceHeader() {
   _stripEmptyDateFields(fields, ['date','due_date','payment_date']);
   try {
     const created = await writeData('Invoice', fields);
+    _syncNumberInput(form, 'Invoice', created);
     return created.id;
   } catch (err) { toast(err.message, 'error'); return null; }
 }

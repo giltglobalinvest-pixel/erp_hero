@@ -27,20 +27,23 @@ const expireSessions = async (who: Who): Promise<void> => {
 // The 5 s limit lets a missing overlay fail fast.
 const overlayShown = (page: Page): Promise<void> =>
   page.locator('#reauthOverlay', { hasText: OVERLAY_TEXT }).waitFor({ timeout: 5_000 });
-const customerNamed = async (name: string): Promise<CustomerRecord | undefined> =>
-  (await h.apiAs<{ records: CustomerRecord[] }>('admin', 'GET', '/api/data/Customer')).records.find(
+const customersNamed = async (name: string): Promise<CustomerRecord[]> =>
+  (await h.apiAs<{ records: CustomerRecord[] }>('admin', 'GET', '/api/data/Customer')).records.filter(
     (r) => r.fields.name1 === name,
   );
-// Status codes of the page's responses whose URL matches, collected from now on.
+const customerNamed = async (name: string): Promise<CustomerRecord | undefined> => (await customersNamed(name))[0];
+// Status codes of the page's responses whose URL (and method) matches, collected from now on.
 // The harness logs in through the context's request API, which does not show up here.
-const statuses = (page: Page, match: (url: URL) => boolean): number[] => {
+const statuses = (page: Page, match: (url: URL, method: string) => boolean): number[] => {
   const seen: number[] = [];
   page.on('response', (r) => {
-    if (match(new URL(r.url()))) seen.push(r.status());
+    if (match(new URL(r.url()), r.request().method())) seen.push(r.status());
   });
   return seen;
 };
 const isLogin = (url: URL): boolean => url.pathname === '/api/auth';
+// A new customer being saved.
+const isCustomerCreate = (url: URL, method: string): boolean => method === 'POST' && url.pathname === '/api/data/Customer';
 // readData('Company', "{name}='<name>'") and nothing else.
 const isRead =
   (name: string) =>
@@ -62,6 +65,15 @@ const reLogin = async (page: Page, key: string): Promise<void> => {
   await page.fill('#reauthKey', key);
   await page.click('#reauthSubmit');
 };
+// Where the keyboard focus is: 'overlay' anywhere in the re-login overlay, else the focused element.
+const focusIn = (page: Page): Promise<string> =>
+  h.run<string>(
+    page,
+    `const a = document.activeElement;
+     if (!a || a === document.body) return 'none';
+     if (a.closest('#reauthOverlay')) return 'overlay';
+     return a.tagName + '#' + a.id + '[' + (a.getAttribute('name') || '') + ']';`,
+  );
 
 describe('re-login when the session expires', () => {
   it('keeps the open form, asks for the key again and then saves (scenario 12)', async () => {
@@ -201,6 +213,80 @@ describe('re-login when the session expires', () => {
     expect(await page.locator('#reauthOverlay').count()).toBe(0);
     await expect.poll(() => betaReads).toEqual([401, 200]);
     await expect.poll(() => logins).toEqual([200]);
+    await h.assertClean(page);
+  });
+
+  it('keeps the keyboard in the overlay and the page behind it inert, so the form is saved once', async () => {
+    const page = await h.newPage();
+    const posts = statuses(page, isCustomerCreate);
+    await fillNewCustomer(page, 'Tastatur GmbH');
+    await expireSessions('vera');
+    await save(page);
+    await overlayShown(page);
+    await expect.poll(() => h.run(page, 'return document.activeElement?.id;')).toBe('reauthKey');
+    // Tab and Shift+Tab go round inside the overlay; they never reach the form and its submit button.
+    for (const key of [...Array<string>(6).fill('Shift+Tab'), ...Array<string>(6).fill('Tab')]) {
+      await page.keyboard.press(key);
+      expect(await focusIn(page)).toBe('overlay');
+    }
+    expect(await h.run(page, "return document.getElementById('modalBackdrop').closest('[inert]') !== null;")).toBe(true);
+
+    await reLogin(page, h.users.vera.key);
+    await toast(page, 'Gespeichert');
+    await expect.poll(() => posts).toEqual([401, 200]);
+    expect((await customersNamed('Tastatur GmbH')).length).toBe(1);
+    expect(await h.run(page, "return document.querySelector('[inert]') === null;")).toBe(true);
+    await h.assertClean(page);
+  });
+
+  it('Escape cancels the overlay, no key reaches the page behind it, and the focus goes back', async () => {
+    const page = await h.newPage();
+    const posts = statuses(page, isCustomerCreate);
+    await fillNewCustomer(page, 'Escape GmbH');
+    // Stands in for the page's own key handlers, such as the arrow keys of the image gallery.
+    await h.run(page, "window.__keysBehind = 0; document.addEventListener('keydown', () => { window.__keysBehind++; });");
+    await expireSessions('vera');
+    await save(page);
+    await overlayShown(page);
+    await expect.poll(() => h.run(page, 'return document.activeElement?.id;')).toBe('reauthKey');
+    for (const key of ['ArrowRight', 'Tab', 'Escape']) await page.keyboard.press(key);
+    expect(await h.run(page, 'return window.__keysBehind;')).toBe(0);
+
+    await toast(page, 'Schreiben fehlgeschlagen: Sitzung abgelaufen');
+    expect(await page.locator('#reauthOverlay').count()).toBe(0);
+    expect(await page.locator('#modalBackdrop').isVisible()).toBe(true);
+    expect(await page.inputValue('#modalBox input[name="name1"]')).toBe('Escape GmbH');
+    // Back in the field Vera typed into last.
+    expect(await h.run(page, "return document.activeElement?.getAttribute('name');")).toBe('city');
+    await page.keyboard.press('ArrowRight');
+    expect(await h.run(page, 'return window.__keysBehind;')).toBe(1);
+    expect(posts).toEqual([401]);
+    expect(await customerNamed('Escape GmbH')).toBeUndefined();
+    await h.assertClean(page);
+  });
+
+  it('the Inquiries auto-refresh pauses while the overlay is open and resumes after the login', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    // The Anfragen page, reduced to what the refresh looks for; a load only counts.
+    await h.run(
+      page,
+      `document.body.insertAdjacentHTML('beforeend', '<div id="freshdeskTicketsWrap"></div>');
+       window.__loads = 0;
+       window.loadFreshdeskTicketsPreview = () => { window.__loads++; };`,
+    );
+    // One tick of the 60 s interval, then the tab coming back after a long time in the background.
+    const refresh = '_inquiriesAutoRefreshTick(); _inquiriesLastLoadedAt = 0; _onInquiriesVisibility(); return window.__loads;';
+    expect(await h.run(page, refresh)).toBe(2);
+
+    await expireSessions('vera');
+    await h.run(page, "readData('Company').catch(() => {});");
+    await overlayShown(page);
+    expect(await h.run(page, refresh)).toBe(2);
+
+    await reLogin(page, h.users.vera.key);
+    await page.locator('#reauthOverlay').waitFor({ state: 'detached' });
+    expect(await h.run(page, refresh)).toBe(4);
     await h.assertClean(page);
   });
 });

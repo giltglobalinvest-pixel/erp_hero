@@ -131,6 +131,21 @@ describe('login and session', () => {
     expect(await page.locator('#appShell').isVisible()).toBe(false);
     await h.assertClean(page);
   });
+
+  it('a 2xx answer without a user is an error, not a crash', async () => {
+    const page = await h.newPage();
+    // Something between browser and server (a captive portal, a proxy) answers instead of the server.
+    await page.route('**/api/me', (route) => route.fulfill({ status: 200, contentType: 'text/plain', body: 'ok' }));
+    await h.openApp(page);
+    expect(await page.locator('#loginScreen').isVisible()).toBe(true);
+    await page.route('**/api/auth', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+    await page.fill('#loginKey', h.users.vera.key);
+    await page.click('#loginBtn');
+    await page.waitForSelector('#loginError:not(.hidden)', { state: 'visible' });
+    expect(await page.locator('#loginError').textContent()).toBe('Ungültige Antwort vom Server');
+    expect(await page.locator('#appShell').isVisible()).toBe(false);
+    await h.assertClean(page);
+  });
 });
 
 describe('server settings', () => {

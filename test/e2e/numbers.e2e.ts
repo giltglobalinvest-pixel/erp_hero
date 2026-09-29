@@ -147,4 +147,33 @@ describe('document numbers', () => {
     expect((await h.runError(page, 'await nextCustomerNo(null);')).message).toBe('Kein Mandant ausgewählt');
     await h.assertClean(page);
   });
+
+  it('a quote saved in the background shows the number it was stored under, and saving keeps it', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    // Toasts disappear after a few seconds, so every toast text is recorded as it appears.
+    await h.run(
+      page,
+      `await openQuoteModal();
+       window.__toastTexts = [];
+       new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => window.__toastTexts.push(n.textContent))))
+         .observe(document.getElementById('toastWrap'), { childList: true });`,
+    );
+    const proposed = await page.inputValue('#modalBox input[name="quote_no"]');
+    // A colleague saves a quote under the proposed number while the form is open.
+    await create('Quote', { quote_no: proposed, status: 'Entwurf', company_id: [h.companies.alpha] });
+    // "Position hinzufügen" on a new quote saves its header in the background first.
+    const id = await h.run<string>(page, `await showQuoteItemInlineForm(''); return window._currentQuoteIdInModal;`);
+    const stored = String((await h.deps.records.get('Quote', id))?.fields.quote_no);
+    expect(stored).not.toBe(proposed);
+    expect(await page.inputValue('#modalBox input[name="quote_no"]')).toBe(stored);
+    const shown = await h.run<string[]>(page, 'return window.__toastTexts;');
+    expect(shown).toContain(`Nummer ${proposed} war inzwischen vergeben – gespeichert als ${stored}`);
+    expect(shown).toContain(`Angebot ${stored} angelegt`);
+    // "Speichern & schließen" saves the header again, now under the stored number.
+    await page.dispatchEvent('#modalBox form[data-quote-form] button[type="submit"]', 'click');
+    await page.locator('#toastWrap', { hasText: 'Gespeichert' }).waitFor();
+    expect((await h.deps.records.get('Quote', id))?.fields.quote_no).toBe(stored);
+    await h.assertClean(page);
+  });
 });

@@ -20,4 +20,13 @@ describe('boot', () => {
     expect((await page.locator('#loginHint').textContent())?.trim()).toBe('Den Key bekommst du vom Admin.');
     await h.assertClean(page);
   });
+
+  it('shows a toast message as text, never as HTML', async () => {
+    const page = await h.newPage();
+    await h.openApp(page);
+    await h.run(page, `toast('<b>fett</b> & Co');`);
+    expect(await page.locator('#toastWrap span.flex-1').last().textContent()).toBe('<b>fett</b> & Co');
+    expect(await page.locator('#toastWrap b').count()).toBe(0);
+    await h.assertClean(page);
+  });
 });
