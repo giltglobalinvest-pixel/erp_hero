@@ -168,6 +168,27 @@ describe('re-login when the session expires', () => {
     await h.assertClean(page);
   });
 
+  it("promises to keep the input only for the user's own key, and says that another key reloads the app", async () => {
+    const page = await h.newPage();
+    await fillNewCustomer(page, 'Fremder Key GmbH');
+    await expireSessions('vera');
+    await save(page);
+    await overlayShown(page);
+    expect(await page.locator('#reauthTitle + p').textContent()).toBe(
+      'Deine Eingaben bleiben erhalten, wenn du dich mit deinem eigenen Key anmeldest. Mit dem Key einer anderen Person lädt die App neu.',
+    );
+
+    // A colleague at the same PC types her own key: as the text says, the app reloads, and the form is gone unsaved.
+    const reloaded = page.waitForEvent('load');
+    await reLogin(page, h.users.admin.key);
+    await reloaded;
+    await page.waitForSelector('#appShell:not(.hidden)', { state: 'visible' });
+    expect(await page.locator('#sidebarUserName').textContent()).toBe('Ada Admin');
+    expect(await page.locator('#modalBackdrop').isVisible()).toBe(false);
+    expect(await customersNamed('Fremder Key GmbH')).toEqual([]);
+    await h.assertClean(page);
+  });
+
   it('a request whose 401 arrives after the re-login is repeated without a second overlay', async () => {
     const page = await h.newPage();
     const betaReads = statuses(page, isRead('Beta AG'));

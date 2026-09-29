@@ -1433,7 +1433,7 @@ function _showReauthOverlay() {
     el.innerHTML = `
       <form id="reauthForm" autocomplete="off" style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:380px;box-shadow:0 20px 50px rgba(15,23,42,0.35);">
         <p id="reauthTitle" style="font-weight:600;font-size:16px;margin:0 0 6px;">Sitzung abgelaufen – bitte Login-Key erneut eingeben</p>
-        <p style="font-size:13px;color:#64748b;margin:0 0 16px;">Deine Eingaben bleiben erhalten. Nach dem Anmelden geht es an derselben Stelle weiter.</p>
+        <p style="font-size:13px;color:#64748b;margin:0 0 16px;">Deine Eingaben bleiben erhalten, wenn du dich mit deinem eigenen Key anmeldest. Mit dem Key einer anderen Person lädt die App neu.</p>
         <input id="reauthKey" type="password" autocomplete="current-password" placeholder="Login-Key" aria-label="Login-Key" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;">
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;color:#334155;">
           <input id="reauthRemember" type="checkbox"> Angemeldet bleiben
