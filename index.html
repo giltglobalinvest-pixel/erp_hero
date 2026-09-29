@@ -1209,6 +1209,22 @@ async function acquireLock(table, recordId, currentRecord) {
   return { ok: true };
 }
 
+// Die Formulare lesen ihre Tabelle vor der Sperre. Speichert ein Kollege dazwischen und gibt frei, bekommt man
+// die Sperre trotzdem, hätte aber den alten Stand im Formular. Darum nach erteilter Sperre frisch lesen.
+const LOCK_REREAD_FAILED_TEXT = 'Aktuelle Daten konnten nicht geladen werden – bitte Formular schließen und neu öffnen, bevor du speicherst.';
+
+async function _readLockedRecord(table, recordId) {
+  const fresh = await _api('GET', _dataPath(table, recordId));
+  if (!fresh || !fresh.fields) throw new Error('Ungültige Antwort vom Server');
+  return fresh;
+}
+
+// Schlägt das Lesen fehl, bleibt der alte Stand mit einer Warnung, damit das Formular trotzdem aufgeht.
+async function _freshFieldsAfterLock(table, recordId, snapshotFields) {
+  try { return (await _readLockedRecord(table, recordId)).fields; }
+  catch (_) { toast(LOCK_REREAD_FAILED_TEXT, 'warn', 10000); return snapshotFields; }
+}
+
 async function releaseLock(table, recordId) {
   stopLockHeartbeat();
   if (_isCurrentLock(table, recordId)) _currentLock = null;
@@ -17493,6 +17509,7 @@ async function openCustomerModal(id) {
       toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
       return;
     }
+    f = await _freshFieldsAfterLock('Customer', id, f);
   } else {
     f.customer_no = await nextCustomerNo(cur.id);
     f.country = 'Deutschland';
@@ -18136,6 +18153,7 @@ async function openSupplierModal(id) {
       toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
       return;
     }
+    f = await _freshFieldsAfterLock('Supplier', id, f);
   } else {
     f.supplier_no = await nextSupplierNo(cur.id);
     f.country = 'Deutschland';
@@ -19429,6 +19447,7 @@ async function openArticleModal(id) {
       toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
       return;
     }
+    f = await _freshFieldsAfterLock('Article', id, f);
   } else {
     f.article_no = await nextArticleNo(cur.id);
     f.status = 'aktiv';
@@ -20066,6 +20085,7 @@ async function openInquiryModal(id) {
       toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
       return;
     }
+    f = await _freshFieldsAfterLock('Inquiry', id, f);
   } else {
     f.inquiry_no = await nextInquiryNo(cur.id);
     f.status = 'offen';
@@ -22671,16 +22691,23 @@ async function openQuoteModal(id) {
   const defaultBundle = window._quoteBundles.find(b => b.fields.is_default);
 
   if (id) {
+    const itemsOf = (list) => list.filter(it => (it.fields.quote_id || []).includes(id))
+      .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
     const [allQ, allItems] = await Promise.all([readData('Quote'), readData('QuoteItem')]);
     const rec = allQ.find(r => r.id === id);
     f = rec?.fields || {};
-    items = allItems.filter(it => (it.fields.quote_id || []).includes(id))
-      .sort((a,b) => (+(a.fields.pos || 0)) - (+(b.fields.pos || 0)));
+    items = itemsOf(allItems);
     const lockRes = await acquireLock('Quote', id, rec);
     if (!lockRes.ok) {
       toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500);
       return;
     }
+    // Wie _freshFieldsAfterLock, hier zusammen mit den Positionen.
+    try {
+      const [fresh, freshItems] = await Promise.all([_readLockedRecord('Quote', id), readData('QuoteItem')]);
+      f = fresh.fields;
+      items = itemsOf(freshItems);
+    } catch (_) { toast(LOCK_REREAD_FAILED_TEXT, 'warn', 10000); }
   } else {
     f.quote_no = await nextQuoteNo(cur.id);
     const today = new Date();
@@ -27501,6 +27528,7 @@ async function openOrderModal(id, opts = {}) {
     f = rec?.fields || {};
     const lockRes = await acquireLock('Order', id, rec);
     if (!lockRes.ok) { toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet — bitte später nochmal', 'warn', 4500); return; }
+    f = await _freshFieldsAfterLock('Order', id, f);
     // Items laden
     try {
       const allItems = await readData('OrderItem');
@@ -29021,6 +29049,7 @@ async function openSupplierOrderModal(id, opts = {}) {
     f = rec?.fields || {};
     const lockRes = await acquireLock('SupplierOrder', id, rec);
     if (!lockRes.ok) { toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet', 'warn', 4500); return; }
+    f = await _freshFieldsAfterLock('SupplierOrder', id, f);
     try {
       const allItems = await readData('SupplierOrderItem');
       items = allItems.filter(it => (it.fields.purchase_id || []).includes(id) || it.fields.purchase_id === id)
@@ -30362,6 +30391,7 @@ async function openDeliveryNoteModal(id, opts = {}) {
     f = rec?.fields || {};
     const lockRes = await acquireLock('DeliveryNote', id, rec);
     if (!lockRes.ok) { toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet', 'warn', 4500); return; }
+    f = await _freshFieldsAfterLock('DeliveryNote', id, f);
     try {
       const allItems = await readData('DeliveryNoteItem');
       items = allItems.filter(it => (it.fields.delivery_id || []).includes(id) || it.fields.delivery_id === id)
@@ -31617,6 +31647,7 @@ async function openInvoiceModal(id, opts = {}) {
     f = rec?.fields || {};
     const lockRes = await acquireLock('Invoice', id, rec);
     if (!lockRes.ok) { toast('Wird gerade von ' + lockRes.lockedBy + ' bearbeitet', 'warn', 4500); return; }
+    f = await _freshFieldsAfterLock('Invoice', id, f);
     try {
       const allItems = await readData('InvoiceItem');
       items = allItems.filter(it => (it.fields.invoice_id || []).includes(id) || it.fields.invoice_id === id)

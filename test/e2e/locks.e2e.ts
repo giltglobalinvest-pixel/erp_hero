@@ -36,6 +36,28 @@ const openAsVera = async (id: string): Promise<Page> => {
   await h.run(page, `await openCustomerModal(${JSON.stringify(id)});`);
   return page;
 };
+// The colleague's save lands after the server answered the form's first read of these tables and before
+// the page gets the answers: the page's copy still shows the colleague's lock and the old values.
+const colleagueSavesAfterRead = async (page: Page, tables: string[], save: () => Promise<void>): Promise<() => boolean> => {
+  const seen = new Set<string>();
+  let saved: Promise<void> | null = null;
+  let allRead!: () => void;
+  const read = new Promise<void>((resolve) => (allRead = resolve));
+  for (const table of tables) {
+    await page.route(`**/api/data/${table}`, async (route) => {
+      if (route.request().method() !== 'GET' || seen.has(table)) return route.continue();
+      seen.add(table);
+      const snapshot = await route.fetch();
+      if (seen.size === tables.length) allRead();
+      await read;
+      saved ??= save();
+      await saved;
+      await route.fulfill({ response: snapshot });
+    });
+  }
+  return () => saved !== null;
+};
+const REREAD_WARNING = 'Aktuelle Daten konnten nicht geladen werden – bitte Formular schließen und neu öffnen, bevor du speicherst.';
 
 describe('record locks', () => {
   it('opening a customer takes the lock on the server and closing the modal releases it', async () => {
@@ -155,6 +177,149 @@ describe('record locks', () => {
     expect(await lockHolder(id)).toBe(h.users.vera.id);
     await h.run(page, `window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));`);
     await eventually(async () => (await lockHolder(id)) === undefined);
+    await h.assertClean(page);
+  });
+});
+
+describe("a colleague's save between the form's read and the lock", () => {
+  const forms = [
+    { table: 'Customer', open: 'openCustomerModal', field: 'name1' },
+    { table: 'Supplier', open: 'openSupplierModal', field: 'name1' },
+    { table: 'Article', open: 'openArticleModal', field: 'name1' },
+    { table: 'Inquiry', open: 'openInquiryModal', field: 'title' },
+    { table: 'Quote', open: 'openQuoteModal', field: 'quote_title' },
+    { table: 'Order', open: 'openOrderModal', field: 'order_title' },
+    { table: 'SupplierOrder', open: 'openSupplierOrderModal', field: 'purchase_title' },
+    { table: 'DeliveryNote', open: 'openDeliveryNoteModal', field: 'delivery_title' },
+    { table: 'Invoice', open: 'openInvoiceModal', field: 'invoice_title' },
+  ] as const;
+  it.each(forms)('the $table form shows what the colleague saved', async ({ table, open, field }) => {
+    const { id } = await h.apiAs<{ id: string }>('admin', 'POST', `/api/data/${table}`, {
+      fields: { [field]: 'Stand vorher', company_id: [h.companies.alpha] },
+    });
+    await h.apiAs('admin', 'POST', `/api/locks/${table}/${id}`);
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    const raced = await colleagueSavesAfterRead(page, [table], async () => {
+      await h.apiAs('admin', 'PATCH', `/api/data/${table}/${id}`, { fields: { [field]: 'Stand des Kollegen' } });
+      await h.apiAs('admin', 'POST', `/api/locks/${table}/${id}/release`);
+    });
+    await h.run(page, `await ${open}(${JSON.stringify(id)});`);
+    expect(raced()).toBe(true);
+    expect(await page.locator('#modalBackdrop').isVisible()).toBe(true);
+    expect(await page.inputValue(`#modalBox [name="${field}"]`)).toBe('Stand des Kollegen');
+    expect((await h.deps.records.get(table, id))?.fields.lock_user_id).toBe(h.users.vera.id);
+    await h.assertClean(page);
+  });
+
+  it("Customer: Vera's save keeps the colleague's values", async () => {
+    const { id } = await h.apiAs<{ id: string }>('admin', 'POST', '/api/data/Customer', {
+      fields: { name1: 'Original GmbH', phone: '0711 111', status: 'aktiv', company_id: [h.companies.alpha] },
+    });
+    await h.apiAs('admin', 'POST', `/api/locks/Customer/${id}`);
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    const raced = await colleagueSavesAfterRead(page, ['Customer'], async () => {
+      await h.apiAs('admin', 'PATCH', `/api/data/Customer/${id}`, { fields: { name1: 'Admin-Änderung GmbH', phone: '0711 999' } });
+      await h.apiAs('admin', 'POST', `/api/locks/Customer/${id}/release`);
+    });
+    await h.run(page, `await openCustomerModal(${JSON.stringify(id)});`);
+    expect(raced()).toBe(true);
+    expect(await page.inputValue('#modalBox input[name="name1"]')).toBe('Admin-Änderung GmbH');
+    expect(await page.inputValue('#modalBox input[name="phone"]')).toBe('0711 999');
+    // Vera only adds a note and saves.
+    await page.fill('#modalBox textarea[name="notes"]', 'Rückruf Montag');
+    await page.dispatchEvent('#modalBox button[type="submit"]', 'click');
+    await page.locator('#toastWrap', { hasText: 'Gespeichert' }).waitFor();
+    const stored = (await h.deps.records.get('Customer', id))?.fields;
+    expect([stored?.name1, stored?.phone, stored?.notes]).toEqual(['Admin-Änderung GmbH', '0711 999', 'Rückruf Montag']);
+    await h.assertClean(page);
+  });
+
+  it("Invoice: Vera's save does not put the invoice the colleague finalized back to Entwurf", async () => {
+    const { id } = await h.apiAs<{ id: string }>('admin', 'POST', '/api/data/Invoice', {
+      fields: { invoice_no: 'R-7001', invoice_title: 'Wartung 2026', status: 'Entwurf', company_id: [h.companies.alpha] },
+    });
+    await h.apiAs('admin', 'POST', `/api/locks/Invoice/${id}`);
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    const raced = await colleagueSavesAfterRead(page, ['Invoice'], async () => {
+      await h.apiAs('admin', 'PATCH', `/api/data/Invoice/${id}`, {
+        fields: { status: 'Versendet', invoice_title: 'Wartung 2026 – final', locked_at: '29.9.2026, 10:00:00' },
+      });
+      await h.apiAs('admin', 'POST', `/api/locks/Invoice/${id}/release`);
+    });
+    await h.run(page, `await openInvoiceModal(${JSON.stringify(id)});`);
+    expect(raced()).toBe(true);
+    expect(await page.inputValue('#modalBox form[data-invoice-form] select[name="status"]')).toBe('Versendet');
+    expect(await page.getAttribute('#modalBox form[data-invoice-form]', 'data-locked')).toBe('1');
+    // Vera changes nothing and clicks "Speichern & schließen".
+    await page.dispatchEvent('#modalBox form[data-invoice-form] button[type="submit"]', 'click');
+    await page.locator('#toastWrap', { hasText: 'Gespeichert' }).waitFor();
+    const stored = (await h.deps.records.get('Invoice', id))?.fields;
+    expect([stored?.status, stored?.invoice_title]).toEqual(['Versendet', 'Wartung 2026 – final']);
+    await h.assertClean(page);
+  });
+
+  it('the quote form also shows the item the colleague added', async () => {
+    const { id } = await h.apiAs<{ id: string }>('admin', 'POST', '/api/data/Quote', {
+      fields: { quote_title: 'Wartung', status: 'Entwurf', company_id: [h.companies.alpha] },
+    });
+    const first = await h.apiAs<{ id: string }>('admin', 'POST', '/api/data/QuoteItem', {
+      fields: { quote_id: [id], pos: 1, description: 'Prüfung', qty: 1, unit_price_net: 100 },
+    });
+    await h.apiAs('admin', 'POST', `/api/locks/Quote/${id}`);
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    let added = '';
+    const raced = await colleagueSavesAfterRead(page, ['Quote', 'QuoteItem'], async () => {
+      added = (
+        await h.apiAs<{ id: string }>('admin', 'POST', '/api/data/QuoteItem', {
+          fields: { quote_id: [id], pos: 2, description: 'Ersatzteil', qty: 2, unit_price_net: 50 },
+        })
+      ).id;
+      await h.apiAs('admin', 'PATCH', `/api/data/Quote/${id}`, { fields: { quote_title: 'Wartung und Ersatzteil' } });
+      await h.apiAs('admin', 'POST', `/api/locks/Quote/${id}/release`);
+    });
+    await h.run(page, `await openQuoteModal(${JSON.stringify(id)});`);
+    expect(raced()).toBe(true);
+    expect(await page.inputValue('#modalBox input[name="quote_title"]')).toBe('Wartung und Ersatzteil');
+    const rows = await page.locator('#modalBox [data-qi-row]').evaluateAll((els) => els.map((el) => el.getAttribute('data-qi-row')));
+    expect(rows).toEqual([first.id, added]);
+    await h.assertClean(page);
+  });
+
+  it('keeps the copy it has and warns when the fresh read fails', async () => {
+    const id = await newCustomer('Netzfehler GmbH');
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    await page.route(`**/api/data/Customer/${id}`, (route) => route.abort());
+    await h.run(page, `await openCustomerModal(${JSON.stringify(id)});`);
+    expect(await page.inputValue('#modalBox input[name="name1"]')).toBe('Netzfehler GmbH');
+    expect((await toasts(page)).includes(REREAD_WARNING)).toBe(true);
+    expect(await lockHolder(id)).toBe(h.users.vera.id);
+    await h.assertClean(page);
+  });
+
+  it('the quote form keeps its copy and warns when the fresh item read fails', async () => {
+    const { id } = await h.apiAs<{ id: string }>('admin', 'POST', '/api/data/Quote', {
+      fields: { quote_title: 'Offline-Angebot', status: 'Entwurf', company_id: [h.companies.alpha] },
+    });
+    const item = await h.apiAs<{ id: string }>('admin', 'POST', '/api/data/QuoteItem', {
+      fields: { quote_id: [id], pos: 1, description: 'Prüfung', qty: 1, unit_price_net: 100 },
+    });
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    // The form's own item read goes through, the read after the lock fails.
+    let itemReads = 0;
+    await page.route('**/api/data/QuoteItem', (route) => (++itemReads === 1 ? route.continue() : route.abort()));
+    await h.run(page, `await openQuoteModal(${JSON.stringify(id)});`);
+    expect(itemReads).toBe(2);
+    expect(await page.inputValue('#modalBox input[name="quote_title"]')).toBe('Offline-Angebot');
+    const rows = await page.locator('#modalBox [data-qi-row]').evaluateAll((els) => els.map((el) => el.getAttribute('data-qi-row')));
+    expect(rows).toEqual([item.id]);
+    expect((await toasts(page)).split(REREAD_WARNING).length - 1).toBe(1);
+    expect((await h.deps.records.get('Quote', id))?.fields.lock_user_id).toBe(h.users.vera.id);
     await h.assertClean(page);
   });
 });
