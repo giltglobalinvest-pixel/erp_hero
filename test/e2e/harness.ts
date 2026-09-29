@@ -172,8 +172,15 @@ export async function startHarness(): Promise<Harness> {
     return (text ? JSON.parse(text) : null) as T;
   };
 
-  const run = <T>(page: Page, body: string): Promise<T> =>
-    page.evaluate(`(async () => { ${body}\n})()`) as Promise<T>;
+  const run = async <T>(page: Page, body: string): Promise<T> => {
+    try {
+      return (await page.evaluate(`(async () => { ${body}\n})()`)) as T;
+    } catch (e) {
+      // Page stack frames point at http://127.0.0.1:<port>/, which crashes vitest with EISDIR and hides the assertion.
+      // eslint-disable-next-line preserve-caught-error -- the page stack is what must not be attached, not even as a cause
+      throw new Error(String((e as Error).message).split('\n')[0]);
+    }
+  };
 
   const runError = async (page: Page, body: string) => {
     const result = await page.evaluate(`(async () => {
