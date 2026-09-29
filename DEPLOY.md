@@ -110,9 +110,24 @@ cutover.
 `railway ssh` needs an SSH key registered with your Railway account; the CLI offers to register one
 the first time. Without SSH, use a one-time start command instead: set **Settings → Deploy → Custom
 Start Command** to `npm run user:create -- --name "Patrizio" --admin && npm start`, deploy, and
-read the key in that deployment's logs. Then set the start command back to `npm start` and deploy
-again, so that a restart does not create another admin. The key stays readable in the logs, so give
-yourself a new one after the first login (section 8, step 6).
+read the key in that deployment's logs. Then switch back right away, because every start of that
+deployment creates another admin, and the service restarts after a crash
+(`restartPolicyType: ON_FAILURE` in `railway.json`), which runs the one-time command again:
+
+1. Set the start command back to `npm start`.
+2. Apply that staged change with **Deploy**. This creates a new deployment with the current
+   settings.
+3. Never use **Redeploy** or **Restart** on the one-time-command deployment, and never roll back
+   to it. These reuse that deployment's start command, so each of them creates another admin and
+   prints its key into the logs.
+
+Then check the new deployment's log: it must show no further `Benutzer angelegt:` line. If one
+appears, that deployment still runs the one-time command, so apply the change with **Deploy** as
+above. Then deactivate each extra admin, so that only one stays active: log in, open
+**Administration → Benutzer** and click **Deaktivieren** (the crossed-out person icon) in the row
+of an extra "Patrizio". The rows all show the same name. If the app then asks for your login key,
+you deactivated your own user: log in with the key from a newer log line instead. The key stays
+readable in the logs, so give yourself a new one after the first login (section 8, step 6).
 
 Log in with this admin in the browser (section 8). The import in section 9 replaces all users with
 the users from Airtable.
@@ -229,7 +244,13 @@ The cutover moves the data and retires the old setup.
       deploy. The placeholder only answers the health check.
    2. Run `railway ssh`, move the entries back as `/data/activation-failed` describes, and delete
       the file.
-   3. Set the start command back to `npm start` and deploy.
+   3. Right away, set the start command back to `npm start`, and apply that staged change with
+      **Deploy**. This creates a new deployment with the current settings. While the placeholder
+      runs, every visitor gets a blank page, and a crash restart (`restartPolicyType: ON_FAILURE`
+      in `railway.json`) starts the placeholder again. Never use **Redeploy** or **Restart** on
+      the placeholder deployment, and never roll back to it: these reuse its start command and
+      bring back the blank placeholder page. Then check that `https://<domain>/` shows the login
+      page, not a blank page.
 6. Log in at the new address with the existing login key of a user who is an admin in Airtable,
    and check the data. The import replaced the admin from section 7. If no imported user is an
    admin, create one first as in section 7, with `npm run user:create -- --name "<name>" --admin`.
