@@ -1177,7 +1177,7 @@ function userLabel(userId) {
 /* ============================================================
    RECORD LOCKING
    ============================================================ */
-const LOCK_TTL_MS = 5 * 60 * 1000;     // 5 Minuten
+// Der Server entscheidet über Sperren; eine Sperre läuft 5 Minuten nach der letzten Verlängerung ab.
 const LOCK_REFRESH_MS = 2 * 60 * 1000; // alle 2 Minuten verlängern
 let _currentLock = null;
 let _lockRefreshTimer = null;
@@ -1195,31 +1195,53 @@ function isLockedByOther(record) {
   return !!(lock && lock.userId !== APP_KEYS.user?._id);
 }
 
+function _lockPath(table, recordId) {
+  return '/locks/' + encodeURIComponent(table) + '/' + encodeURIComponent(recordId);
+}
+
+function _isCurrentLock(table, recordId) {
+  return !!_currentLock && _currentLock.table === table && _currentLock.recordId === recordId;
+}
+
+// currentRecord bleibt für die Aufrufer im Parameter, der Server kennt den aktuellen Stand selbst.
 async function acquireLock(table, recordId, currentRecord) {
-  const lock = getLockInfo(currentRecord);
-  if (lock && lock.userId !== APP_KEYS.user?._id) {
-    return { ok: false, lockedBy: userLabel(lock.userId) };
+  const res = await _api('POST', _lockPath(table, recordId));
+  if (!res || !res.ok) {
+    // Alle Aufrufer zeigen lockedBy per toast() an, also als HTML: deshalb escaped.
+    const who = (res && res.locked_by && res.locked_by.name) || 'einem anderen Benutzer';
+    return { ok: false, lockedBy: escapeHtml(who) };
   }
-  const until = new Date(Date.now() + LOCK_TTL_MS).toISOString();
-  await updateData(table, recordId, { lock_user_id: APP_KEYS.user._id, lock_until: until });
   startLockHeartbeat(table, recordId);
   return { ok: true };
 }
 
 async function releaseLock(table, recordId) {
   stopLockHeartbeat();
-  if (!APP_KEYS.user) return;
-  try { await updateData(table, recordId, { lock_user_id: '', lock_until: '' }); } catch (e) {}
+  if (_isCurrentLock(table, recordId)) _currentLock = null;
+  try { await _api('POST', _lockPath(table, recordId) + '/release', { reauth: false }); } catch (e) {}
+}
+
+// Ein Heartbeat-Takt. refresh nimmt die Sperre auch neu, falls sie inzwischen frei war.
+// Netzwerkfehler werden ignoriert. Hat jemand anderes übernommen (z.B. nach Standby),
+// endet der Heartbeat mit einer Warnung; das Formular bleibt offen.
+async function _lockHeartbeatTick(table, recordId) {
+  let res;
+  try {
+    res = await _api('POST', _lockPath(table, recordId) + '/refresh', { reauth: false });
+  } catch (e) {
+    return;
+  }
+  if (!res || res.ok !== false) return;
+  stopLockHeartbeat();
+  if (_isCurrentLock(table, recordId)) _currentLock = null;
+  const who = (res.locked_by && res.locked_by.name) || 'einem anderen Benutzer';
+  toast('Sperre verloren – der Datensatz wird jetzt von ' + escapeHtml(who) + ' bearbeitet', 'warn', 8000);
 }
 
 function startLockHeartbeat(table, recordId) {
   stopLockHeartbeat();
   _currentLock = { table, recordId };
-  _lockRefreshTimer = setInterval(async () => {
-    try {
-      await updateData(table, recordId, { lock_until: new Date(Date.now() + LOCK_TTL_MS).toISOString() });
-    } catch (e) {}
-  }, LOCK_REFRESH_MS);
+  _lockRefreshTimer = setInterval(() => { _lockHeartbeatTick(table, recordId); }, LOCK_REFRESH_MS);
 }
 
 function stopLockHeartbeat() {
@@ -1227,19 +1249,11 @@ function stopLockHeartbeat() {
   _lockRefreshTimer = null;
 }
 
-// Lock auch bei Tab-Schließen freigeben (Best-Effort)
+// Sperre auch beim Schließen des Tabs freigeben (Best-Effort). sendBeacon schickt das
+// Session-Cookie mit und überlebt das Schließen; der Server ignoriert den leeren Body.
 window.addEventListener('beforeunload', () => {
-  if (!_currentLock || !APP_KEYS.airtableWriteKey) return;
-  try {
-    const url = 'https://api.airtable.com/v0/' + APP_CONFIG.APP_BASE_ID + '/' + encodeURIComponent(_currentLock.table) + '/' + _currentLock.recordId;
-    navigator.sendBeacon && navigator.sendBeacon(url); // beacon kann kein PATCH → Best-Effort sync fetch
-    fetch(url, {
-      method: 'PATCH',
-      headers: { 'Authorization': 'Bearer ' + APP_KEYS.airtableWriteKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fields: { lock_user_id: '', lock_until: '' } }),
-      keepalive: true
-    });
-  } catch (e) {}
+  if (!_currentLock || !navigator.sendBeacon) return;
+  try { navigator.sendBeacon(API_BASE + _lockPath(_currentLock.table, _currentLock.recordId) + '/release'); } catch (e) {}
 });
 
 async function logout() {
@@ -1411,11 +1425,31 @@ async function writeData(table, fields, opts = {}) {
 }
 
 async function updateData(table, recordId, fields) {
+  // Sperr-Shim: Die Speichern-Handler geben die Sperre im selben PATCH frei
+  // (lock_user_id = '', lock_until = ''). Sperrfelder schreibt nur noch der Server,
+  // deshalb gehen sie nicht mit, und die Sperre wird nach dem Speichern freigegeben.
+  let body = fields;
+  let releaseAfter = false;
+  if (fields && ('lock_user_id' in fields || 'lock_until' in fields)) {
+    releaseAfter = 'lock_user_id' in fields && 'lock_until' in fields && !fields.lock_user_id && !fields.lock_until;
+    body = Object.assign({}, fields);
+    delete body.lock_user_id;
+    delete body.lock_until;
+  }
+  let updated;
   try {
-    return await _api('PATCH', _dataPath(table, recordId), { body: { fields } });
+    updated = await _api('PATCH', _dataPath(table, recordId), { body: { fields: body } });
   } catch (e) {
     throw _prefixError('Update fehlgeschlagen: ', e);
   }
+  if (releaseAfter) {
+    if (_isCurrentLock(table, recordId)) {
+      stopLockHeartbeat();
+      _currentLock = null;
+    }
+    try { await _api('POST', _lockPath(table, recordId) + '/release', { reauth: false }); } catch (e) {}
+  }
+  return updated;
 }
 
 async function deleteData(table, recordId) {
