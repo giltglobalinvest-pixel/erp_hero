@@ -956,6 +956,50 @@ function _applyServerUser(u) {
   return APP_KEYS.user;
 }
 
+/* Alle Tabs eines Browsers teilen das Session-Cookie, jeder Tab zeigt aber den User, mit dem er gestartet ist.
+   Nach Login, Re-Login und Logout meldet der Tab den User der Sitzung an die anderen Tabs. Ein Tab, der einen
+   anderen User zeigt, lädt neu (wie das Overlay bei einem anderen User). Wer die Nachricht verpasst hat
+   (eingefroren, im Back-Forward-Cache, Browser ohne BroadcastChannel), fragt /api/me, sobald er wieder sichtbar ist. */
+const _sessionChannel = (() => {
+  // Ein Fehler beim Anlegen des Kanals darf den Start der App nicht stoppen.
+  try { return typeof BroadcastChannel === 'function' ? new BroadcastChannel('erp-session') : null; } catch (_) { return null; }
+})();
+
+// User der Sitzung an die anderen Tabs melden (null: abgemeldet). Der eigene Tab bekommt die Nachricht nicht.
+function _announceSessionUser(userId) {
+  if (!_sessionChannel) return;
+  try { _sessionChannel.postMessage({ userId: userId || null }); } catch (_) {}
+}
+
+// Lädt nur neu, wenn dieser Tab einen angemeldeten User zeigt und die Sitzung jetzt einem anderen gehört.
+function _reloadIfOtherUser(userId) {
+  if (!APP_KEYS.user || userId === APP_KEYS.user._id) return false;
+  location.reload();
+  return true;
+}
+
+if (_sessionChannel) {
+  _sessionChannel.onmessage = (ev) => {
+    if (ev.data && typeof ev.data === 'object' && 'userId' in ev.data) _reloadIfOtherUser(ev.data.userId);
+  };
+}
+
+// Nur eine Antwort mit einem anderen User lädt neu. Netzfehler, Serverfehler und 401 nicht:
+// nach einer 401 fragt der nächste Aufruf nach dem Key (Overlay), das offene Formular bleibt.
+async function _checkSessionUser() {
+  if (!APP_KEYS.user) return false;
+  let data;
+  try {
+    data = await _api('GET', '/me', { reauth: false });
+  } catch (_) {
+    return false;
+  }
+  if (!data || !data.user || !data.user.id) return false;
+  return _reloadIfOtherUser(data.user.id);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') _checkSessionUser(); });
+window.addEventListener('pageshow', (ev) => { if (ev.persisted) _checkSessionUser(); });
+
 // Nach Login und Auto-Login: Mandanten, User-Namen und Einstellungen laden.
 async function _afterLogin() {
   await Promise.all([loadCompanies(), loadUsersCache(), loadSettings()]);
@@ -970,6 +1014,7 @@ async function loginWithUserKey(userKey, longLived = false) {
   });
   if (!data || !data.user) throw new Error('Ungültige Antwort vom Server');
   _applyServerUser(data.user);
+  _announceSessionUser(data.user.id);
   await _afterLogin();
   return APP_KEYS.user;
 }
@@ -1277,6 +1322,7 @@ async function logout() {
     try { await releaseLock(_currentLock.table, _currentLock.recordId); } catch (_) {}
   }
   try { await _api('POST', '/logout', { keepalive: true, reauth: false }); } catch (_) {}
+  _announceSessionUser(null);
   for (const k in APP_KEYS) APP_KEYS[k] = null;
   location.reload();
 }
@@ -1447,6 +1493,7 @@ function _showReauthOverlay() {
         });
         if (!data || !data.user) throw new Error('Ungültige Antwort vom Server');
         keyEl.value = '';
+        _announceSessionUser(data.user.id);
         if (!APP_KEYS.user || data.user.id !== APP_KEYS.user._id) { location.reload(); return; }
         _applyServerUser(data.user);
         _loginGeneration++;
