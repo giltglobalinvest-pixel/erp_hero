@@ -28,6 +28,24 @@ describe('index.html', () => {
       expect(html.includes(name), name).toBe(false);
     }
   });
+
+  it('has none of the old hosts, keys and token fields (spec §14)', () => {
+    for (const name of [
+      'api.airtable.com', 'content.airtable.com', 'val.town', 'val.run', 'esm.town',
+      'AIRTABLE_READ_KEY', 'airtableWriteKey', 'sessionToken',
+    ]) {
+      expect(html.includes(name), name).toBe(false);
+    }
+  });
+
+  it('has no Airtable or Val.town config and no Airtable table setup left', () => {
+    for (const name of [
+      'MASTER_BASE_ID', 'APP_BASE_ID', 'appBaseId', 'anthropicKey', 'apiProxyUrl', 'freshdeskProxyUrl',
+      'freshdeskProxyToken', 'AI_USAGE_LOG_SCHEMA', '_createAiUsageLogTableManually',
+    ]) {
+      expect(html.includes(name), name).toBe(false);
+    }
+  });
 });
 
 describe('sw.js', () => {
