@@ -16600,7 +16600,7 @@ async function testFreshsalesConnection(btnEl) {
     // (im Gegensatz zu /selector/* der 302 Redirects ausspuckt).
     // f=name = nach Feld "name" suchen, entities=sales_account = in Sales-Accounts
     const res = await proxyFetch('freshsales/api/lookup?q=test&f=name&entities=sales_account');
-    toast('✓ Freshsales-API erreichbar · Auth + Subdomain OK', 'success', 4500);
+    toast('✓ Freshsales-API erreichbar · Token + Server-Subdomain (FRESHSALES_SUBDOMAIN) OK', 'success', 4500);
   } catch (e) {
     const m = e.message || String(e);
     let msg = 'Verbindung fehlgeschlagen: ' + m;
@@ -16609,7 +16609,7 @@ async function testFreshsalesConnection(btnEl) {
     } else if (/401|403|Incorrect or expired/i.test(m)) {
       msg = 'Token ungültig oder abgelaufen — neuen Token aus Freshsales (Profil → API-Einstellungen) holen und als Railway-Variable FRESHSALES_API_KEY setzen.';
     } else if (/404/.test(m)) {
-      msg = 'Subdomain „' + (APP_KEYS.freshsalesSubdomain || '?') + '" existiert nicht. Prüfe deine Freshworks-CRM-URL.';
+      msg = 'Freshsales antwortet 404 — Railway-Variable FRESHSALES_SUBDOMAIN prüfen (die Subdomain hier gilt nur für Links und den Sync-Schalter).';
     }
     toast(msg, 'error', 10000);
   } finally {

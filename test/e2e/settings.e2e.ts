@@ -8,10 +8,14 @@ const FD = 'https://flptest.freshdesk.com/api/v2/';
 const basic = (user: string, password: string): string => 'Basic ' + Buffer.from(`${user}:${password}`).toString('base64');
 
 let h: Harness;
+// The answer to the Freshsales lookup that "Verbindung testen" sends (the harness sets FRESHSALES_SUBDOMAIN=gilt).
+const FS_LOOKUP_OK = (): Response => jsonResponse({});
+let fsLookup = FS_LOOKUP_OK;
 beforeAll(async () => {
   h = await startHarness();
   // Every render of the settings page loads the Freshdesk groups for the dropdowns.
   h.fake.on('GET', FD + 'groups', () => jsonResponse([{ id: 11, name: 'Vertrieb' }, { id: 12, name: 'Bestellungen' }]));
+  h.fake.on('GET', 'https://gilt.freshworks.com/crm/sales/api/lookup', () => fsLookup());
 });
 afterEach(async () => {
   await h.resetContexts();
@@ -280,7 +284,6 @@ describe('settings page', () => {
   });
 
   it('saves the Freshsales subdomain without a token field and tests the server key', async () => {
-    h.fake.on('GET', 'https://gilt.freshworks.com/crm/sales/api/lookup', () => jsonResponse({}));
     const page = await h.newPage();
     await openSettings(page);
     expect(await page.locator('#settingsFsApiKey').count()).toBe(0);
@@ -290,10 +293,46 @@ describe('settings page', () => {
     expect((await settings()).freshsalesSubdomain).toBe('gilt');
     // The test button is rendered once a subdomain is set; click waits for the re-render.
     await page.click('button[onclick="testFreshsalesConnection(this)"]');
-    await toast(page, '✓ Freshsales-API erreichbar · Auth + Subdomain OK');
+    await toast(page, '✓ Freshsales-API erreichbar · Token + Server-Subdomain (FRESHSALES_SUBDOMAIN) OK');
     const [lookup] = callsTo('https://gilt.freshworks.com/crm/sales/api/lookup');
     expect(lookup?.headers.get('authorization')).toBe('Token token=test-freshsales-key');
     expect((await page.locator('#pageContent').innerText()).includes('FRESHSALES_API_KEY')).toBe(true);
     await h.assertClean(page);
+  });
+
+  it('sends a Freshsales 404 to the Railway variable FRESHSALES_SUBDOMAIN, not to the subdomain saved here', async () => {
+    fsLookup = () => jsonResponse({ errors: { code: 404, message: 'Not Found' } }, 404);
+    try {
+      const page = await h.newPage();
+      await openSettings(page);
+      await page.fill('#settingsFsDomain', 'https://gilt-crm.freshworks.com/crm/sales/');
+      await page.click('button[onclick="saveFreshsalesSetup(this)"]');
+      await toast(page, 'Freshsales-Subdomain gespeichert');
+      expect((await settings()).freshsalesSubdomain).toBe('gilt-crm');
+      await inputShows(page, '#settingsFsDomain', 'gilt-crm');
+      // Toasts disappear after a few seconds, so each one is recorded as it appears.
+      await h.run(
+        page,
+        `window.__toastTexts = [];
+         new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => window.__toastTexts.push(n.textContent))))
+           .observe(document.getElementById('toastWrap'), { childList: true });`,
+      );
+      const callsBefore = h.fake.calls.length;
+
+      await page.click('button[onclick="testFreshsalesConnection(this)"]');
+      await page.waitForFunction(() => (window as unknown as { __toastTexts: string[] }).__toastTexts.length > 0);
+      // The server called the subdomain from its own environment, not the one saved above.
+      const hosts = h.fake.calls
+        .slice(callsBefore)
+        .filter((c) => c.url.includes('freshworks.com'))
+        .map((c) => new URL(c.url).host);
+      expect(hosts).toEqual(['gilt.freshworks.com']);
+      expect(await h.run<string[]>(page, 'return window.__toastTexts;')).toEqual([
+        'Freshsales antwortet 404 — Railway-Variable FRESHSALES_SUBDOMAIN prüfen (die Subdomain hier gilt nur für Links und den Sync-Schalter).',
+      ]);
+      await h.assertClean(page);
+    } finally {
+      fsLookup = FS_LOOKUP_OK;
+    }
   });
 });
