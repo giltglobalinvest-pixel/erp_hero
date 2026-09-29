@@ -5598,8 +5598,8 @@ Replace:
 
 ```js
 const APP_CONFIG = {
-  MASTER_BASE_ID: 'appzhNrhkLSTEaNFW',
-  APP_BASE_ID: 'appCuTELLYwX90OLC',
+  MASTER_BASE_ID: 'app…',
+  APP_BASE_ID: 'app…',
   PROJECT_ID: 'p_1778057282571',
 ```
 

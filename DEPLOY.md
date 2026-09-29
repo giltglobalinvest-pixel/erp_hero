@@ -208,6 +208,10 @@ The cutover moves the data and retires the old setup.
    `schema.bases:read` on the App base and the Master base.
 3. Set the import variables on the service (`AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`,
    `AIRTABLE_MASTER_BASE_ID`, `ERP_PROJECT_ID=p_1778057282571`). This redeploys.
+   Take each base ID from the base's URL in Airtable: it is the `app…` part of
+   `https://airtable.com/app…/…` (`index.html` no longer holds the IDs).
+   - `AIRTABLE_BASE_ID`: the App base, which holds the ERP tables (Customer, Quote, Order, …);
+   - `AIRTABLE_MASTER_BASE_ID`: the Master base, which holds the `Keys` table.
 4. Run `railway ssh`, then:
 
    ```
