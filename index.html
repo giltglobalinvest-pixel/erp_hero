@@ -1079,7 +1079,7 @@ function getCurrentOrderGroupId() {
   return (cur?.fd_order_group_id || APP_KEYS.freshdeskOrderGroupId || '').trim();
 }
 
-// Mailchimp-Config pro Mandant (Default: aktueller Mandant)
+// Mailchimp-Config pro Mandant (Default: aktueller Mandant). Der Key liegt auf dem Server.
 function getMailchimpConfig(mandantId) {
   const cur = mandantId
     ? APP_KEYS.companies.find(c => c.id === mandantId)
@@ -1088,25 +1088,22 @@ function getMailchimpConfig(mandantId) {
   return {
     mandantId:     cur.id,
     mandantName:   cur.name,
-    api_key:       (cur.mailchimp_api_key || '').trim(),
+    has_key:       !!cur.has_mailchimp_key,
     server_prefix: (cur.mailchimp_server_prefix || '').trim().toLowerCase(),
     list_id:       (cur.mailchimp_list_id || '').trim(),
     list_name:     (cur.mailchimp_list_name || '').trim()
   };
 }
 
-// Mailchimp-API-Call ueber den Val.town-Proxy mit Per-Mandant-Headers.
-// path: z.B. '3.0/ping', '3.0/lists', '3.0/lists/<id>/members'
+// Mailchimp-API-Call über den Server: er nimmt Key und Server-Prefix des Mandanten (X-Company-Id).
+// path: z.B. '3.0/ping', '3.0/lists'
 async function mailchimpFetch(path, opts = {}, mandantId = null) {
   const cfg = getMailchimpConfig(mandantId);
   if (!cfg) throw new Error('Kein Mandant ausgewählt');
-  if (!cfg.api_key || !cfg.server_prefix) {
+  if (!cfg.has_key) {
     throw new Error('Mailchimp ist nicht konfiguriert für Mandant „' + cfg.mandantName + '" (Admin → Einstellungen)');
   }
-  const headers = Object.assign({
-    'x-mailchimp-key': cfg.api_key,
-    'x-mailchimp-server': cfg.server_prefix
-  }, opts.headers || {});
+  const headers = Object.assign({ 'X-Company-Id': cfg.mandantId }, opts.headers || {});
   return await proxyFetch('mailchimp/' + String(path).replace(/^\/+/, ''), {
     method: opts.method || 'GET',
     headers,
@@ -6306,8 +6303,7 @@ async function loadFreshdeskTicketsPreview() {
       <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900">
         <p class="font-semibold mb-1 flex items-center gap-1.5"><i data-lucide="alert-triangle" class="w-4 h-4"></i> ${escapeHtml(fieldLabel)}-Group-ID fehlt</p>
         <p>Damit nur ${escapeHtml(modeLabel)}-Tickets geladen werden, brauche ich die Freshdesk-Group-ID. Eintragen unter Admin → <strong>Einstellungen</strong> → Freshdesk-Gruppen pro Mandant.</p>
-        <p class="mt-2">ID herausfinden via Curl:</p>
-        <code class="block mt-1 bg-amber-100 p-2 rounded text-[10px] break-all">curl -H "Authorization: Bearer DEIN_USER_KEY" ${escapeHtml(_proxyBase() || '')}/freshdesk/api/v2/groups</code>
+        <p class="mt-2">Die Gruppen wählst du unter Admin → <strong>Einstellungen</strong> → „Freshdesk-Gruppen für Anfragen + Bestellungen" aus.</p>
       </div>`;
     if (window.lucide) lucide.createIcons();
     return;
@@ -7236,7 +7232,7 @@ function _renderFreshdeskTicket() {
       </div>
 
       <!-- Footer-Aktion: Interne Notiz + Schließen -->
-      ${APP_KEYS.freshdeskProxyUrl || _proxyBase() ? `
+      ${_proxyBase() ? `
         <div class="border-t border-ink-100 pt-3 flex justify-between gap-2 flex-wrap">
           <button type="button" onclick="openInternalNoteComposer(${_fdTicketState.id})" class="text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-lg px-3 py-2 font-medium inline-flex items-center gap-1.5">
             <i data-lucide="message-square-plus" class="w-4 h-4"></i> Interne Notiz schreiben
@@ -11985,78 +11981,50 @@ function aiSkipCustomerAction() {
 }
 
 /* ============================================================
-   API-PROXY (Val.town)
-   Zentraler Wrapper. Auth = User-API-Key (Bearer). Val.town
-   validiert den Key gegen Airtable/User und routet weiter.
-   Pfade:  /freshdesk/api/v2/...   /anthropic/v1/messages
+   API-PROXY: Freshdesk, Freshsales, Mailchimp, Anthropic über den Server
+   Die Keys liegen auf dem Server; der Browser schickt nur das Session-Cookie.
+   Pfade (unter /api):  freshdesk/api/v2/…   freshsales/api/…
+                        mailchimp/3.0/…      anthropic/v1/messages   health
    ============================================================ */
+// Basis der Proxy-Routen. Mit dem Server ist der Proxy immer da; die Funktion
+// bleibt, weil viele Stellen „ist der Proxy konfiguriert?" fragen.
 function _proxyBase() {
-  // apiProxyUrl ist der neue Master-Endpunkt. Fallback auf legacy
-  // freshdeskProxyUrl für Migration aus älteren Setups.
-  return APP_KEYS.apiProxyUrl || APP_KEYS.freshdeskProxyUrl || null;
+  return API_BASE;
 }
-// Liefert das aktuelle Bearer-Token: bevorzugt Session-Token, fällt auf
-// einen ggf. noch vorhandenen Legacy-User-Key zurück (für Übergang).
-function _bearerForProxy() {
-  return APP_KEYS.sessionToken || _getStoredToken() || localStorage.getItem(LEGACY_USER_KEY) || '';
+
+// Fehlertext im Format des alten Proxys — Aufrufer werten ihn aus
+// (z.B. sucht _tcmCreateFdCompany /409/ und "company_id" in einem Freshdesk-409):
+// 'Proxy <Status>: ' + error.message bzw. error aus JSON, sonst die ersten 200 Zeichen der Antwort; eine HTML-Seite ergibt nur 'Proxy <Status>'.
+function _proxyErrorMessage(e) {
+  if (!e.status) return e.message;
+  let msg = 'Proxy ' + e.status;
+  // Eine HTML-Fehlerseite (z.B. 502 vom Edge) gehört nicht in den Toast: toast() rendert HTML.
+  if (e.text && !e.text.trim().startsWith('<')) {
+    const j = e.body;
+    if (j && typeof j === 'object' && j.error) msg += ': ' + (j.error.message || j.error);
+    else msg += ': ' + e.text.slice(0, 200);
+  }
+  return msg;
 }
+
 async function proxyFetch(path, opts = {}) {
-  const base = _proxyBase();
-  if (!base) throw new Error('API-Proxy nicht konfiguriert. Bitte Admin → Einstellungen → Val.town-Setup ausführen.');
-  const bearer = _bearerForProxy();
-  if (!bearer) throw new Error('Nicht eingeloggt — Session-Token fehlt für Proxy-Auth');
-  const url = base.replace(/\/+$/, '') + '/' + String(path).replace(/^\/+/, '');
-  const headers = Object.assign({
-    'Authorization': 'Bearer ' + bearer,
-    'Accept': 'application/json'
-  }, opts.headers || {});
-  // Aktuelle Firma als Header NUR für Freshdesk-Pfade mitsenden — und NUR
-  // wenn der Proxy auch v2 (also Per-Firma-Keys) unterstützt. Sonst würde
-  // der CORS-Preflight beim alten Proxy am unbekannten Header scheitern.
-  // proxyV2 wird beim Login/AutoLogin gesetzt: true wenn /me das Feld
-  // freshdesk_company_keys zurückgegeben hat.
-  const isFreshdeskPath = String(path).replace(/^\/+/, '').startsWith('freshdesk/');
-  if (APP_KEYS.proxyV2 && isFreshdeskPath && !headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
+  const p = String(path).replace(/^\/+/, '');
+  const headers = Object.assign({}, opts.headers || {});
+  // Aktuelle Firma NUR für Freshdesk-Pfade mitsenden: der Server nimmt damit
+  // den Freshdesk-Key des Users für diese Firma (sonst dessen Default-Key).
+  if (p.startsWith('freshdesk/') && !headers['X-Company-Id'] && APP_KEYS.currentCompanyId) {
     headers['X-Company-Id'] = APP_KEYS.currentCompanyId;
   }
+  // Bei FormData setzt der Browser Content-Type samt Boundary selbst.
   const isFormData = opts.body instanceof FormData;
-  if (opts.body && !headers['Content-Type'] && !isFormData) headers['Content-Type'] = 'application/json';
-  // Bei FormData darf KEIN Content-Type gesetzt sein — Browser setzt boundary automatisch
   if (isFormData) delete headers['Content-Type'];
-  let res;
+  else if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   try {
-    res = await fetch(url, {
-      method: opts.method || 'GET',
-      headers,
-      body: opts.body ? (
-        isFormData ? opts.body :
-        typeof opts.body === 'string' ? opts.body :
-        JSON.stringify(opts.body)
-      ) : undefined
-    });
-  } catch (netErr) {
-    // Typischer CORS-/Netzwerkfehler ("Load failed" auf Safari/iOS, "Failed to fetch" auf Chrome).
-    // Häufige Ursache: Val.town-Proxy ist auf einer alten Code-Version und blockiert
-    // den X-Company-Id-Header oder die PUT/PATCH-Methode im CORS-Preflight.
-    const m = (netErr && netErr.message) || String(netErr);
-    if (/load failed|failed to fetch|network/i.test(m)) {
-      throw new Error('Netzwerk-/CORS-Fehler — vermutlich ist der Val.town-Proxy auf einer älteren Version. Bitte als Admin → Einstellungen → Val.town-Setup öffnen und den Code dort durch die aktuelle Version ersetzen (Update v2).');
-    }
-    throw netErr;
+    return await _api(opts.method || 'GET', '/' + p, { body: opts.body || undefined, headers });
+  } catch (e) {
+    e.message = _proxyErrorMessage(e);
+    throw e;
   }
-  if (!res.ok) {
-    let msg = 'Proxy ' + res.status;
-    try {
-      const t = await res.text();
-      if (t) {
-        try { const j = JSON.parse(t); if (j.error) msg += ': ' + (j.error.message || j.error); else msg += ': ' + t.slice(0, 200); }
-        catch { msg += ': ' + t.slice(0, 200); }
-      }
-    } catch(e) {}
-    throw new Error(msg);
-  }
-  const ct = res.headers.get('content-type') || '';
-  return ct.includes('application/json') ? res.json() : res.text();
 }
 
 async function freshdeskFetch(path) {
