@@ -804,7 +804,7 @@ async function previewFreshdeskCompany(companyId) {
     </div>
   `, { maxWidth: 'max-w-2xl' });
   try {
-    const c = await proxyFetch('freshdesk/api/v2/companies/' + companyId);
+    const c = await proxyFetch('freshdesk/api/v2/companies/' + _crmId(companyId));
     const el = document.getElementById('fdCompanyPreview');
     if (!el) return;
     el.innerHTML = `
@@ -869,7 +869,7 @@ async function previewFreshsalesAccount(accountId) {
     </div>
   `, { maxWidth: 'max-w-2xl' });
   try {
-    const r = await proxyFetch('freshsales/api/sales_accounts/' + accountId);
+    const r = await proxyFetch('freshsales/api/sales_accounts/' + _crmId(accountId));
     const a = r?.sales_account || r;
     const el = document.getElementById('fsAccountPreview');
     if (!el) return;
@@ -1758,7 +1758,7 @@ async function updateTicketStatus(ticketId, statusCode) {
     return toast('Status-Wechsel benötigt Val.town-Proxy v2. Bitte als Admin → Einstellungen → Val.town-Setup öffnen und den Code aktualisieren.', 'error', 8000);
   }
   try {
-    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, {
+    await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId), {
       method: 'PUT',
       body: { status: statusCode }
     });
@@ -1811,7 +1811,7 @@ async function updateTicketResponder(ticketId, responderId) {
     return toast('Bearbeiter-Wechsel benötigt Val.town-Proxy v2', 'error', 7000);
   }
   try {
-    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, {
+    await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId), {
       method: 'PUT',
       body: { responder_id: responderId === null || responderId === '' ? null : Number(responderId) }
     });
@@ -1831,7 +1831,7 @@ async function _loadFdContact(contactId) {
   if (!contactId) return null;
   if (_fdContactCache.has(contactId)) return _fdContactCache.get(contactId);
   try {
-    const c = await freshdeskFetch('contacts/' + contactId);
+    const c = await freshdeskFetch('contacts/' + _crmId(contactId));
     const obj = {
       id: c.id,
       name: c.name || '',
@@ -1847,7 +1847,7 @@ async function _loadFdContact(contactId) {
     // Company-Name nachladen (best-effort)
     if (obj.company_id) {
       try {
-        const co = await freshdeskFetch('companies/' + obj.company_id);
+        const co = await freshdeskFetch('companies/' + _crmId(obj.company_id));
         obj.company_name = co.name || '';
         _fdContactCache.set(contactId, obj);
         // Falls schon im DOM gerendert: Live-Update der Swipe-Panels
@@ -1874,7 +1874,7 @@ async function _fsLoadAccount(accountId, force) {
   if (!force && _fsAccountCache.has(accountId)) return _fsAccountCache.get(accountId);
   if (!APP_KEYS.freshsalesSubdomain) return null;
   try {
-    const res = await proxyFetch('freshsales/api/sales_accounts/' + accountId);
+    const res = await proxyFetch('freshsales/api/sales_accounts/' + _crmId(accountId));
     const acc = res?.sales_account || res || null;
     if (acc) _fsAccountCache.set(accountId, acc);
     return acc;
@@ -1890,7 +1890,7 @@ async function _fsLoadContact(contactId, force) {
   if (!APP_KEYS.freshsalesSubdomain) return null;
   try {
     // ?include=sales_accounts ist nötig, damit FS die verknüpften Accounts mitliefert
-    const res = await proxyFetch('freshsales/api/contacts/' + contactId + '?include=sales_accounts');
+    const res = await proxyFetch('freshsales/api/contacts/' + _crmId(contactId) + '?include=sales_accounts');
     const c = res?.contact || res || null;
     // Falls die Response sales_accounts in einer Top-Level-Sektion liefert (JSON:API-Style)
     // → in den Contact einsortieren, damit weiterführender Code einfach drauf zugreifen kann.
@@ -2020,7 +2020,7 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
   for (const body of tryAccountBodies) {
     try {
       console.log('[fsLink] PUT /sales_accounts versuche:', body);
-      await proxyFetch('freshsales/api/sales_accounts/' + accountId, { method: 'PUT', body });
+      await proxyFetch('freshsales/api/sales_accounts/' + _crmId(accountId), { method: 'PUT', body });
       _fsAccountCache.delete(accountId);
       if (await verifyLink()) { console.log('[fsLink] ✓ verknüpft via PUT sales_accounts mit', body); return true; }
       console.warn('[fsLink] PUT akzeptiert (200) aber nicht wirksam — nächste Variante');
@@ -2030,7 +2030,7 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
   // Strategie B: Association-Endpoint auf Sales-Account-Seite
   try {
     console.log('[fsLink] POST /sales_accounts/{id}/contacts');
-    await proxyFetch('freshsales/api/sales_accounts/' + accountId + '/contacts', {
+    await proxyFetch('freshsales/api/sales_accounts/' + _crmId(accountId) + '/contacts', {
       method: 'POST',
       body: { contact_id: contactId }
     });
@@ -2052,7 +2052,7 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
   for (const body of tryContactBodies) {
     try {
       console.log('[fsLink] PUT /contacts versuche:', body);
-      await proxyFetch('freshsales/api/contacts/' + contactId, { method: 'PUT', body });
+      await proxyFetch('freshsales/api/contacts/' + _crmId(contactId), { method: 'PUT', body });
       _fsContactCache.delete(contactId);
       if (await verifyLink()) { console.log('[fsLink] ✓ verknüpft via PUT contacts mit', body); return true; }
       console.warn('[fsLink] PUT contacts akzeptiert aber nicht wirksam — nächste Variante');
@@ -2062,7 +2062,7 @@ async function _fsLinkContactToAccount(contactId, accountId, currentContact) {
   // Strategie D: dedizierte Association-API auf Contact-Seite
   try {
     console.log('[fsLink] POST /contacts/{id}/sales_accounts');
-    await proxyFetch('freshsales/api/contacts/' + contactId + '/sales_accounts', {
+    await proxyFetch('freshsales/api/contacts/' + _crmId(contactId) + '/sales_accounts', {
       method: 'POST',
       body: { sales_account_id: accountId }
     });
@@ -2164,7 +2164,7 @@ async function _tcmSaveAll(btnEl) {
     if (!existCf.cf_kontaktid && !existCf.cf_kontakt_id) autoCf.cf_kontaktid = String(ctx.fsContact.id);
     cFields.custom_field = autoCf;
     try {
-      await proxyFetch('freshsales/api/contacts/' + ctx.fsContact.id, { method: 'PUT', body: { contact: cFields } });
+      await proxyFetch('freshsales/api/contacts/' + _crmId(ctx.fsContact.id), { method: 'PUT', body: { contact: cFields } });
       _fsContactCache.delete(ctx.fsContact.id);
       summary.push('FS-Contact ✓');
     } catch (e) { summary.push('FS-Contact ✗'); console.warn('[saveAll] FS-Contact failed:', e.message); }
@@ -2180,7 +2180,7 @@ async function _tcmSaveAll(btnEl) {
     if (cn.mobile)    fdcFields.mobile = cn.mobile;
     if (cn.job_title) fdcFields.job_title = cn.job_title;
     try {
-      await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: fdcFields });
+      await proxyFetch('freshdesk/api/v2/contacts/' + _crmId(ctx.fd.id), { method: 'PUT', body: fdcFields });
       _fdContactCache.delete(ctx.fd.id);
       summary.push('FD-Contact ✓');
     } catch (e) { summary.push('FD-Contact ✗'); console.warn('[saveAll] FD-Contact failed:', e.message); }
@@ -2304,7 +2304,7 @@ async function _tcmSaveErp(customerId, btnEl) {
         for (const body of tryBodies) {
           try {
             console.log('[tcmSaveErp] FS-Sync versuche Body:', body);
-            await proxyFetch('freshsales/api/sales_accounts/' + ctx.fs.id, { method: 'PUT', body });
+            await proxyFetch('freshsales/api/sales_accounts/' + _crmId(ctx.fs.id), { method: 'PUT', body });
             if (await verifySync()) {
               console.log('[tcmSaveErp] ✓ FS-Sync erfolgreich mit Body:', body);
               syncStatus = 'ok';
@@ -2523,7 +2523,7 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
       for (const body of tryAccountBodies) {
         try {
           console.log('[fsPushFromFd] PUT /sales_accounts versuche Body:', body);
-          await proxyFetch('freshsales/api/sales_accounts/' + fsAccount.id, { method: 'PUT', body });
+          await proxyFetch('freshsales/api/sales_accounts/' + _crmId(fsAccount.id), { method: 'PUT', body });
           linked = true; break;
         } catch (e) {
           console.warn('[fsPushFromFd] Sales-Account-PUT fehlgeschlagen:', e.message);
@@ -2545,7 +2545,7 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
         for (const body of tryContactBodies) {
           try {
             console.log('[fsPushFromFd] PUT /contacts versuche Body:', body);
-            await proxyFetch('freshsales/api/contacts/' + fsContact.id, { method: 'PUT', body });
+            await proxyFetch('freshsales/api/contacts/' + _crmId(fsContact.id), { method: 'PUT', body });
             linked = true; break;
           } catch (e) {
             console.warn('[fsPushFromFd] Contact-PUT fehlgeschlagen:', e.message);
@@ -2555,7 +2555,7 @@ async function _fsPushFromFd(fdContact, fdCompany, currentFs) {
       // Strategie C: Association-API
       if (!linked) {
         try {
-          await proxyFetch('freshsales/api/contacts/' + fsContact.id + '/sales_accounts', {
+          await proxyFetch('freshsales/api/contacts/' + _crmId(fsContact.id) + '/sales_accounts', {
             method: 'POST',
             body: { sales_account_id: fsAccount.id }
           });
@@ -2617,7 +2617,7 @@ async function _loadFdCompany(companyId, force) {
   if (!companyId) return null;
   if (!force && _fdCompanyCache.has(companyId)) return _fdCompanyCache.get(companyId);
   try {
-    const c = await freshdeskFetch('companies/' + companyId);
+    const c = await freshdeskFetch('companies/' + _crmId(companyId));
     const obj = {
       id: c.id,
       name: c.name || '',
@@ -2783,7 +2783,7 @@ async function _loadFdCannedResponses() {
     const folders = await freshdeskFetch('canned_response_folders');
     for (const f of (Array.isArray(folders) ? folders : [])) {
       try {
-        const responses = await freshdeskFetch('canned_response_folders/' + f.id + '/responses');
+        const responses = await freshdeskFetch('canned_response_folders/' + _crmId(f.id) + '/responses');
         for (const r of (Array.isArray(responses) ? responses : [])) {
           all.push({
             id: r.id,
@@ -2861,7 +2861,7 @@ async function openMarketingEmailModal(ticketId, opts) {
 
   try {
     // Empfänger-Daten holen
-    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const t = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester');
     const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
     if (!r || !r.email) {
       document.getElementById('memContent').innerHTML = '<p class="text-sm text-amber-700">Keine E-Mail-Adresse beim Anfragenden gefunden.</p>';
@@ -3051,7 +3051,7 @@ async function openTicketActionMenu(ticketId) {
   `, { maxWidth: 'max-w-lg' });
   if (window.lucide) lucide.createIcons();
   try {
-    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const t = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester');
     const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
     const wrap = document.getElementById('tamContent');
     if (!wrap) return;
@@ -3240,7 +3240,7 @@ async function bulkAnalyzeVisibleTickets(btnEl) {
   toast('Bulk-Analyse läuft für ' + visibleTickets.length + ' Ticket(s)…', 'info', 4000);
   for (const tid of visibleTickets) {
     try {
-      const t = await freshdeskFetch('tickets/' + tid + '?include=requester');
+      const t = await freshdeskFetch('tickets/' + _crmId(tid) + '?include=requester');
       if (!t || !t.id) { stats.errors++; continue; }
       // === Smart-Skip 1: KI-Analyse nur wenn noch keine KI-Notiz als letzte Notiz im Ticket ===
       let aiSkip = false;
@@ -3322,7 +3322,7 @@ Antworte AUSSCHLIESSLICH mit dem Stichpunkt, kein Text drumherum.`;
     topic = (ticket.subject || '(ohne Betreff)').slice(0, 60);
   }
   const newTitle = `Anfrage „FT-${ticket.id}" von „${firma}" für „${topic}"`;
-  await proxyFetch('freshdesk/api/v2/tickets/' + ticket.id, {
+  await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticket.id), {
     method: 'PUT',
     body: { subject: newTitle }
   });
@@ -3378,7 +3378,7 @@ async function _autoAnalyzeTicketHeadless(t) {
   let requester = null;
   try {
     // include=requester liefert direkt den Contact-Block mit Name/Phone/Email/Company
-    const fresh = await freshdeskFetch('tickets/' + t.id + '?include=requester');
+    const fresh = await freshdeskFetch('tickets/' + _crmId(t.id) + '?include=requester');
     if (fresh && fresh.id) {
       ticket = fresh;
       requester = fresh.requester || null;
@@ -3391,7 +3391,7 @@ async function _autoAnalyzeTicketHeadless(t) {
   // 2) Conversations chronologisch laden
   let conversations = [];
   try {
-    const conv = await freshdeskFetch('tickets/' + t.id + '/conversations');
+    const conv = await freshdeskFetch('tickets/' + _crmId(t.id) + '/conversations');
     conversations = (Array.isArray(conv) ? conv : []).slice()
       .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
   } catch (_) {}
@@ -3489,7 +3489,7 @@ ${fullText}${imageHint}${otherHint}`;
   if (!summary) return false;
   const noteHtml = '<p><strong>' + FD_AI_SUMMARY_MARKER + '</strong> · auto-analysiert am ' + escapeHtml(new Date().toLocaleString('de-DE')) + '</p>' +
                    '<p>' + escapeHtml(summary).replace(/\n/g, '<br>') + '</p>';
-  await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
+  await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(t.id) + '/notes', {
     method: 'POST',
     body: { body: noteHtml, private: true }
   });
@@ -4066,9 +4066,9 @@ async function _aocBuildSystemPrompt() {
   const ticketId = _aocState.ticketId;
   const cur = getCurrentCompany();
   let ticket = null, conversations = [];
-  try { ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester'); } catch (_) {}
+  try { ticket = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester'); } catch (_) {}
   try {
-    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
     conversations = (Array.isArray(conv) ? conv : []).slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
   } catch (_) {}
 
@@ -5525,9 +5525,9 @@ async function _aqcBuildSystemPrompt() {
 
   // Ticket-Daten frisch laden
   let ticket = null, conversations = [];
-  try { ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester'); } catch (_) {}
+  try { ticket = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester'); } catch (_) {}
   try {
-    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
     conversations = (Array.isArray(conv) ? conv : []).slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
   } catch (_) {}
 
@@ -5796,10 +5796,10 @@ async function _aqcRunAnalysisOLD() {
   try {
     // 1. Ticket-Daten laden (Subject + erste Nachricht + Conversation)
     let ticket = null;
-    try { ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester'); } catch (e) { console.warn('[aqc] Ticket-Load fehlgeschlagen:', e.message); }
+    try { ticket = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester'); } catch (e) { console.warn('[aqc] Ticket-Load fehlgeschlagen:', e.message); }
     let conversations = [];
     try {
-      const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+      const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
       conversations = (Array.isArray(conv) ? conv : []).slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
     } catch (_) {}
 
@@ -6939,7 +6939,7 @@ async function openFreshdeskTicket(ticketId) {
 
   try {
     // Eine Anfrage holt Ticket + Requester (per include). Conversations lazy.
-    const ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const ticket = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester');
     _fdTicketState.ticket = ticket;
     _fdTicketState.requester = ticket.requester || null;
     _renderFreshdeskTicket();
@@ -6997,7 +6997,7 @@ async function _loadLinkedQuotesAndCachedAi(ticketId) {
 
   // 2) Conversations für KI-Cache holen (best-effort, leise)
   try {
-    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
     const list = (Array.isArray(conv) ? conv : []).slice()
       .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     // Letzte private Note mit AI-Marker suchen
@@ -7177,11 +7177,11 @@ async function _fdFixRequesterFromBody(realEmail, realName) {
     }
     if (!newContactId) throw new Error('Keine Contact-ID erhalten');
     // 3) Ticket-Requester updaten
-    await proxyFetch('freshdesk/api/v2/tickets/' + t.id, { method: 'PUT', body: { requester_id: newContactId } });
+    await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(t.id), { method: 'PUT', body: { requester_id: newContactId } });
     toast('✓ Anfragender geändert auf ' + realEmail, 'success', 4500);
     // Ticket frisch laden + Modal neu rendern
     try {
-      const fresh = await freshdeskFetch('tickets/' + t.id + '?include=requester');
+      const fresh = await freshdeskFetch('tickets/' + _crmId(t.id) + '?include=requester');
       if (fresh) {
         _fdTicketState.ticket = fresh;
         _fdTicketState.requester = fresh.requester || null;
@@ -7462,13 +7462,13 @@ async function _fdDeleteConversation(ticketId, conversationId, btnEl) {
     /204/.test(msg);
   let success = false;
   try {
-    await proxyFetch('freshdesk/api/v2/conversations/' + conversationId, { method: 'DELETE' });
+    await proxyFetch('freshdesk/api/v2/conversations/' + _crmId(conversationId), { method: 'DELETE' });
     success = true;
   } catch (e) {
     if (isFalsePositive(e.message)) {
       // Verifizieren via GET: wenn 404 zurückkommt, war's erfolgreich
       try {
-        await freshdeskFetch('conversations/' + conversationId);
+        await freshdeskFetch('conversations/' + _crmId(conversationId));
         // Wenn GET klappt → Notiz existiert noch → echter Fehler
         toast('Löschen vermutlich fehlgeschlagen (Notiz existiert noch). Proxy-Fehler: ' + e.message, 'error', 7000);
       } catch (verifyErr) {
@@ -7503,7 +7503,7 @@ async function toggleFreshdeskTicketHistory() {
   if (_fdTicketState.showHistory && _fdTicketState.conversations === null) {
     _renderFreshdeskTicket(); // Loading-State zeigen
     try {
-      const conv = await freshdeskFetch('tickets/' + _fdTicketState.id + '/conversations');
+      const conv = await freshdeskFetch('tickets/' + _crmId(_fdTicketState.id) + '/conversations');
       // Sortiere chronologisch alt → neu
       const sorted = (Array.isArray(conv) ? conv : []).slice().sort(
         (a, b) => (a.created_at || '').localeCompare(b.created_at || '')
@@ -7600,7 +7600,7 @@ async function _downloadAttachmentAsBase64(att) {
 async function _ensureFreshdeskConversations() {
   if (_fdTicketState.conversations !== null) return;
   try {
-    const conv = await freshdeskFetch('tickets/' + _fdTicketState.id + '/conversations');
+    const conv = await freshdeskFetch('tickets/' + _crmId(_fdTicketState.id) + '/conversations');
     _fdTicketState.conversations = (Array.isArray(conv) ? conv : []).slice().sort(
       (a, b) => (a.created_at || '').localeCompare(b.created_at || '')
     );
@@ -7928,7 +7928,7 @@ async function _postFreshdeskQuoteCreatedNote(ticketId, quote, items, customerNa
     lines.push('<p>📂 <a href="' + escapeHtml(deepLink) + '" target="_blank">Angebot in ERP Hero öffnen</a></p>');
   }
   try {
-    await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', {
+    await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId) + '/notes', {
       method: 'POST',
       body: { body: lines.join(''), private: true }
     });
@@ -7960,7 +7960,7 @@ async function _fetchLastAiSummaryNote(ticketId) {
 // Sonst übersieht der KI-Badge-Check die KI-Notiz, sobald danach eine User-
 // Notiz dazukommt.
 async function _fetchTicketPrivateNoteScan(ticketId) {
-  const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+  const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
   const list = (Array.isArray(conv) ? conv : []).slice()
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
   const privates = list.filter(c => c && c.private);
@@ -8173,7 +8173,7 @@ WICHTIG: Antworte AUSSCHLIESSLICH mit dem Stichpunkt, kein Text drumherum, keine
 
   // Freshdesk-Update
   try {
-    await proxyFetch('freshdesk/api/v2/tickets/' + t.id, {
+    await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(t.id), {
       method: 'PUT',
       body: { subject: newTitle }
     });
@@ -8220,7 +8220,7 @@ async function saveFreshdeskTicketSummary(opts) {
       (silent ? ' · auto-gespeichert' : '') + '</p>' +
       '<p>' + escapeHtml(s).replace(/\n/g, '<br>') + '</p>' +
       '\n' + _encodeAiData(aiPayload);
-    await proxyFetch('freshdesk/api/v2/tickets/' + t.id + '/notes', {
+    await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(t.id) + '/notes', {
       method: 'POST',
       body: { body: noteHtml, private: true }
     });
@@ -8382,14 +8382,14 @@ async function _qnSave(ticketId) {
                  '<p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
     if (_quickNoteState.existingNoteId) {
       // UPDATE einer bestehenden Notiz via PUT /api/v2/conversations/{id}
-      await proxyFetch('freshdesk/api/v2/conversations/' + _quickNoteState.existingNoteId, {
+      await proxyFetch('freshdesk/api/v2/conversations/' + _crmId(_quickNoteState.existingNoteId), {
         method: 'PUT',
         body: { body: html }
       });
       toast('Notiz aktualisiert', 'success', 2500);
     } else {
       // Neue Notiz via POST /api/v2/tickets/{id}/notes
-      await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', {
+      await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId) + '/notes', {
         method: 'POST',
         body: { body: html, private: true }
       });
@@ -8656,22 +8656,22 @@ async function _aiCmdExecute(ticketId, actions) {
         const author = APP_KEYS.user?.name ? ' — ' + APP_KEYS.user.name : '';
         const ts = ' · ' + new Date().toLocaleString('de-DE');
         const html = '<p><strong>' + FD_INTERNAL_NOTE_MARKER + '</strong>' + escapeHtml(author) + escapeHtml(ts) + '</p><p>' + escapeHtml(text).replace(/\n/g, '<br>') + '</p>';
-        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/notes', { method: 'POST', body: { body: html, private: true } });
+        await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId) + '/notes', { method: 'POST', body: { body: html, private: true } });
         okCount++;
       } else if (a.type === 'set_status') {
         const code = _AI_CMD_STATUS_MAP[(a.status || '').toLowerCase()];
         if (!code) { errCount++; continue; }
-        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, { method: 'PUT', body: { status: code } });
+        await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId), { method: 'PUT', body: { status: code } });
         okCount++;
       } else if (a.type === 'assign_agent') {
         const id = Number(a.agent_id);
         if (!id) { errCount++; continue; }
-        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId, { method: 'PUT', body: { responder_id: id } });
+        await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId), { method: 'PUT', body: { responder_id: id } });
         okCount++;
       } else if (a.type === 'forward_email') {
         if (!a.to) { errCount++; continue; }
         // Freshdesk-Reply mit cc_emails leer + to_emails = Empfänger → als Forward markieren via Subject
-        await proxyFetch('freshdesk/api/v2/tickets/' + ticketId + '/forward', {
+        await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(ticketId) + '/forward', {
           method: 'POST',
           body: { body: (a.body || '').replace(/\n/g, '<br>'), to_emails: [a.to] }
         });
@@ -8867,7 +8867,7 @@ async function openTicketContactModal(ticketId) {
 
   try {
     // Ticket + Requester laden
-    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const t = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester');
     _tcmCtx.ticket = t;
     let fd = t?.requester || null;
     // Force-Refresh des Contacts (Adresse fehlt manchmal im Ticket-include)
@@ -9758,7 +9758,7 @@ async function _tcmLoadSuggestions(force) {
   try {
     // Conversations für Signaturen + Verlauf
     let conv = [];
-    try { conv = await freshdeskFetch('tickets/' + ctx.ticketId + '/conversations'); } catch (_) {}
+    try { conv = await freshdeskFetch('tickets/' + _crmId(ctx.ticketId) + '/conversations'); } catch (_) {}
     const raw = await _tcmAiSuggest(ctx.fd, ctx.fdCompany, ctx.ticket, conv, ctx.master);
     const norm = {};
     ['name','email','phone','mobile','job_title','address',
@@ -9791,7 +9791,7 @@ async function _tcmAiSuggest(contact, company, ticket, conv, master) {
     try {
       console.log('[aiSuggest] suche weitere Tickets für Contact', contact.id);
       // Letzte ~8 Tickets desselben Kontakts (außer dem aktuellen)
-      const other = await freshdeskFetch('contacts/' + contact.id + '/tickets?per_page=8').catch(()=>null);
+      const other = await freshdeskFetch('contacts/' + _crmId(contact.id) + '/tickets?per_page=8').catch(()=>null);
       const list = Array.isArray(other) ? other : (other?.tickets || []);
       const filtered = list.filter(t => t.id !== ticket.id).slice(0, 6);
       if (filtered.length) {
@@ -10145,7 +10145,7 @@ async function _tcmSaveFd(btnEl) {
   ctx.dirty = true;
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Speichere…'; if (window.lucide) lucide.createIcons(); }
   try {
-    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: fields });
+    await proxyFetch('freshdesk/api/v2/contacts/' + _crmId(ctx.fd.id), { method: 'PUT', body: fields });
     _fdContactCache.delete(ctx.fd.id);
     _fdAiSummaryCache.delete(ctx.ticketId);
     ctx.saving = false;
@@ -10204,7 +10204,7 @@ async function _tcmSaveCompany(btnEl) {
 
   // Schritt 1: PUT versuchen
   try {
-    const res = await proxyFetch('freshdesk/api/v2/companies/' + companyId, { method: 'PUT', body: fields });
+    const res = await proxyFetch('freshdesk/api/v2/companies/' + _crmId(companyId), { method: 'PUT', body: fields });
     console.log('[tcmSaveCompany] PUT OK', res);
     saveOk = true;
   } catch (e) {
@@ -10337,12 +10337,12 @@ async function _tcmCreateFdCompany(btnEl) {
     }
     if (!createdId) throw new Error('Keine Company-ID erhalten');
     // FD-Contact verknüpfen
-    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: { company_id: createdId } });
+    await proxyFetch('freshdesk/api/v2/contacts/' + _crmId(ctx.fd.id), { method: 'PUT', body: { company_id: createdId } });
     // Bei Duplikat: Optional die bestehende Firma mit den frischen Daten patchen
     // damit unsere Notiz / Adresse mit drauf kommt.
     if (wasDuplicate && noteLines.length) {
       try {
-        await proxyFetch('freshdesk/api/v2/companies/' + createdId, { method: 'PUT', body: { note: noteLines.join('\n') } });
+        await proxyFetch('freshdesk/api/v2/companies/' + _crmId(createdId), { method: 'PUT', body: { note: noteLines.join('\n') } });
       } catch (eUpd) {
         console.warn('[tcmCreateFdCompany] PUT auf bestehende Firma fehlgeschlagen:', eUpd.message);
       }
@@ -10421,7 +10421,7 @@ async function _tcmSaveFs(btnEl) {
   toast('Speichere in Freshsales…', 'info', 2500);
 
   try {
-    const res = await proxyFetch('freshsales/api/sales_accounts/' + accountId, {
+    const res = await proxyFetch('freshsales/api/sales_accounts/' + _crmId(accountId), {
       method: 'PUT',
       body: { sales_account: sales }
     });
@@ -10501,7 +10501,7 @@ async function _tcmSaveFsContact(btnEl) {
     //    bricht, holen wir den vollen Contact und senden ihn komplett.
     let res;
     try {
-      res = await proxyFetch('freshsales/api/contacts/' + contactId, {
+      res = await proxyFetch('freshsales/api/contacts/' + _crmId(contactId), {
         method: 'PUT',
         body: { contact: contactBody }
       });
@@ -10538,7 +10538,7 @@ async function _tcmSaveFsContact(btnEl) {
             }
           }
           console.log('[tcmSaveFsContact] PUT full body:', full);
-          res = await proxyFetch('freshsales/api/contacts/' + contactId, {
+          res = await proxyFetch('freshsales/api/contacts/' + _crmId(contactId), {
             method: 'PUT',
             body: { contact: full }
           });
@@ -10644,7 +10644,7 @@ async function _tcmCreateCompanyFromCtx(btnEl) {
       }
     }
     // Contact mit Firma verknüpfen (egal ob neu oder existierend)
-    await proxyFetch('freshdesk/api/v2/contacts/' + ctx.fd.id, { method: 'PUT', body: { company_id: createdId } });
+    await proxyFetch('freshdesk/api/v2/contacts/' + _crmId(ctx.fd.id), { method: 'PUT', body: { company_id: createdId } });
     // Lokal nachziehen
     ctx.fd.company_id = createdId;
     const fresh = await _loadFdCompany(createdId, true);
@@ -10805,12 +10805,12 @@ async function showAiSummaryQuickView(ticketId) {
     // Anfrager + ERP-Status + Anhänge laden
     (async () => {
       try {
-        const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+        const t = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester');
         const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
         // Conversations für Anhänge holen
         let conversations = [];
         try {
-          const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+          const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
           conversations = Array.isArray(conv) ? conv : [];
         } catch (_) {}
         // ERP-Status check (per Email)
@@ -10897,7 +10897,7 @@ async function _qvCreateContactInErp(ticketId, btnEl) {
   if (btnEl) { btnEl.disabled = true; btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Lade…'; if (window.lucide) lucide.createIcons(); }
   try {
     // 1. Frischen Ticket + Requester holen
-    const t = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const t = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester');
     const r = t?.requester || (t?.requester_id ? await _loadFdContact(t.requester_id).catch(()=>null) : null);
     if (!r || !r.email) throw new Error('Keine E-Mail-Adresse beim Anfragenden gefunden');
 
@@ -12200,6 +12200,17 @@ function _proxyErrorMessage(e) {
     else msg += ': ' + e.text.slice(0, 200);
   }
   return msg;
+}
+
+// Freshdesk- und Freshsales-IDs sind Zahlen (der Server lässt an ID-Stellen nur Ziffern durch).
+// Nur so eine ID kommt in einen Proxy-Pfad: Der Browser löst '..' im Pfad auf, eine „ID" wie
+// '../contacts/9' aus einem Kundenfeld träfe sonst einen anderen Endpoint. Sonst: Fehler, nichts gesendet.
+function _crmId(id, message) {
+  const s = String(id ?? '').trim();
+  if (/^\d+$/.test(s)) return s;
+  const err = new Error(message || 'Ungültige CRM-ID – Anfrage abgebrochen.');
+  err.type = 'INVALID_CRM_ID';
+  throw err;
 }
 
 async function proxyFetch(path, opts = {}) {
@@ -15770,7 +15781,7 @@ async function _fsCheckCustomFieldsStatus(force) {
     const linked = customers.find(c => c?.fields?.freshsales_account_id);
     if (linked?.fields?.freshsales_account_id) {
       try {
-        const detail = await proxyFetch('freshsales/api/sales_accounts/' + linked.fields.freshsales_account_id);
+        const detail = await proxyFetch('freshsales/api/sales_accounts/' + _crmId(linked.fields.freshsales_account_id));
         sampleAccount = detail?.sales_account || detail;
         if (sampleAccount?.id) sampleSource = 'erp-link (' + linked.fields.name1 + ')';
       } catch (e) {
@@ -15786,7 +15797,7 @@ async function _fsCheckCustomFieldsStatus(force) {
         const lookup = await proxyFetch('freshsales/api/lookup?q=' + seed + '&f=name&entities=sales_account');
         const list = lookup?.sales_accounts?.sales_accounts || lookup?.accounts || lookup?.results || [];
         if (Array.isArray(list) && list[0]?.id) {
-          const detail = await proxyFetch('freshsales/api/sales_accounts/' + list[0].id);
+          const detail = await proxyFetch('freshsales/api/sales_accounts/' + _crmId(list[0].id));
           sampleAccount = detail?.sales_account || detail;
           if (sampleAccount?.id) { sampleSource = 'lookup-seed:"' + seed + '" (' + (sampleAccount.name || '?') + ')'; break; }
         }
@@ -17838,7 +17849,7 @@ async function syncCustomerToFreshdesk(customerId, btnEl, opts) {
     const existingFdId = (f.freshdesk_company_id || '').trim();
     let result;
     if (existingFdId) {
-      result = await proxyFetch('freshdesk/api/v2/companies/' + existingFdId, { method: 'PUT', body: payload });
+      result = await proxyFetch('freshdesk/api/v2/companies/' + _crmId(existingFdId, 'Ungültige Freshdesk-Firmen-ID beim Kunden – Sync abgebrochen.'), { method: 'PUT', body: payload });
       if (!silent) toast('Freshdesk-Firma aktualisiert: ' + (result?.name || f.name1), 'success', 3500);
     } else {
       try {
@@ -17851,7 +17862,7 @@ async function syncCustomerToFreshdesk(customerId, btnEl, opts) {
             const search = await proxyFetch('freshdesk/api/v2/companies/autocomplete?name=' + encodeURIComponent(payload.name));
             const hit = (search?.companies || [])[0] || (Array.isArray(search) ? search[0] : null);
             if (hit?.id) {
-              result = await proxyFetch('freshdesk/api/v2/companies/' + hit.id, { method: 'PUT', body: payload });
+              result = await proxyFetch('freshdesk/api/v2/companies/' + _crmId(hit.id, 'Freshdesk lieferte eine ungültige Firmen-ID – Sync abgebrochen.'), { method: 'PUT', body: payload });
               if (!silent) toast('Existierende Freshdesk-Firma aktualisiert: ' + (result?.name || f.name1), 'success', 3500);
             } else {
               throw e1;
@@ -17875,7 +17886,8 @@ async function syncCustomerToFreshdesk(customerId, btnEl, opts) {
     return true;
   } catch (e) {
     const m = (e.message || String(e));
-    let userMsg = 'Sync fehlgeschlagen: ' + m;
+    // Bei einer ungültigen ID sagt die Meldung selbst schon, dass der Sync abgebrochen ist.
+    let userMsg = e.type === 'INVALID_CRM_ID' ? m : 'Sync fehlgeschlagen: ' + m;
     if (/FRESHDESK_DOMAIN|FRESHDESK_API_KEY/i.test(m)) {
       userMsg = 'Freshdesk ist auf dem Server nicht eingerichtet — Railway-Variablen FRESHDESK_DOMAIN und FRESHDESK_API_KEY setzen oder unter Admin → Benutzer einen eigenen Freshdesk-Key eintragen.';
     } else if (/401|403/.test(m)) {
@@ -17909,7 +17921,7 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
     const existingFsId = (f.freshsales_account_id || '').trim();
     let result;
     if (existingFsId) {
-      result = await proxyFetch('freshsales/api/sales_accounts/' + existingFsId, {
+      result = await proxyFetch('freshsales/api/sales_accounts/' + _crmId(existingFsId, 'Ungültige Freshsales-Account-ID beim Kunden – Sync abgebrochen.'), {
         method: 'PUT', body: { sales_account: fs }
       });
       if (!silent) toast('Freshsales-Account aktualisiert: ' + (result?.sales_account?.name || fs.name), 'success', 3500);
@@ -17953,7 +17965,7 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
       }
 
       if (foundId) {
-        result = await proxyFetch('freshsales/api/sales_accounts/' + foundId, {
+        result = await proxyFetch('freshsales/api/sales_accounts/' + _crmId(foundId, 'Freshsales lieferte eine ungültige Account-ID – Sync abgebrochen.'), {
           method: 'PUT', body: { sales_account: fs }
         });
         if (!silent) toast('Existierenden Freshsales-Account verknüpft + aktualisiert: ' + (foundName || fs.name), 'success', 4500);
@@ -17975,7 +17987,8 @@ async function syncCustomerToFreshsales(customerId, btnEl, opts) {
     return true;
   } catch (e) {
     const m = (e.message || String(e));
-    let userMsg = 'Sync fehlgeschlagen: ' + m;
+    // Bei einer ungültigen ID sagt die Meldung selbst schon, dass der Sync abgebrochen ist.
+    let userMsg = e.type === 'INVALID_CRM_ID' ? m : 'Sync fehlgeschlagen: ' + m;
     if (/FRESHSALES_SUBDOMAIN|FRESHSALES_API_KEY/i.test(m)) {
       userMsg = 'Freshsales ist auf dem Server nicht eingerichtet — Railway-Variablen FRESHSALES_SUBDOMAIN und FRESHSALES_API_KEY setzen.';
     } else if (/404/.test(m)) {
@@ -19032,10 +19045,10 @@ async function _aacMaybeLoadFdTicket(userText) {
   if (!m) return null;
   const ticketId = m[1];
   try {
-    const ticket = await freshdeskFetch('tickets/' + ticketId + '?include=requester');
+    const ticket = await freshdeskFetch('tickets/' + _crmId(ticketId) + '?include=requester');
     let conversations = [];
     try {
-      const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+      const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
       conversations = Array.isArray(conv) ? conv : [];
     } catch (_) {}
     // Bild- + PDF-Anhaenge sammeln + base64 laden
@@ -19467,7 +19480,7 @@ async function _aacCreateArticle() {
     // 5) FD-Notiz im Ticket (best-effort)
     if (p.source_freshdesk_ticket_id) {
       try {
-        await proxyFetch('freshdesk/api/v2/tickets/' + p.source_freshdesk_ticket_id + '/notes', {
+        await proxyFetch('freshdesk/api/v2/tickets/' + _crmId(p.source_freshdesk_ticket_id) + '/notes', {
           method: 'POST',
           body: {
             body: '<p><strong>📦 Artikel im ERP angelegt</strong> · ' + new Date().toLocaleString('de-DE') + '</p>'
@@ -21847,12 +21860,12 @@ async function loadQuoteFreshdeskAttachments(ticketId) {
   const all = [];
   try {
     // Ticket-Attachments (zur Description)
-    const ticket = await freshdeskFetch('tickets/' + ticketId);
+    const ticket = await freshdeskFetch('tickets/' + _crmId(ticketId));
     if (Array.isArray(ticket.attachments)) {
       ticket.attachments.forEach(a => all.push({ ...a, _source: 'Erste Nachricht', _date: ticket.created_at }));
     }
     // Conversation-Attachments
-    const conv = await freshdeskFetch('tickets/' + ticketId + '/conversations');
+    const conv = await freshdeskFetch('tickets/' + _crmId(ticketId) + '/conversations');
     (Array.isArray(conv) ? conv : []).forEach(c => {
       if (Array.isArray(c.attachments)) {
         c.attachments.forEach(a => all.push({
