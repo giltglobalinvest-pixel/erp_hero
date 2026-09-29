@@ -16135,6 +16135,9 @@ async function renderAdminSettings() {
                     <button type="button" onclick="_mcTestConnection('${c.id}', this)" class="text-xs px-3 py-1.5 border border-blue-300 text-blue-700 hover:bg-blue-50 rounded inline-flex items-center gap-1">
                       <i data-lucide="zap" class="w-3 h-3"></i> Verbindung testen
                     </button>
+                    ${hasKey ? `<button type="button" onclick="_mcRemoveKey('${c.id}', this)" class="text-xs px-3 py-1.5 border border-red-300 text-red-700 hover:bg-red-50 rounded inline-flex items-center gap-1" title="Gespeicherten API-Key vom Server löschen">
+                      <i data-lucide="trash-2" class="w-3 h-3"></i> Key entfernen
+                    </button>` : ''}
                     <button type="button" onclick="_mcSaveCompany('${c.id}', this)" class="ml-auto text-xs px-3 py-1.5 bg-brand-500 hover:bg-brand-600 text-white rounded inline-flex items-center gap-1 font-medium">
                       <i data-lucide="save" class="w-3 h-3"></i> Speichern
                     </button>
@@ -16459,6 +16462,26 @@ async function _mcSaveCompany(companyId, btnEl) {
     if (status) status.innerHTML = '<span class="text-red-700">' + escapeHtml(e.message) + '</span>';
   } finally {
     if (btnEl) { btnEl.disabled = false; btnEl.innerHTML = origHtml || '<i data-lucide="save" class="w-3 h-3"></i> Speichern'; if (window.lucide) lucide.createIcons(); }
+  }
+}
+
+// Löscht den gespeicherten Mailchimp-Key eines Mandanten auf dem Server. Server-Prefix und Audience
+// bleiben am Company-Record.
+async function _mcRemoveKey(companyId, btnEl) {
+  const c = APP_KEYS.companies.find(x => x.id === companyId);
+  if (!c) return;
+  if (!confirm('Mailchimp-Key von „' + c.name + '" wirklich entfernen?\n\nServer-Prefix und Audience bleiben gespeichert.')) return;
+  if (btnEl) btnEl.disabled = true;
+  try {
+    const r = await _api('PATCH', '/admin/companies/' + encodeURIComponent(companyId) + '/secrets', {
+      body: { mailchimp_api_key: null }
+    });
+    c.has_mailchimp_key = !!(r && r.has_mailchimp_key);
+    toast('Mailchimp-Key entfernt', 'success', 2500);
+    renderAdminSettings();
+  } catch (e) {
+    toast(e.message, 'error', 7000);
+    if (btnEl) btnEl.disabled = false;
   }
 }
 

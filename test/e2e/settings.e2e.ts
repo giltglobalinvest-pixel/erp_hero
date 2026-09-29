@@ -233,6 +233,52 @@ describe('settings page', () => {
     await h.assertClean(page);
   });
 
+  it('removes a stored Mailchimp key after a confirmation and keeps the server prefix and audience', async () => {
+    const beta = h.companies.beta;
+    await h.apiAs('admin', 'PATCH', `/api/admin/companies/${beta}/secrets`, { mailchimp_api_key: 'mc-key-beta-us19' });
+    await h.apiAs('admin', 'PATCH', `/api/data/Company/${beta}`, {
+      fields: { mailchimp_server_prefix: 'us19', mailchimp_list_id: 'list19' },
+    });
+    const row = `[data-mc-row-company="${beta}"]`;
+    const page = await h.newPage();
+    await openSettings(page);
+    const removeButton = page.locator(`${row} button`, { hasText: 'Key entfernen' });
+    expect(await removeButton.count()).toBe(1);
+    const sent: (string | null)[] = [];
+    page.on('request', (r) => {
+      if (r.url().startsWith(h.baseUrl + '/api/admin/companies/')) sent.push(r.postData());
+    });
+    const asked: string[] = [];
+    let accept = false;
+    page.on('dialog', (d) => {
+      asked.push(d.message());
+      void (accept ? d.accept() : d.dismiss());
+    });
+
+    // Cancelled: nothing is sent, and the key stays.
+    await removeButton.click();
+    expect(asked.length).toBe(1);
+    expect(await h.deps.secrets.mailchimpKey(beta)).toBe('mc-key-beta-us19');
+
+    accept = true;
+    await removeButton.click();
+    await toast(page, 'Mailchimp-Key entfernt');
+    // The re-rendered row treats Beta as not linked: no "gespeichert", no remove button.
+    await page.locator(`${row} [data-mc-input="api_key"][placeholder="xxxxx-us21"]`).waitFor();
+    expect(await page.locator(`${row} label`).first().innerText()).toBe('API-Key');
+    expect(await removeButton.count()).toBe(0);
+    const question = 'Mailchimp-Key von „Beta AG" wirklich entfernen?\n\nServer-Prefix und Audience bleiben gespeichert.';
+    expect(asked).toEqual([question, question]);
+    expect(sent).toEqual([JSON.stringify({ mailchimp_api_key: null })]);
+    expect(await h.deps.secrets.mailchimpKey(beta)).toBe(null);
+    expect(
+      await h.run(page, `return APP_KEYS.companies.find(x => x.id === ${JSON.stringify(beta)}).has_mailchimp_key;`),
+    ).toBe(false);
+    const fields = await companyFields(beta);
+    expect([fields.mailchimp_server_prefix, fields.mailchimp_list_id]).toEqual(['us19', 'list19']);
+    await h.assertClean(page);
+  });
+
   it('saves the Freshsales subdomain without a token field and tests the server key', async () => {
     h.fake.on('GET', 'https://gilt.freshworks.com/crm/sales/api/lookup', () => jsonResponse({}));
     const page = await h.newPage();
