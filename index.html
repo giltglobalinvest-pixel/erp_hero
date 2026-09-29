@@ -1284,6 +1284,8 @@ function _errorMessageFrom(data, text, status) {
 // Zentraler HTTP-Helper. Auth läuft über das HttpOnly-Session-Cookie — kein Token im Browser.
 // Fehler: Error(message) mit .status, .type (Server-Fehlertyp), .body (JSON) und .text (Rohtext).
 async function _api(method, path, { body, headers, keepalive, reauth = true } = {}) {
+  // Anmeldestand beim Absenden (siehe _reauth).
+  const loginGeneration = _loginGeneration;
   const h = Object.assign({ 'Accept': 'application/json' }, headers || {});
   let payload;
   if (body instanceof FormData || typeof body === 'string') {
@@ -1320,7 +1322,8 @@ async function _api(method, path, { body, headers, keepalive, reauth = true } = 
     // Sitzung abgelaufen: neu anmelden (Overlay) und den Aufruf genau einmal wiederholen.
     // Ein 401 vom Upstream (z.B. Freshdesk lehnt den Key ab) hat keinen Typ und wird normal geworfen.
     if (res.status === 401 && type === 'UNAUTHENTICATED' && reauth) {
-      await _reauth();
+      // Wurde seit dem Absenden schon neu angemeldet, reicht die Wiederholung.
+      if (loginGeneration === _loginGeneration) await _reauth();
       return _api(method, path, { body, headers, keepalive, reauth: false });
     }
     const err = new Error(_errorMessageFrom(data, text, res.status));
@@ -1336,9 +1339,80 @@ async function _api(method, path, { body, headers, keepalive, reauth = true } = 
   return isJson ? data : text;
 }
 
-// Platzhalter bis zum Re-Login-Overlay: eine abgelaufene Sitzung ist ein normaler Fehler.
-async function _reauth() {
-  throw new Error('Sitzung abgelaufen');
+/* Re-Login bei abgelaufener Sitzung: ein Overlay über allem, das offene Formular bleibt stehen.
+   Alle Aufrufe, die gerade auf die Anmeldung warten, teilen sich ein Promise. */
+let _reauthPromise = null;
+// Zählt erfolgreiche Re-Logins. Eine 401 auf eine Anfrage, die vor dem letzten
+// Re-Login abgeschickt wurde, wird ohne neues Overlay wiederholt (siehe _api).
+let _loginGeneration = 0;
+
+function _reauth() {
+  if (!_reauthPromise) {
+    _reauthPromise = _showReauthOverlay().finally(() => { _reauthPromise = null; });
+  }
+  return _reauthPromise;
+}
+
+// Erfüllt sich nach dem Login desselben Users; „Abbrechen" lehnt ab.
+// Meldet sich ein anderer User an, lädt die App neu (nichts vom alten Stand bleibt).
+function _showReauthOverlay() {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('div');
+    el.id = 'reauthOverlay';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    // Über den Lade-Overlays (z-index 99999) und beiden Modal-Ebenen.
+    el.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(15,23,42,0.55);display:flex;align-items:center;justify-content:center;padding:16px;';
+    el.innerHTML = `
+      <form id="reauthForm" autocomplete="off" style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:380px;box-shadow:0 20px 50px rgba(15,23,42,0.35);">
+        <p style="font-weight:600;font-size:16px;margin:0 0 6px;">Sitzung abgelaufen – bitte Login-Key erneut eingeben</p>
+        <p style="font-size:13px;color:#64748b;margin:0 0 16px;">Deine Eingaben bleiben erhalten. Nach dem Anmelden geht es an derselben Stelle weiter.</p>
+        <input id="reauthKey" type="password" autocomplete="current-password" placeholder="Login-Key" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:14px;">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;color:#334155;">
+          <input id="reauthRemember" type="checkbox"> Angemeldet bleiben
+        </label>
+        <p id="reauthError" class="hidden" style="color:#b91c1c;font-size:13px;margin:12px 0 0;"></p>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
+          <button id="reauthCancel" type="button" style="padding:8px 14px;border-radius:10px;border:1px solid #cbd5e1;background:#fff;font-size:14px;">Abbrechen</button>
+          <button id="reauthSubmit" type="submit" style="padding:8px 14px;border-radius:10px;border:0;background:#0f172a;color:#fff;font-size:14px;">Anmelden</button>
+        </div>
+      </form>`;
+    document.body.appendChild(el);
+    const keyEl = el.querySelector('#reauthKey');
+    const rememberEl = el.querySelector('#reauthRemember');
+    const errEl = el.querySelector('#reauthError');
+    const submitEl = el.querySelector('#reauthSubmit');
+    // Wie beim letzten Login: „Angemeldet bleiben" aus dem Login-Formular übernehmen.
+    rememberEl.checked = !!document.getElementById('loginRememberMe')?.checked;
+    const showError = (msg) => { errEl.textContent = msg; errEl.classList.remove('hidden'); };
+    el.querySelector('#reauthCancel').addEventListener('click', () => {
+      el.remove();
+      reject(new Error('Sitzung abgelaufen'));
+    });
+    el.querySelector('#reauthForm').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const key = keyEl.value.trim();
+      if (!key) { showError('Bitte Key eingeben.'); return; }
+      submitEl.disabled = true;
+      try {
+        const data = await _api('POST', '/auth', {
+          body: { user_key: key, long_lived: rememberEl.checked },
+          reauth: false
+        });
+        keyEl.value = '';
+        if (!APP_KEYS.user || data.user.id !== APP_KEYS.user._id) { location.reload(); return; }
+        _applyServerUser(data.user);
+        _loginGeneration++;
+        el.remove();
+        resolve();
+      } catch (e) {
+        showError(e.message);
+      } finally {
+        submitEl.disabled = false;
+      }
+    });
+    setTimeout(() => keyEl.focus(), 50);
+  });
 }
 
 function _prefixError(prefix, e) {
