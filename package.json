@@ -11,8 +11,9 @@
     "start": "node dist/server/main.js",
     "dev": "tsx watch server/main.ts",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "lint": "eslint server test vitest.config.ts",
+    "lint": "eslint server test vitest.config.ts vitest.e2e.config.ts",
     "user:create": "node dist/server/cli/user-create.js",
     "db:activate": "node dist/server/cli/db-activate.js",
     "import:airtable": "node dist/server/cli/import-airtable.js"
@@ -28,6 +29,7 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.20.4",
     "eslint": "^10.11.0",
+    "playwright-core": "1.56.1",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.1",

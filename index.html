@@ -27866,15 +27866,8 @@ function showLoginScreen() {
   document.getElementById('appShell').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('hidden');
   document.getElementById('loginVersionLabel').textContent = APP_VERSION;
-  // Hinweis im Login-Hint, wenn Proxy noch nicht eingerichtet ist
   const hintEl = document.getElementById('loginHint');
-  if (hintEl) {
-    if (!APP_KEYS.apiProxyUrl) {
-      hintEl.innerHTML = '<span class="text-amber-200">⚠ Setup-Modus — API-Proxy noch nicht konfiguriert. Login funktioniert, aber als Admin bitte direkt nach dem Einloggen zu „Einstellungen" gehen und den Wizard durchspielen.</span>';
-    } else {
-      hintEl.textContent = 'Den Key bekommst du vom Admin.';
-    }
-  }
+  if (hintEl) hintEl.textContent = 'Den Key bekommst du vom Admin.';
   setTimeout(() => document.getElementById('loginKey')?.focus(), 50);
 }
 
@@ -34243,14 +34236,10 @@ async function init() {
   document.getElementById('loginVersionLabel').textContent = APP_VERSION;
   setupPwaAssets();
 
-  // 1) Master-Base Keys laden (read-only, kein User nötig). Liefert vor allem
-  //    apiProxyUrl, ohne die kein /me-Call gegen Val.town möglich wäre.
-  await loadProjectKeys();
-
-  // 2) Default-Status der "Angemeldet bleiben"-Checkbox je Gerät
+  // 1) Default-Status der "Angemeldet bleiben"-Checkbox je Gerät
   _setDefaultRememberMe();
 
-  // 3) Auto-Login: Session-Token validieren oder legacy User-Key migrieren
+  // 2) Auto-Login: Session-Token validieren oder legacy User-Key migrieren
   const ok = await tryAutoLogin();
   if (ok) showApp();
   else showLoginScreen();
