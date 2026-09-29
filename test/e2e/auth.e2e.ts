@@ -121,6 +121,28 @@ describe('login and session', () => {
     await h.assertClean(page);
   });
 
+  it('says so when the Mandanten cannot be loaded at login, instead of opening silently without them', async () => {
+    const page = await h.newPage();
+    let reads = 0;
+    // A brief network hiccup hits only the first read of the active companies.
+    await page.route(
+      (url) => url.pathname === '/api/data/Company' && url.searchParams.get('filterByFormula') === "{status}='aktiv'",
+      (route) => (reads++ === 0 ? route.abort('connectionreset') : route.continue()),
+    );
+    await h.openApp(page, 'vera');
+    await page.waitForSelector('#appShell:not(.hidden)', { state: 'visible' });
+    expect(await h.run<number>(page, 'return APP_KEYS.companies.length;')).toBe(0);
+    expect(await page.locator('#toastWrap').textContent()).toBe(
+      'Mandanten konnten nicht geladen werden (Lesen fehlgeschlagen: Server nicht erreichbar – bitte Verbindung prüfen). Bitte neu laden.',
+    );
+
+    // As the toast says, a reload brings them back.
+    await page.reload();
+    await page.waitForSelector('#appShell:not(.hidden)', { state: 'visible' });
+    expect(await page.locator('#mandantLabel').textContent()).toBe('Alpha GmbH');
+    await h.assertClean(page);
+  });
+
   it('shows the login screen and a connection message when the server cannot be reached', async () => {
     const page = await h.newPage();
     // tryAutoLogin never throws: an unreachable /api/me must not leave the app on the boot screen.

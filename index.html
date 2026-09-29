@@ -1077,6 +1077,8 @@ async function loadCompanies() {
     records = await readData('Company', "{status}='aktiv'");
   } catch (e) {
     console.warn('Firmen konnten nicht geladen werden:', e.message);
+    // Ohne Mandanten lässt sich nichts speichern: sagen, was los ist (neu laden holt sie wieder).
+    toast('Mandanten konnten nicht geladen werden (' + e.message + '). Bitte neu laden.', 'error', 10000);
     APP_KEYS.companies = [];
     APP_KEYS.currentCompanyId = null;
     return;
