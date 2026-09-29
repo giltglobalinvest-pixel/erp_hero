@@ -17,7 +17,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 const callsTo = (prefix: string) => h.fake.calls.filter((c) => c.url.startsWith(prefix));

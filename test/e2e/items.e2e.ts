@@ -11,7 +11,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 // Written straight into the database: the API refuses text in number fields, but older data or an import can hold it.

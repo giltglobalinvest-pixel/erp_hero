@@ -9,7 +9,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 describe('boot', () => {

@@ -11,7 +11,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 const FD = 'https://flptest.freshdesk.com/api/v2/';

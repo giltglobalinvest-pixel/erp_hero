@@ -10,7 +10,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 const newCustomer = async (name1: string): Promise<string> =>

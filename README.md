@@ -16,3 +16,15 @@ It uses `playwright-core` (no bundled browser). Playwright finds the browser thr
 ```bash
 CHROMIUM_PATH=/usr/bin/chromium npm run test:e2e
 ```
+
+If no browser is installed, the run fails with `Executable doesn't exist at …`. Install the build that
+matches this `playwright-core` version with its own command line:
+
+```bash
+npx playwright-core install --only-shell chromium
+```
+
+`--only-shell` fetches only Chromium's headless shell, which the tests use. It goes to
+`PLAYWRIGHT_BROWSERS_PATH` if that is set, otherwise to Playwright's cache (`~/.cache/ms-playwright` on
+Linux). Don't use the `npx playwright install` that the error message suggests: this project has no
+`playwright` package, so npx would fetch one, and its version need not match.

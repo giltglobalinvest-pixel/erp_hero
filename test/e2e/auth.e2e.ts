@@ -10,7 +10,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 // APP_CONFIG.PROJECT_ID in index.html; the old token keys were named after it.

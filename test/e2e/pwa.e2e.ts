@@ -14,7 +14,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 const RAILWAY = 'https://erp-hero-production.up.railway.app/';

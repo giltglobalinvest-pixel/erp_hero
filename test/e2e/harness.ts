@@ -60,7 +60,27 @@ interface PageState {
   errors: string[];
 }
 
+type Undo = () => void | Promise<void>;
+
 export async function startHarness(): Promise<Harness> {
+  // If a step fails, for example because Chromium cannot start, the steps before it are undone
+  // (server closed, database closed, data dir removed), and the error is rethrown.
+  const undo: Undo[] = [];
+  try {
+    return await createHarness(undo);
+  } catch (e) {
+    for (const step of undo.reverse()) {
+      try {
+        await step();
+      } catch {
+        // The startup error is the one to report.
+      }
+    }
+    throw e;
+  }
+}
+
+async function createHarness(undo: Undo[]): Promise<Harness> {
   // The handler is attached once the port is known, so PUBLIC_ORIGIN matches the page's Origin exactly.
   let handler: ((request: Request, env: unknown) => Response | Promise<Response>) | null = null;
   let server!: ServerType;
@@ -74,11 +94,14 @@ export async function startHarness(): Promise<Harness> {
       (info) => resolve(info.port),
     );
   });
+  undo.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const baseUrl = `http://127.0.0.1:${port}`;
 
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'erp-e2e-'));
+  undo.push(() => rm(dataDir, { recursive: true, force: true }));
   const config = loadConfig(testEnv(dataDir, { PUBLIC_ORIGIN: baseUrl }), ROOT_DIR);
   const db = await openDatabase(path.join(dataDir, 'erp.db'));
+  undo.push(() => db.close());
   await runMigrations(db);
   const fake = new FakeFetch();
   const logs: Record<string, unknown>[] = [];

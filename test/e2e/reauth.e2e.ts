@@ -16,7 +16,7 @@ afterEach(async () => {
   await h.resetContexts();
 });
 afterAll(async () => {
-  await h.close();
+  await h?.close();
 });
 
 const OVERLAY_TEXT = 'Sitzung abgelaufen – bitte Login-Key erneut eingeben';
