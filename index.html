@@ -1513,10 +1513,13 @@ function _stripEmptyDateFields(fields, dateKeys) {
 }
 
 async function writeData(table, fields, opts = {}) {
+  const peeked = _peekedKey(table, fields);
   let created;
   try {
     created = await _api('POST', _dataPath(table), { body: _writeBody(fields, opts) });
   } catch (e) {
+    // Ohne Antwort (Verbindung weg, Antwort unlesbar) bleibt offen, ob der Server gespeichert hat.
+    if (peeked && e && e.status === undefined) _uncertainNumbers.add(peeked);
     let recovered = null;
     try {
       recovered = await _recoverNumberConflict(table, fields, opts, e);
@@ -1526,6 +1529,8 @@ async function writeData(table, fields, opts = {}) {
     if (!recovered) throw _prefixError('Schreiben fehlgeschlagen: ', e);
     created = recovered;
   }
+  // Der Vorschlag ist verbraucht: eine spätere Kollision darauf kommt nicht von einem Kollegen.
+  if (peeked) { _peekedNumbers.delete(peeked); _uncertainNumbers.delete(peeked); }
   // === Lazy-Push-Trigger ===
   // Wenn ein Customer in einem Geschäftsvorgang (Quote/Order/Invoice/...) verwendet
   // wird, pushen wir den Customer-Stand silent an die konfigurierten CRMs.
@@ -1619,6 +1624,15 @@ const _NUMBER_TABLES = {
 // Vorschläge dieser Sitzung als "Tabelle|Nummer". Nur für sie vergibt writeData bei einer
 // Kollision eine neue Nummer — eine von Hand eingetippte Nummer wird nie ersetzt.
 const _peekedNumbers = new Set();
+// Vorschläge, deren Anlegen ohne Antwort endete: vielleicht hat der Server den Datensatz gespeichert.
+const _uncertainNumbers = new Set();
+
+// "Tabelle|Nummer", wenn fields einen Vorschlag dieser Sitzung trägt, sonst null.
+function _peekedKey(table, fields) {
+  const field = NUMBER_FIELDS[table];
+  const value = field && fields ? fields[field] : undefined;
+  return typeof value === 'string' && _peekedNumbers.has(table + '|' + value) ? table + '|' + value : null;
+}
 
 async function _peekNumber(type, companyId, base) {
   if (!companyId) throw new Error('Kein Mandant ausgewählt');
@@ -1638,6 +1652,14 @@ async function _recoverNumberConflict(table, fields, opts, e) {
   const field = NUMBER_FIELDS[table];
   const value = field && fields ? fields[field] : undefined;
   if (typeof value !== 'string' || !_peekedNumbers.has(table + '|' + value)) return null;
+  // Ein früherer Versuch mit dieser Nummer blieb ohne Antwort: vermutlich ist er der gespeicherte Datensatz.
+  if (_uncertainNumbers.has(table + '|' + value)) {
+    const err = new Error('Nummer ' + value + ' ist schon vergeben – vermutlich wurde dein letzter Versuch gespeichert. ' +
+      'Bitte in der Liste prüfen; fehlt der Datensatz dort, das Formular neu öffnen.');
+    err.status = e.status;
+    err.type = e.type;
+    throw err;
+  }
   const retry = /^Q-\d+\.\d+$/.test(value) ? { variantOf: value } : { assignNumber: true };
   const created = await _api('POST', _dataPath(table), { body: _writeBody(fields, retry) });
   const stored = created && created.fields ? String(created.fields[field] || '') : '';
@@ -21052,7 +21074,15 @@ async function _persistInquiryFromWizard() {
   if (w.data.customer_id) fields.customer_id = [w.data.customer_id];
   if (w.data.contact_id)  fields.contact_id  = [w.data.contact_id];
   if (_inquirySpeech) { try { _inquirySpeech.stop(); } catch(e){} _inquirySpeech = null; }
-  return await writeData('Inquiry', fields);
+  // Schon gespeichert (danach schlug z.B. der Angebotsschritt fehl): aktualisieren statt ein zweites Mal anlegen.
+  // Die Nummer bleibt die gespeicherte; ein inzwischen entfernter Kunde oder Kontakt wird geleert.
+  if (w.savedInquiry) {
+    delete fields.inquiry_no;
+    fields.customer_id = w.data.customer_id ? [w.data.customer_id] : [];
+    fields.contact_id  = w.data.contact_id  ? [w.data.contact_id]  : [];
+    return (w.savedInquiry = await updateData('Inquiry', w.savedInquiry.id, fields));
+  }
+  return (w.savedInquiry = await writeData('Inquiry', fields));
 }
 
 async function inqWizSaveAsInquiryOnly() {

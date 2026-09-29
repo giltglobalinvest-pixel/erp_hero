@@ -31,6 +31,17 @@ const numberRequests = (page: Page): string[] => {
   });
   return seen;
 };
+// Toasts disappear after a few seconds, so every toast text is recorded as it appears.
+const recordToasts = (page: Page): Promise<void> =>
+  h.run(
+    page,
+    `window.__toastTexts = [];
+     new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => window.__toastTexts.push(n.textContent))))
+       .observe(document.getElementById('toastWrap'), { childList: true });`,
+  );
+const shownToasts = (page: Page): Promise<string[]> => h.run<string[]>(page, 'return window.__toastTexts;');
+const toastCount = (page: Page, count: number) =>
+  page.waitForFunction((n) => (window as unknown as { __toastTexts: string[] }).__toastTexts.length >= n, count);
 
 describe('document numbers', () => {
   it('a customer created through the form gets the server number and the current company', async () => {
@@ -174,6 +185,116 @@ describe('document numbers', () => {
     await page.dispatchEvent('#modalBox form[data-quote-form] button[type="submit"]', 'click');
     await page.locator('#toastWrap', { hasText: 'Gespeichert' }).waitFor();
     expect((await h.deps.records.get('Quote', id))?.fields.quote_no).toBe(stored);
+    await h.assertClean(page);
+  });
+});
+
+describe('saving again after an error', () => {
+  it('the inquiry wizard keeps one inquiry when "Angebot erstellen" is clicked again after the quote step failed', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    await h.run(
+      page,
+      `await openInquiryWizard();
+       _inquiryWizard.data.title = 'Aufzug Wartung Retry';
+       _inquiryWizard.step = 4;
+       renderInquiryWizardStep();`,
+    );
+    const proposed = await h.run<string>(page, 'return _inquiryWizard.data.inquiry_no;');
+    await recordToasts(page);
+    // The quote step fails once (Wi-Fi drop, deploy restart); the inquiry step before it succeeded.
+    let failed = false;
+    await page.route('**/api/data/Quote', async (route) => {
+      if (route.request().method() === 'POST' && !failed) {
+        failed = true;
+        return route.abort();
+      }
+      return route.continue();
+    });
+    const createQuote = '#modalBox button[onclick="inqWizCreateQuote()"]';
+    await page.dispatchEvent(createQuote, 'click');
+    await page.locator('#toastWrap', { hasText: 'Server nicht erreichbar' }).waitFor();
+    // The wizard stays open; the user clicks "Angebot erstellen" again.
+    await page.dispatchEvent(createQuote, 'click');
+    await page.locator('#toastWrap', { hasText: 'angelegt' }).waitFor();
+
+    const inquiries = (await list('Inquiry')).filter((r) => r.fields.title === 'Aufzug Wartung Retry');
+    expect(inquiries.map((r) => r.fields.inquiry_no)).toEqual([proposed]);
+    const quotes = (await list('Quote')).filter((r) => r.fields.title === 'Aufzug Wartung Retry');
+    expect(quotes.map((r) => r.fields.inquiry_id)).toEqual([[inquiries[0]?.id]]);
+    expect((await shownToasts(page)).some((t) => t.includes('war inzwischen vergeben'))).toBe(false);
+    await h.assertClean(page);
+  });
+
+  it('a customer saved again after a lost response is not stored twice, and the message says to check the list', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    await recordToasts(page);
+    let lost = false;
+    await page.route('**/api/data/Customer', async (route) => {
+      if (route.request().method() === 'POST' && !lost) {
+        lost = true;
+        // The server receives and commits the create; the response never reaches the page.
+        await h.apiAs('vera', 'POST', '/api/data/Customer', route.request().postDataJSON());
+        return route.abort();
+      }
+      return route.continue();
+    });
+    await h.run(page, 'await openCustomerModal();');
+    const proposed = await page.inputValue('#modalBox input[name="customer_no"]');
+    await page.fill('#modalBox input[name="name1"]', 'Doppelt Retry GmbH');
+    await page.dispatchEvent('#modalBox button[type="submit"]', 'click');
+    await toastCount(page, 1);
+    // The user sees "Server nicht erreichbar" and clicks Speichern again.
+    await page.dispatchEvent('#modalBox button[type="submit"]', 'click');
+    await toastCount(page, 2);
+
+    const customers = (await list('Customer')).filter((r) => r.fields.name1 === 'Doppelt Retry GmbH');
+    expect(customers.map((r) => r.fields.customer_no)).toEqual([proposed]);
+    expect((await shownToasts(page)).slice(0, 2)).toEqual([
+      'Schreiben fehlgeschlagen: Server nicht erreichbar – bitte Verbindung prüfen',
+      `Schreiben fehlgeschlagen: Nummer ${proposed} ist schon vergeben – vermutlich wurde dein letzter Versuch gespeichert. ` +
+        'Bitte in der Liste prüfen; fehlt der Datensatz dort, das Formular neu öffnen.',
+    ]);
+    await h.assertClean(page);
+  });
+
+  it('a create that never reached the server is saved under the proposed number on the next try', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    let dropped = false;
+    await page.route('**/api/data/Customer', async (route) => {
+      if (route.request().method() === 'POST' && !dropped) {
+        dropped = true;
+        return route.abort();
+      }
+      return route.continue();
+    });
+    await h.run(page, 'await openCustomerModal();');
+    const proposed = await page.inputValue('#modalBox input[name="customer_no"]');
+    await page.fill('#modalBox input[name="name1"]', 'Zweiter Versuch GmbH');
+    await page.dispatchEvent('#modalBox button[type="submit"]', 'click');
+    await page.locator('#toastWrap', { hasText: 'Server nicht erreichbar' }).waitFor();
+    await page.dispatchEvent('#modalBox button[type="submit"]', 'click');
+    await page.locator('#toastWrap', { hasText: 'Gespeichert' }).waitFor();
+    const customers = (await list('Customer')).filter((r) => r.fields.name1 === 'Zweiter Versuch GmbH');
+    expect(customers.map((r) => r.fields.customer_no)).toEqual([proposed]);
+    await h.assertClean(page);
+  });
+
+  it('a proposed number this page has already saved is refused, not renumbered, when the same create comes again', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'vera');
+    const alpha = JSON.stringify(h.companies.alpha);
+    const outcome = await h.run<string>(
+      page,
+      `const fields = { name1: 'Zweimal GmbH', customer_no: await nextCustomerNo(${alpha}), company_id: [${alpha}] };
+       await writeData('Customer', fields);
+       try { await writeData('Customer', fields); return 'zweimal gespeichert'; } catch (e) { return e.message; }`,
+    );
+    const customers = (await list('Customer')).filter((r) => r.fields.name1 === 'Zweimal GmbH');
+    expect(customers.length).toBe(1);
+    expect(outcome).toBe(`Schreiben fehlgeschlagen: Nummer bereits vergeben: ${String(customers[0]?.fields.customer_no)}`);
     await h.assertClean(page);
   });
 });
