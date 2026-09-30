@@ -6995,6 +6995,65 @@ function _decodeAiData(noteBody) {
   }
 }
 
+// Eine Artikel-Position für editFields.items: Menge mindestens 1, Art-Nr. und Name aus dem Artikel-Cache.
+// Gilt für die frische KI-Antwort und für die aus einer Notiz wiederhergestellten Positionen.
+function _fdBuildItemEntry(it, articleById) {
+  const a = articleById.get(it.article_id);
+  const af = a?.fields || {};
+  return {
+    article_id: it.article_id,
+    qty: Math.max(1, Number(it.qty) || 1),
+    sku: af.article_no || '',
+    name: af.name1 || (it.name_spoken || '')
+  };
+}
+
+// AI_DATA aus einer Notiz ist fremde Eingabe: jeder Freshdesk-Agent und jeder ERP-Nutzer (über den Proxy)
+// kann eine solche Notiz schreiben. Übernommen werden nur bekannte Felder mit passendem Typ, in neu gebauten
+// Objekten. Das dekodierte Objekt selbst wird nie gemergt: JSON.parse macht "__proto__" zu einem eigenen
+// Schlüssel, und Object.assign würde dessen Wert zum Prototyp machen.
+// Liefert { summary, extracted, editFields } oder null, wenn AI_DATA kein Objekt ist.
+function _sanitizeAiData(obj, articles) {
+  const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const isPrim = v => typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
+  // Flaches Objekt mit nur primitiven Werten; Namen wie "__proto__" oder "toString" fallen weg.
+  const prims = v => {
+    const out = {};
+    if (!isObj(v)) return out;
+    for (const k of Object.keys(v)) {
+      if (!(k in Object.prototype) && isPrim(v[k])) out[k] = v[k];
+    }
+    return out;
+  };
+  if (!isObj(obj)) return null;
+  const res = { summary: typeof obj.summary === 'string' ? obj.summary : null, extracted: null, editFields: {} };
+  if (isObj(obj.extracted)) {
+    const x = obj.extracted;
+    res.extracted = {
+      company: prims(x.company),
+      contact: prims(x.contact),
+      items: Array.isArray(x.items) ? x.items.filter(isObj).map(prims) : []
+    };
+  }
+  const ef = isObj(obj.editFields) ? obj.editFields : {};
+  const out = res.editFields;
+  for (const k of ['ticket_number', 'customer_reference', 'lieferzeit']) {
+    if (isPrim(ef[k])) out[k] = String(ef[k]);
+  }
+  for (const k of ['customer_id', 'contact_id', 'bundle_id_override']) {
+    if (typeof ef[k] === 'string') out[k] = ef[k];
+  }
+  if (Array.isArray(ef.attachment_ids)) out.attachment_ids = ef.attachment_ids.filter(id => typeof id === 'string');
+  if (Array.isArray(ef.items)) {
+    const list = Array.isArray(articles) ? articles : (_fdTicketState.cache?.articles || []);
+    const articleById = new Map(list.map(a => [a.id, a]));
+    out.items = ef.items
+      .filter(it => isObj(it) && typeof it.article_id === 'string' && it.article_id)
+      .map(it => _fdBuildItemEntry({ article_id: it.article_id, qty: it.qty, name_spoken: typeof it.name === 'string' ? it.name : '' }, articleById));
+  }
+  return res;
+}
+
 // Lädt verknüpfte Quotes (per freshdesk_ticket_id) + sucht in Conversations
 // nach persistierter KI-Analyse, restored State daraus.
 async function _loadLinkedQuotesAndCachedAi(ticketId) {
@@ -7021,16 +7080,17 @@ async function _loadLinkedQuotesAndCachedAi(ticketId) {
     if (aiNote) {
       // Conversations cachen, damit Verlauf-Toggle nicht doppelt lädt
       _fdTicketState.conversations = list.slice().sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
-      // Versuche, strukturierte AI_DATA aus dem Body zu extrahieren
-      const aiData = _decodeAiData(aiNote.body || aiNote.body_text || '');
+      // Caches zuerst laden: Art-Nr. und Name der wiederhergestellten Positionen kommen aus dem Artikel-Cache
+      await _loadFdCachesIfNeeded();
+      // Versuche, strukturierte AI_DATA aus dem Body zu extrahieren (nur geprüfte Felder, siehe _sanitizeAiData)
+      const aiData = _sanitizeAiData(_decodeAiData(aiNote.body || aiNote.body_text || ''));
       if (aiData) {
-        // State aus persistierten Daten rekonstruieren
+        // State aus persistierten Daten rekonstruieren; aiData.editFields enthält nur bekannte Felder
         _fdTicketState.summary    = aiData.summary || _fdTicketState.summary;
         _fdTicketState.extracted  = aiData.extracted || _fdTicketState.extracted;
-        _fdTicketState.editFields = Object.assign({}, _fdTicketState.editFields, aiData.editFields || {});
+        _fdTicketState.editFields = { ..._fdTicketState.editFields, ...aiData.editFields };
         _fdTicketState.cachedAiLoaded = true;
-        // Caches asynchron laden, dann Match auflösen
-        await _loadFdCachesIfNeeded();
+        // Match aus den IDs auflösen
         _resolveFdMatchFromIds();
       } else {
         // Fallback: nur den Text-Inhalt als Summary übernehmen, ohne strukturierte Daten.
@@ -7044,7 +7104,6 @@ async function _loadLinkedQuotesAndCachedAi(ticketId) {
         };
         _fdTicketState.cachedAiLoaded = true;
         _fdTicketState.cachedAiNoStructure = true;
-        await _loadFdCachesIfNeeded();
       }
       // E-Mail-Match ergänzen — auch wenn struktur. Daten vorhanden sind, könnte
       // das alte customer_id leer/veraltet sein. Greift nur, wenn editFields.customer_id
@@ -7801,16 +7860,6 @@ ${fullText}`;
     }
     // Article-Lookup für Item-Anzeige (sku/name)
     const articleByIdInit = new Map((_fdTicketState.cache.articles || []).map(a => [a.id, a]));
-    const buildItemEntry = (it) => {
-      const a = articleByIdInit.get(it.article_id);
-      const af = a?.fields || {};
-      return {
-        article_id: it.article_id,
-        qty: Math.max(1, Number(it.qty) || 1),
-        sku: af.article_no || '',
-        name: af.name1 || (it.name_spoken || '')
-      };
-    };
     // ZUERST E-Mail-Match machen, damit editFields.customer_id/contact_id gleich richtig gesetzt werden.
     // Email kommt vom Freshdesk-Requester, das ist zuverlässiger als die KI-Extraktion.
     const requesterEmail = _fdTicketState.requester?.email || '';
@@ -7835,7 +7884,7 @@ ${fullText}`;
       // KI-Items mit article_id übernehmen (alle Confidence-Stufen — User kann low/guess später entfernen)
       const matchedItems = (Array.isArray(parsed.items) ? parsed.items : [])
         .filter(i => i.article_id)
-        .map(buildItemEntry);
+        .map(it => _fdBuildItemEntry(it, articleByIdInit));
       _fdTicketState.editFields = {
         ticket_number:      String(parsed.ticket_number || '').trim() || ('FT-' + _fdTicketState.id),
         customer_reference: String(parsed.customer_reference || '').trim(),
@@ -11281,7 +11330,7 @@ function _renderAiEditableFieldsBlock() {
                     <p class="text-sm font-medium text-ink-900 break-words leading-snug">${escapeHtml(it.name || '')}</p>
                   </div>
                   <div class="flex items-center gap-1 shrink-0">
-                    <input type="number" min="1" value="${it.qty}" onchange="_setFdItemEditQty(${idx}, this.value)" class="w-14 px-2 py-0.5 border border-ink-200 rounded text-xs text-center">
+                    <input type="number" min="1" value="${escapeHtml(String(it.qty))}" onchange="_setFdItemEditQty(${idx}, this.value)" class="w-14 px-2 py-0.5 border border-ink-200 rounded text-xs text-center">
                     <button type="button" onclick="_removeFdItem(${idx})" class="text-ink-400 hover:text-red-600 p-1" title="Entfernen"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
                   </div>
                 </div>
@@ -12961,7 +13010,7 @@ function _renderManualItemsBlock() {
                   <p class="text-sm font-medium text-ink-900 break-words leading-snug">${escapeHtml(it.name || '')}</p>
                 </div>
                 <div class="flex items-center gap-1 shrink-0">
-                  <input type="number" min="1" value="${it.qty}" onchange="updateManualItemQty(${jsArg(it.article_id)}, this.value)" class="w-14 px-2 py-0.5 border border-ink-200 rounded text-xs text-center">
+                  <input type="number" min="1" value="${escapeHtml(String(it.qty))}" onchange="updateManualItemQty(${jsArg(it.article_id)}, this.value)" class="w-14 px-2 py-0.5 border border-ink-200 rounded text-xs text-center">
                   <button type="button" onclick="removeManualItem(${jsArg(it.article_id)})" class="text-ink-400 hover:text-red-600 p-1">
                     <i data-lucide="x" class="w-3.5 h-3.5"></i>
                   </button>
