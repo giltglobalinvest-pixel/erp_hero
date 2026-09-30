@@ -18467,12 +18467,21 @@ function parseDecimal(str) {
   if (str === null || str === undefined) return null;
   const s = String(str).trim();
   if (!s) return null;
-  const n = parseFloat(s.replace(/\./g, '').replace(',', '.'));
+  // Ohne Komma ist ein einzelner Punkt das Dezimaltrennzeichen („12.5"), außer bei Tausenderpunkten („1.234", „12.500").
+  const decimalPoint = !s.includes(',') && s.split('.').length === 2 && !/^[+-]?[1-9]\d{0,2}(\.\d{3})+$/.test(s);
+  const n = decimalPoint ? parseFloat(s) : parseFloat(s.replace(/\./g, '').replace(',', '.'));
   return isNaN(n) ? null : n;
 }
 function formatPrice(n) {
   if (n === null || n === undefined || n === '') return '';
   return new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+}
+// Wert für ein Eingabefeld, das parseDecimal liest: Dezimalkomma, keine Tausenderpunkte, alle Stellen.
+function formatDecimalInput(v) {
+  if (v === null || v === undefined || v === '') return '';
+  const n = typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v;
+  if (typeof n === 'number' && Number.isFinite(n)) return String(n).replace('.', ',');
+  return String(v);
 }
 function distinctValues(records, field, defaults) {
   const set = new Set(defaults || []);
@@ -19753,7 +19762,7 @@ async function openArticleModal(id) {
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">EK €</label>
           <div class="flex gap-1">
-            <input id="art_purchase_price" name="purchase_price" inputmode="decimal" value="${escapeHtml(String(f.purchase_price ?? ''))}" placeholder="0,00" class="flex-1 min-w-0 px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+            <input id="art_purchase_price" name="purchase_price" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.purchase_price ?? ''))}" placeholder="0,00" class="flex-1 min-w-0 px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
             <button type="button" onclick="copyDefaultSupplierPrice(${jsArg(id || '')})" class="px-2 py-2 border border-ink-200 rounded-lg hover:bg-ink-50 text-ink-600 shrink-0" title="Übernehme Hauptlieferanten-EK">
               <i data-lucide="arrow-down-to-line" class="w-4 h-4"></i>
             </button>
@@ -19761,11 +19770,11 @@ async function openArticleModal(id) {
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">VK €</label>
-          <input name="sales_price" inputmode="decimal" value="${escapeHtml(String(f.sales_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input name="sales_price" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.sales_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">MwSt %</label>
-          <input name="vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" placeholder="19" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input name="vat_rate" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.vat_rate ?? 19))}" placeholder="19" class="w-full px-3 py-2 border border-ink-200 rounded-lg font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-sm font-medium text-ink-700 mb-1">Einheit</label>
@@ -19878,7 +19887,7 @@ async function copyDefaultSupplierPrice(articleId) {
     }
     const inp = document.getElementById('art_purchase_price');
     if (inp) {
-      inp.value = price;
+      inp.value = formatDecimalInput(price);
       toast('EK übernommen: ' + formatPrice(price) + ' €', 'success');
     }
   } catch (err) { toast(err.message, 'error'); }
@@ -25547,19 +25556,19 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
           <label class="block text-xs font-medium text-ink-700 mb-1">Lieferant</label>
           <select id="${fid}_supplier" onchange="onQiSupplierChange(${jsArg(fid)})" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500/30">
             <option value="">— kein Lieferant —</option>
-            ${(currentArticleId && window._qiArticleSupplierCache[currentArticleId] || []).map(s => `<option value="${s.supplierId}" data-ek="${s.ek}" ${(f.supplier_id||[])[0]===s.supplierId?'selected':''}>${s.isDefault ? '★ ' : ''}${escapeHtml(s.supplierName)}${s.supplierNo ? ' (' + escapeHtml(s.supplierNo) + ')' : ''}</option>`).join('')}
+            ${(currentArticleId && window._qiArticleSupplierCache[currentArticleId] || []).map(s => `<option value="${s.supplierId}" data-ek="${escapeHtml(formatDecimalInput(s.ek))}" ${(f.supplier_id||[])[0]===s.supplierId?'selected':''}>${s.isDefault ? '★ ' : ''}${escapeHtml(s.supplierName)}${s.supplierNo ? ' (' + escapeHtml(s.supplierNo) + ')' : ''}</option>`).join('')}
           </select>
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
-          <input id="${fid}_purchase_price" inputmode="decimal" value="${escapeHtml(String(f.purchase_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_purchase_price" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.purchase_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
       <div class="qi-quad-grid grid grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" oninput="recalcQiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcQiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -25567,18 +25576,18 @@ async function showQuoteItemInlineForm(quoteId, itemId) {
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EP €</label>
-          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcQiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcQiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
-          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcQiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcQiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
 
       <div class="grid grid-cols-2 gap-2 items-end">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
-          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.vat_rate ?? 19))}" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="text-right">
           <label class="block text-xs font-medium text-ink-700 mb-1">Zeilensumme netto</label>
@@ -25637,12 +25646,12 @@ function onQiArticleChange(value, comboboxId) {
   if (supSel) {
     const list = (window._qiArticleSupplierCache || {})[articleId] || [];
     supSel.innerHTML = '<option value="">— kein Lieferant —</option>' +
-      list.map(s => `<option value="${s.supplierId}" data-ek="${s.ek}" ${s.isDefault ? 'selected' : ''}>${s.isDefault ? '★ ' : ''}${escapeHtml(s.supplierName)}${s.supplierNo ? ' (' + escapeHtml(s.supplierNo) + ')' : ''}</option>`).join('');
+      list.map(s => `<option value="${s.supplierId}" data-ek="${escapeHtml(formatDecimalInput(s.ek))}" ${s.isDefault ? 'selected' : ''}>${s.isDefault ? '★ ' : ''}${escapeHtml(s.supplierName)}${s.supplierNo ? ' (' + escapeHtml(s.supplierNo) + ')' : ''}</option>`).join('');
     // Wenn Default-Lieferant existiert: EK-Preis übernehmen
     const def = list.find(s => s.isDefault);
     if (def) {
       const ekEl = document.getElementById(fid + '_purchase_price');
-      if (ekEl) ekEl.value = def.ek;
+      if (ekEl) ekEl.value = formatDecimalInput(def.ek);
     }
   }
   if (!articleId) return;
@@ -25677,11 +25686,11 @@ function onQiArticleChange(value, comboboxId) {
     }
   }
   const priceEl = document.getElementById(fid + '_unit_price_net');
-  if (priceEl) priceEl.value = a.price;
+  if (priceEl) priceEl.value = formatDecimalInput(a.price);
   const unitEl = document.getElementById(fid + '_unit');
   if (unitEl) unitEl.value = a.unit;
   const vatEl = document.getElementById(fid + '_vat_rate');
-  if (vatEl) vatEl.value = a.vat;
+  if (vatEl) vatEl.value = formatDecimalInput(a.vat);
   recalcQiPreview(fid);
 }
 
@@ -25693,7 +25702,7 @@ function onQiSupplierChange(fid) {
   const ek = opt?.getAttribute('data-ek');
   if (ek !== null && ek !== undefined && ek !== '') {
     const ekEl = document.getElementById(fid + '_purchase_price');
-    if (ekEl) ekEl.value = ek;
+    if (ekEl) ekEl.value = formatDecimalInput(ek);
   }
 }
 
@@ -25962,7 +25971,7 @@ async function showArticleSupplierInlineForm(articleId, junctionId) {
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
-          <input id="${fid}_purchase_price" inputmode="decimal" value="${escapeHtml(String(f.purchase_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_purchase_price" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.purchase_price ?? ''))}" placeholder="0,00" class="w-full px-3 py-1.5 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Lieferzeit</label>
@@ -28501,7 +28510,7 @@ async function showOrderItemInlineForm(orderId, itemId) {
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" oninput="recalcOiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcOiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -28509,17 +28518,17 @@ async function showOrderItemInlineForm(orderId, itemId) {
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EP €</label>
-          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcOiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcOiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
-          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcOiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcOiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
-          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="text-right self-end">
           <p class="text-xs text-ink-500">Zeilensumme netto</p>
@@ -28603,11 +28612,11 @@ function onOiArticleChange(value, comboboxId) {
     }
   }
   const priceEl = document.getElementById(fid + '_unit_price_net');
-  if (priceEl) priceEl.value = a.price;
+  if (priceEl) priceEl.value = formatDecimalInput(a.price);
   const unitEl = document.getElementById(fid + '_unit');
   if (unitEl) unitEl.value = a.unit;
   const vatEl = document.getElementById(fid + '_vat_rate');
-  if (vatEl) vatEl.value = a.vat;
+  if (vatEl) vatEl.value = formatDecimalInput(a.vat);
   recalcOiPreview(fid);
 }
 
@@ -29953,7 +29962,7 @@ async function showPurchaseItemInlineForm(purchaseId, itemId) {
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" oninput="recalcPiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" oninput="recalcPiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -29961,17 +29970,17 @@ async function showPurchaseItemInlineForm(purchaseId, itemId) {
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">EK-Preis €</label>
-          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcPiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcPiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label>
-          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcPiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcPiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
       </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label>
-          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div class="text-right self-end">
           <p class="text-xs text-ink-500">Zeilensumme netto</p>
@@ -30046,11 +30055,11 @@ function onPiArticleChange(value, comboboxId) {
   }
   // Bestellung verwendet EK-Preis als Standard
   const priceEl = document.getElementById(fid + '_unit_price_net');
-  if (priceEl) priceEl.value = a.purchase_price;
+  if (priceEl) priceEl.value = formatDecimalInput(a.purchase_price);
   const unitEl = document.getElementById(fid + '_unit');
   if (unitEl) unitEl.value = a.unit;
   const vatEl = document.getElementById(fid + '_vat_rate');
-  if (vatEl) vatEl.value = a.vat;
+  if (vatEl) vatEl.value = formatDecimalInput(a.vat);
   recalcPiPreview(fid);
 }
 
@@ -31211,7 +31220,7 @@ async function showDeliveryItemInlineForm(deliveryId, itemId) {
       <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Menge</label>
-          <input id="${fid}_qty" inputmode="decimal" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
+          <input id="${fid}_qty" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30">
         </div>
         <div>
           <label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label>
@@ -32493,13 +32502,13 @@ async function showInvoiceItemInlineForm(invoiceId, itemId) {
         <div id="${fid}_description_editor" class="bg-white border border-ink-200 rounded-lg" style="min-height:120px;"></div>
       </div>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">Menge</label><input id="${fid}_qty" inputmode="decimal" oninput="recalcIiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">Menge</label><input id="${fid}_qty" inputmode="decimal" oninput="recalcIiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.qty ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
         <div><label class="block text-xs font-medium text-ink-700 mb-1">Einheit</label><input id="${fid}_unit" value="${escapeHtml(f.unit || 'Stück')}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg"></div>
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">EP €</label><input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcIiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label><input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcIiPreview(${jsArg(fid)})" value="${escapeHtml(String(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">EP €</label><input id="${fid}_unit_price_net" inputmode="decimal" oninput="recalcIiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.unit_price_net ?? ''))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">Rabatt %</label><input id="${fid}_discount_pct" inputmode="decimal" oninput="recalcIiPreview(${jsArg(fid)})" value="${escapeHtml(formatDecimalInput(f.discount_pct ?? 0))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
       </div>
       <div class="grid grid-cols-2 gap-2">
-        <div><label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label><input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(String(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
+        <div><label class="block text-xs font-medium text-ink-700 mb-1">MwSt %</label><input id="${fid}_vat_rate" inputmode="decimal" value="${escapeHtml(formatDecimalInput(f.vat_rate ?? 19))}" class="w-full px-3 py-2 text-sm bg-white border border-ink-200 rounded-lg font-mono"></div>
         <div class="text-right self-end"><p class="text-xs text-ink-500">Zeilensumme netto</p><p id="${fid}_preview" class="font-mono font-semibold text-ink-900">${formatPrice(calcLineNet(f.qty, f.unit_price_net, f.discount_pct))} €</p></div>
       </div>
       <div class="flex justify-end gap-2 pt-1">
@@ -32561,11 +32570,11 @@ function onIiArticleChange(value, comboboxId) {
     } else if (descEl) descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
   }
   const priceEl = document.getElementById(fid + '_unit_price_net');
-  if (priceEl) priceEl.value = a.price;
+  if (priceEl) priceEl.value = formatDecimalInput(a.price);
   const unitEl = document.getElementById(fid + '_unit');
   if (unitEl) unitEl.value = a.unit;
   const vatEl = document.getElementById(fid + '_vat_rate');
-  if (vatEl) vatEl.value = a.vat;
+  if (vatEl) vatEl.value = formatDecimalInput(a.vat);
   recalcIiPreview(fid);
 }
 
