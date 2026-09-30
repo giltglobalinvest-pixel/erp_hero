@@ -298,8 +298,15 @@ describe('_fdHtmlToText keeps its text', () => {
     ['<p>Bild: <img alt="x"></p><h2>Titel</h2>', 'Bild:\nTitel'],
     ['Nur Text\nmit   Zeilen', 'Nur Text\nmit Zeilen'],
     ['<p>a</p>\n\n\n\n<p>b</p>', 'a\n\nb'],
+    // Malformed markup keeps its text too: a stray end tag first, table rows without a table.
+    ['Hallo</p>Welt', 'Hallo\nWelt'],
+    ['Zeile1</br>Zeile2', 'Zeile1\nZeile2'],
+    ['<tr><td>A</td></tr><tr><td>B</td></tr>', 'AB'],
     ['', ''],
   ];
+  // The one deliberate difference. An inert document runs no scripts, so the parser reads <noscript> content as markup.
+  // In the page it was raw text, and its tags ended up in the text.
+  const NOSCRIPT: [string, string] = ['<noscript><p>JS aus</p></noscript>Text', 'JS aus\nText'];
 
   it('harmless HTML gives the same text as before; no HTML gives an empty string', async () => {
     const page = await h.newPage();
@@ -312,6 +319,13 @@ describe('_fdHtmlToText keeps its text', () => {
        };`,
     );
     expect(got).toEqual({ texts: TEXTS.map(([, text]) => text), empty: ['', ''] });
+    await h.assertClean(page);
+  });
+
+  it('the one difference: <noscript> content is read as markup, so its tags no longer end up in the text', async () => {
+    const page = await h.newPage();
+    await h.openApp(page, 'admin');
+    expect(await h.run<string>(page, `return _fdHtmlToText(${JSON.stringify(NOSCRIPT[0])});`)).toBe(NOSCRIPT[1]);
     await h.assertClean(page);
   });
 });
