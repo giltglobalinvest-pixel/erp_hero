@@ -6888,10 +6888,12 @@ function _fdFmtDate(s) { try { return s ? new Date(s).toLocaleString('de-DE') : 
 // Wandelt Freshdesk-HTML in lesbaren Text um.
 // - Strippt Tags, dekodiert Entities, behält Block-Struktur als Zeilenumbrüche.
 // - Mehrere Leerzeilen werden auf max. zwei zusammengefasst.
+// - Parst inert in einem <template>: Bilder darin laden nicht, Event-Handler laufen nicht.
 function _fdHtmlToText(html) {
   if (!html) return '';
-  const tmp = document.createElement('div');
-  tmp.innerHTML = String(html);
+  const tpl = document.createElement('template');
+  tpl.innerHTML = String(html);
+  const tmp = tpl.content;
   // <br> → Zeilenumbruch
   tmp.querySelectorAll('br').forEach(el => el.replaceWith('\n'));
   // Block-Tags: nach jedem ein Newline
