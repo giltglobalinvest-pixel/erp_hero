@@ -49,6 +49,120 @@ describe('index.html', () => {
   });
 });
 
+// Inline event handlers (V-1). A handler's attribute value is JavaScript inside HTML: the HTML parser decodes it
+// (&#39; becomes ') before the handler is compiled. So '${v}' and '${escapeHtml(v)}' both end the JS string at the
+// first quote in v, and the rest of v runs as script. Values go in as ${jsArg(v)}: a JSON string literal, HTML-escaped.
+const HANDLER_FILES = ['index.html', 'loader.html', 'loader-admin.html'];
+// A "/" after one of these characters starts a regex literal, as in .replace(/'/g, …); after anything else it divides.
+const BEFORE_REGEX = new Set([...'(,=:[!&|?{};+-*%<>~^']);
+const startsRegex = (s: string, i: number): boolean => {
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(s[j]!)) j--;
+  return BEFORE_REGEX.has(s[j] ?? '(');
+};
+
+// Index just past the quoted string, template or regex literal that starts at i.
+function skipLiteral(s: string, i: number): number {
+  const close = s[i];
+  let inClass = false;
+  for (i++; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\') i++;
+    else if (close === '`' && c === '$' && s[i + 1] === '{') i = skipInterpolation(s, i + 2) - 1;
+    else if (close === '/' && c === '[') inClass = true;
+    else if (close === '/' && c === ']') inClass = false;
+    else if (c === close && !inClass) return i + 1;
+  }
+  return i;
+}
+
+// Index just past the "}" that closes an interpolation whose expression starts at i.
+function skipInterpolation(s: string, i: number): number {
+  for (let depth = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '{') depth++;
+    else if (c === '}' && depth-- === 0) return i + 1;
+    else if (c === "'" || c === '"' || c === '`' || (c === '/' && startsRegex(s, i))) i = skipLiteral(s, i) - 1;
+  }
+  return i;
+}
+
+interface InlineHandler {
+  line: number;
+  /** The attribute value as written in the source, interpolations included. */
+  value: string;
+  /** The value's own text: template escapes resolved, each interpolation replaced by \u0000. */
+  text: string;
+}
+
+// Every on…="…" and on…='…' attribute in the file's source (not data-on…), with its line number.
+// A ${…} in the value is taken whole, so a quote inside its expression does not end the value.
+function inlineHandlers(source: string): InlineHandler[] {
+  const found: InlineHandler[] = [];
+  const attribute = /(?<![\w-])on[a-z]+=(["'])/g;
+  let line = 1;
+  let counted = 0;
+  for (let m = attribute.exec(source); m; m = attribute.exec(source)) {
+    let i = attribute.lastIndex;
+    let text = '';
+    while (i < source.length && source[i] !== m[1] && source[i] !== '\n') {
+      if (source[i] === '\\') {
+        text += source[i + 1];
+        i += 2;
+      } else if (source.startsWith('${', i)) {
+        i = skipInterpolation(source, i + 2);
+        text += '\u0000';
+      } else text += source[i++];
+    }
+    for (; counted < m.index; counted++) if (source[counted] === '\n') line++;
+    found.push({ line, value: source.slice(attribute.lastIndex, i), text });
+    attribute.lastIndex = i;
+  }
+  return found;
+}
+
+// Whether an interpolation sits inside a JS string of the handler, as in 'prefix-${id}'. Entities count as the
+// quotes the HTML parser turns them into.
+function interpolatesInString(text: string): boolean {
+  const js = text.replace(/&quot;|&#34;/g, '"').replace(/&#39;|&#x27;|&apos;/g, "'");
+  let quote = '';
+  for (let i = 0; i < js.length; i++) {
+    const c = js[i];
+    if (quote && c === '\\') i++;
+    else if (quote && c === '\u0000') return true;
+    else if (c === quote) quote = '';
+    else if (!quote && (c === "'" || c === '"' || c === '`')) quote = c;
+  }
+  return false;
+}
+
+const handlerLines = (file: string, bad: (h: InlineHandler) => boolean): string[] =>
+  inlineHandlers(read(file))
+    .filter(bad)
+    .map((h) => `${file}:${h.line}`);
+
+describe('inline event handlers', () => {
+  it('the scanner sees the handlers of index.html', () => {
+    expect(inlineHandlers(read('index.html')).length > 500).toBe(true);
+  });
+
+  // Each failure lists only file:line entries.
+  for (const file of HANDLER_FILES) {
+    it(`${file}: no interpolation inside a JS string of a handler, as in '\${v}' or 'prefix-\${v}'`, () => {
+      // The regex also finds a quoted interpolation in a template nested inside an interpolation.
+      expect(handlerLines(file, (h) => /['"`]\$\{/.test(h.value) || interpolatesInString(h.text))).toEqual([]);
+    });
+
+    it(`${file}: no escapeHtml(…) as the encoder inside a handler (jsArg is; escapeHtml(JSON.stringify(…)) is fine)`, () => {
+      expect(handlerLines(file, (h) => /escapeHtml\((?!JSON\.stringify\()/.test(h.value))).toEqual([]);
+    });
+
+    it(`${file}: no bare \${JSON.stringify(…)} inside a handler (its first " would end the attribute)`, () => {
+      expect(handlerLines(file, (h) => /\$\{JSON\.stringify\(/.test(h.value))).toEqual([]);
+    });
+  }
+});
+
 describe('sw.js', () => {
   const sw = read('sw.js');
 

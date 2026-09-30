@@ -159,3 +159,48 @@ describe('CRM sync: ids go into a proxy path only as plain numbers', () => {
     await h.assertClean(page);
   });
 });
+
+describe('CRM ids in the customer modal: a preview button only for a numeric id', () => {
+  // A stored id that ends the JS string of the preview button's inline handler: the rest would run at the click.
+  const PLANTED = "1');window.__v1=(window.__v1||0)+1;('";
+  const PREVIEWS = '#modalBox button[onclick^="previewFreshdeskCompany("], #modalBox button[onclick^="previewFreshsalesAccount("]';
+  const SYNCS = '#modalBox button[onclick^="syncCustomerToFreshdesk("], #modalBox button[onclick^="syncCustomerToFreshsales("]';
+
+  it('a non-admin plants a quote-breaking id: the admin gets no preview button, and nothing runs', async () => {
+    const id = await plantCustomer('Seilerei Süd', { freshdesk_company_id: PLANTED, freshsales_account_id: PLANTED });
+    const page = await h.newPage();
+    await h.openApp(page, 'admin');
+    await h.run(page, `await openCustomerModal(${JSON.stringify(id)});`);
+    // Badges and sync buttons stay (the sync buttons are not clicked: they start an upstream flow).
+    const modal = await h.run(
+      page,
+      `const buttons = [...document.querySelectorAll(${JSON.stringify(PREVIEWS)})];
+      const linked = [...document.querySelectorAll('#modalBox span')].filter((s) => s.textContent === 'verknüpft').length;
+      const syncs = document.querySelectorAll(${JSON.stringify(SYNCS)}).length;
+      for (const b of buttons) b.click();
+      return { previews: buttons.length, linked, syncs };`,
+    );
+    await page.waitForTimeout(300);
+    const v1 = await h.run(page, 'return typeof window.__v1;');
+    expect({ ...(modal as object), v1 }).toEqual({ previews: 0, linked: 2, syncs: 2, v1: 'undefined' });
+    await h.assertClean(page);
+  });
+
+  it('a numeric id keeps its preview button, and the click previews that id', async () => {
+    const id = await plantCustomer('Seilerei Süd', { freshdesk_company_id: '12345', freshsales_account_id: '12345' });
+    h.fake.on('GET', FD + 'companies/12345', () => jsonResponse({ id: 12345, name: 'Seilerei Süd FD' }));
+    h.fake.on('GET', FS + 'sales_accounts/12345', () => jsonResponse({ sales_account: { id: 12345, name: 'Seilerei Süd FS' } }));
+    const page = await h.newPage();
+    await h.openApp(page, 'admin');
+    const calls = upstreamCalls();
+    await h.run(page, `await openCustomerModal(${JSON.stringify(id)});`);
+    // DOM clicks: the modal body scrolls, so a pointer click would land outside the headless viewport.
+    await page.locator('#modalBox button[onclick^="previewFreshdeskCompany("]').evaluate((el) => (el as HTMLElement).click());
+    await page.locator('#fdCompanyPreview', { hasText: 'Seilerei Süd FD' }).waitFor();
+    await h.run(page, `closeModal(); await openCustomerModal(${JSON.stringify(id)});`);
+    await page.locator('#modalBox button[onclick^="previewFreshsalesAccount("]').evaluate((el) => (el as HTMLElement).click());
+    await page.locator('#fsAccountPreview', { hasText: 'Seilerei Süd FS' }).waitFor();
+    expect(calls()).toEqual([`GET ${FD}companies/12345`, `GET ${FS}sales_accounts/12345`]);
+    await h.assertClean(page);
+  });
+});
