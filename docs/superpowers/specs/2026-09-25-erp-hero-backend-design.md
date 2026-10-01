@@ -41,7 +41,7 @@ The frontend switch to the new API is the **next** session. This session does no
 | D7 | **Document numbers are assigned when the record is saved** (`assignNumber: true`), inside a write transaction. A separate *peek* endpoint previews the next number without using it up. | No duplicates and no gaps. This matters for invoices. |
 | D8 | **Company separation is a working context, not a security boundary.** Every logged-in user can read and write all companies' business records, as today. `allowed_companies` drives the Mandant switcher (in the UI) and the choice of Freshdesk key. | Cross-company features are core: the ticket tool creates customers for any Mandant, email and customer matches across companies, the article-number index, the statistics. |
 | D9 | **No realtime.** | Not needed now. It is possible later via Server-Sent Events. |
-| D10 | **Repo layout:** `package.json` at the root, backend code in `server/`, tests in `test/`. | The server serves the root `index.html` and `sw.js` unchanged. |
+| D10 | **Repo layout:** `package.json` at the root, backend code in `server/`, tests in `test/`. | The server serves the root `index.html` and `sw.js` unchanged, plus the vendored `vendor/purify.min.js` (§15). |
 
 ## 3. Scope
 
@@ -82,7 +82,7 @@ Browser (index.html, unchanged this session)
    │  same origin · session cookie
    ▼
 Node server on Railway (Hono, single instance)
-   ├─ static:  /  /index.html  /sw.js   (/loader*.html → 302 /)
+   ├─ static:  /  /index.html  /sw.js  /vendor/purify.min.js   (/loader*.html → 302 /)
    ├─ /api/auth /api/me /api/logout /api/sessions/revoke-user /api/health
    ├─ /api/data/:table[/:id]   records · /api/numbers · /api/locks · files
    ├─ /api/schema/*            ensureTable / ensureFields (no-ops)
@@ -552,6 +552,7 @@ Every record passes through `toPublicRecord(table, record, user)`:
 |---|---|
 | `GET` / `HEAD` `/` and `/index.html` | `index.html` bytes unchanged, `text/html; charset=utf-8`, `Cache-Control: no-cache`, with an ETag |
 | `/sw.js` | `application/javascript; charset=utf-8`, `no-cache` |
+| `GET` / `HEAD` `/vendor/purify.min.js` | the vendored DOMPurify (`vendor/README.md`), bytes unchanged, `application/javascript; charset=utf-8`, `no-cache`, with an ETag. Nothing else under `/vendor/` is served. |
 | `/loader.html`, `/loader-admin.html` | 302 → `/` (the app's "load newest version" button points to `loader.html`) |
 | `GET /healthz` | 200 `{ok:true}` when `SELECT 1` succeeds, else 503. No auth, no upstream calls. |
 | anything else | 404 |
@@ -657,7 +658,7 @@ Every record passes through `toPublicRecord(table, record, user)`:
 - **files:** upload limits, allowed combinations, serving and headers, attachment-field normalization.
 - **settings and admin secrets:** allowlist, admin only, key generation, `KEY_IN_USE`, Freshdesk key merge, encryption round-trip, backup archive contents.
 - **third-party routes:** each allowlisted call forwarded correctly, disallowed calls blocked, Freshdesk key-selection order, multipart passthrough, 204 handling, raw error-body passthrough, missing-config messages, upstream failures, Mailchimp admin override and prefix validation, Anthropic method and size limit, attachment-proxy host/path/redirect/size checks.
-- **static and headers:** `index.html` served byte-identical, `sw.js`, loader redirect, 404, security headers, `/healthz`.
+- **static and headers:** `index.html` served byte-identical, `sw.js`, `/vendor/purify.min.js` served byte-identical and other `/vendor/` paths 404, loader redirect, 404, security headers, `/healthz`.
 - **importer:** pagination, rate limiting, attachments, secret handling, settings filtering, report contents, refusing an existing staging dir, GET-only against the fake Airtable. Plus `db:activate` swap on startup.
 
 **Gates:**

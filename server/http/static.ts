@@ -4,7 +4,10 @@ import path from 'node:path';
 import { Hono, type Handler } from 'hono';
 import type { AppEnv } from '../types.js';
 
-/** Serves only index.html and sw.js from the repo root, byte-for-byte. */
+/**
+ * Serves only index.html and sw.js from the repo root and the vendored vendor/purify.min.js, byte-for-byte.
+ * Nothing else under vendor/ is served.
+ */
 export function staticRoutes(rootDir: string): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -22,6 +25,8 @@ export function staticRoutes(rootDir: string): Hono<AppEnv> {
   app.get('/', html);
   app.get('/index.html', html);
   app.get('/sw.js', serveFile('sw.js', 'application/javascript; charset=utf-8'));
+  // DOMPurify for the app's rich-text sanitizer (vendor/README.md); index.html pins its bytes with SRI.
+  app.get('/vendor/purify.min.js', serveFile('vendor/purify.min.js', 'application/javascript; charset=utf-8'));
   // The app's "load newest version" button navigates to loader.html.
   app.get('/loader.html', (c) => c.redirect('/', 302));
   app.get('/loader-admin.html', (c) => c.redirect('/', 302));

@@ -38,6 +38,32 @@ describe('static files', () => {
     expect(await res.text()).toContain('erp-hero-sw-v2');
   });
 
+  it('serves the vendored DOMPurify byte-for-byte as JavaScript, with an ETag', async () => {
+    const original = await readFile(path.join(ROOT_DIR, 'vendor', 'purify.min.js'));
+    const res = await ctx.req('/vendor/purify.min.js');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/javascript; charset=utf-8');
+    expect(res.headers.get('cache-control')).toBe('no-cache');
+    expect(Buffer.from(await res.arrayBuffer()).equals(original)).toBe(true);
+    const etag = res.headers.get('etag') ?? '';
+    expect(etag).not.toBe('');
+    expect((await ctx.req('/vendor/purify.min.js', { headers: { 'if-none-match': etag } })).status).toBe(304);
+  });
+
+  it('serves nothing else from vendor/', async () => {
+    for (const p of [
+      '/vendor',
+      '/vendor/',
+      '/vendor/README.md',
+      '/vendor/dompurify.LICENSE',
+      '/vendor/dompurify.LICENSE-MPL',
+      '/vendor/purify.min.js.map',
+      '/vendor/purify.js',
+    ]) {
+      expect((await ctx.req(p)).status, p).toBe(404);
+    }
+  });
+
   it('redirects the loaders to /', async () => {
     for (const p of ['/loader.html', '/loader-admin.html']) {
       const res = await ctx.req(p);
