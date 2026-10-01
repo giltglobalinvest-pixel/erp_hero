@@ -4355,11 +4355,11 @@ function _aocRenderPreview(parsed) {
       ${parsed.lieferzeit ? `<div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Lieferzeit</p>
         <p class="text-sm"><span class="font-mono bg-blue-100 text-blue-800 px-2 py-0.5 rounded">${escapeHtml(parsed.lieferzeit)}</span></p></div>` : ''}
       <div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Einleitung</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.description || '<em class="text-ink-400">leer</em>'}</div></div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${richTextToHtml(parsed.description, { images: false }) || '<em class="text-ink-400">leer</em>'}</div></div>
       <div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Positionen (${(parsed.items || []).length})</p>
         ${itemRows ? '<div class="space-y-1.5">' + itemRows + '</div>' : '<p class="text-xs text-ink-500 italic">— keine Positionen —</p>'}</div>
       <div><p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Schlusstext</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.notes || '<em class="text-ink-400">leer</em>'}</div></div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${richTextToHtml(parsed.notes, { images: false }) || '<em class="text-ink-400">leer</em>'}</div></div>
       ${parsed.summary_for_user ? `<p class="text-[11px] text-emerald-700 italic bg-emerald-50 border border-emerald-200 rounded px-2 py-1.5"><i data-lucide="info" class="inline w-3 h-3"></i> ${escapeHtml(parsed.summary_for_user)}</p>` : ''}
     </div>
     <div class="flex gap-2 mt-3 flex-wrap justify-end pt-2 border-t border-ink-200">
@@ -4417,8 +4417,8 @@ async function _aocCreateOrder() {
       confirmation_date: iso(today),
       status: 'Entwurf',
       order_title: (parsed.order_title || '').trim(),
-      description: (parsed.description || '').trim(),
-      notes:       (parsed.notes || '').trim(),
+      description: sanitizeRichTextValue(parsed.description || '', { images: false }).trim(),
+      notes:       sanitizeRichTextValue(parsed.notes || '', { images: false }).trim(),
       ai_summary:  parsed.summary_for_user || '',
       freshdesk_ticket_id: String(ticketId)
     };
@@ -4460,7 +4460,7 @@ async function _aocCreateOrder() {
           const artFields = {
             name1: (na.name1 || na.name || '').trim(),
             article_no: (na.article_no || ('NEU-' + Date.now() + '-' + pos)).trim(),
-            description: (na.description || '').trim(),
+            description: sanitizeRichTextValue(na.description || '', { images: false }).trim(),
             unit: (na.unit || 'Stück').trim(),
             sales_price: (typeof na.sales_price === 'number' && na.sales_price >= 0) ? na.sales_price : 0,
             vat_rate: 19,
@@ -5093,8 +5093,8 @@ async function _eaCreateQuote(action) {
       valid_until: iso(validUntil),
       status: 'Entwurf',
       quote_title: (bundleResolved?.quote_title || action.quote_title || '').trim(),
-      description: (bundleResolved?.intro       || action.intro       || '').trim(),
-      notes:       (bundleResolved?.closing     || action.closing     || '').trim(),
+      description: (bundleResolved?.intro   || sanitizeRichTextValue(action.intro || '', { images: false })).trim(),
+      notes:       (bundleResolved?.closing || sanitizeRichTextValue(action.closing || '', { images: false })).trim(),
       ai_summary:  action.summary_for_user || ''
     };
     // custom_values: Bundle-Preset → lieferzeit → AI-custom_values
@@ -6031,7 +6031,7 @@ function _aqcRenderPreview(parsed) {
       ` : ''}
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Einleitung</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.intro || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '<em class="text-ink-400">leer</em>')}</div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${richTextToHtml(parsed.intro, { images: false }) || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '<em class="text-ink-400">leer</em>')}</div>
       </div>
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Positionen (${(parsed.items || []).length})</p>
@@ -6039,7 +6039,7 @@ function _aqcRenderPreview(parsed) {
       </div>
       <div>
         <p class="text-[10px] uppercase font-bold tracking-wider text-ink-500 mb-0.5">Schlusstext</p>
-        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${parsed.closing || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '<em class="text-ink-400">leer</em>')}</div>
+        <div class="text-xs text-ink-700 prose prose-sm max-w-none">${richTextToHtml(parsed.closing, { images: false }) || (chosenBundle ? '<em class="text-purple-700">(aus Bundle)</em>' : '<em class="text-ink-400">leer</em>')}</div>
       </div>
       ${parsed.summary_for_user ? `<p class="text-[11px] text-purple-700 italic bg-purple-50 border border-purple-200 rounded px-2 py-1.5"><i data-lucide="info" class="inline w-3 h-3"></i> ${escapeHtml(parsed.summary_for_user)}</p>` : ''}
     </div>
@@ -6227,8 +6227,8 @@ async function _aqcCreateQuote() {
       valid_until: iso(validUntil),
       status: 'Entwurf',
       quote_title: (bundleResolved?.quote_title || parsed.quote_title || '').trim(),
-      description: (bundleResolved?.intro       || parsed.intro       || '').trim(),
-      notes:       (bundleResolved?.closing     || parsed.closing     || '').trim(),
+      description: (bundleResolved?.intro   || sanitizeRichTextValue(parsed.intro || '', { images: false })).trim(),
+      notes:       (bundleResolved?.closing || sanitizeRichTextValue(parsed.closing || '', { images: false })).trim(),
       freshdesk_ticket_id: String(ticketId),
       ai_summary: parsed.summary_for_user || ''
     };
@@ -6363,7 +6363,7 @@ async function _aqcCreateQuote() {
               name2:           (na.name2 || '').trim(),
               article_no:      proposedSku || ('NEU-' + Date.now() + '-' + pos),
               // Beschreibung NUR setzen wenn AI explizit eine geliefert hat (siehe Prompt-Regel)
-              description:     (na.description || '').trim(),
+              description:     sanitizeRichTextValue(na.description || '', { images: false }).trim(),
               manufacturer_no: (na.manufacturer_no || '').trim(),
               unit:            (na.unit || 'Stück').trim(),
               sales_price:     (typeof na.sales_price === 'number' && na.sales_price >= 0) ? na.sales_price : 0,
@@ -19713,7 +19713,7 @@ async function _aacCreateArticle() {
       name1:           (a.name1 || '').trim(),
       name2:           (a.name2 || '').trim(),
       article_no:      (a.article_no || ('NEU-' + Date.now())).trim(),
-      description:     (a.description || '').trim(),
+      description:     sanitizeRichTextValue(a.description || '', { images: false }).trim(),
       manufacturer_no: (a.manufacturer_no || '').trim(),
       unit:            (a.unit || 'Stück').trim(),
       sales_price:     Number(a.sales_price) >= 0 ? Number(a.sales_price) : 0,
@@ -21454,7 +21454,7 @@ async function inqWizCreateQuote() {
     const quoteFields = {
       quote_no:    quoteNo,
       title:       w.data.title,
-      description: w.data.ai_summary,
+      description: sanitizeRichTextValue(w.data.ai_summary, { images: false }),
       inquiry_id:  [inquiry.id],
       company_id:  [cur.id],
       date:        iso(today),
