@@ -14047,6 +14047,20 @@ function sanitizeRichTextValue(value, opts) {
   return isRichText(value) ? sanitizeRichHtml(value, opts) : value;
 }
 
+// Rich Text bereinigt in einen Editor. Ältere Listen (<ul>, <li> ohne data-list), <pre>, einfache <div> verwirft Quill
+// beim direkten Schreiben samt Text: dafür Quills Konverter, sonst direkt (der Konverter fasst Leerzeichen zusammen).
+function setQuillHtml(q, html, opts) {
+  const clean = sanitizeRichHtml(html, opts);
+  const doc = document.implementation.createHTMLDocument('');
+  doc.body.innerHTML = clean;
+  const dropped = 'ul, li:not([data-list]), :not(ol) > li, pre, div:not(.ql-code-block):not(.ql-code-block-container)';
+  if (doc.body.querySelector(dropped)) {
+    q.setContents(q.clipboard.convert({ html: clean }), 'api');
+  } else {
+    q.root.innerHTML = clean;
+  }
+}
+
 const RICH_TEXT_UNAVAILABLE_MSG = 'Ein Teil der App konnte nicht geladen werden – bitte die Seite neu laden. Deine Anmeldung bleibt bestehen.';
 
 /* ============================================================
@@ -22374,7 +22388,7 @@ async function initSimpleQuillEditor(containerId, hiddenInputName, initialConten
   });
   if (initialContent) {
     if (isRichText(initialContent)) {
-      q.root.innerHTML = sanitizeRichHtml(initialContent);
+      setQuillHtml(q, initialContent);
     } else {
       q.setText(initialContent);
     }
@@ -22446,7 +22460,7 @@ async function initQuoteEditors() {
     });
     if (initial) {
       if (isRichText(initial)) {
-        q.root.innerHTML = sanitizeRichHtml(initial);
+        setQuillHtml(q, initial);
       } else {
         q.setText(initial);
       }
@@ -22478,7 +22492,7 @@ function setQuoteFieldValue(fieldName, value) {
   const q = window._quoteQuills?.[fieldName];
   if (q) {
     if (isRichText(value)) {
-      q.root.innerHTML = sanitizeRichHtml(value);
+      setQuillHtml(q, value);
     } else {
       q.setText(value || '');
     }
@@ -22935,7 +22949,7 @@ function expandTextField(fieldName, label) {
     });
     if (initialHtml) {
       if (isRichText(initialHtml)) {
-        q.root.innerHTML = sanitizeRichHtml(initialHtml);
+        setQuillHtml(q, initialHtml);
       } else {
         q.setText(initialHtml);
       }
@@ -28451,11 +28465,12 @@ async function applyOrderBundle(bundleId, opts = {}) {
     const content = substituteVariables(tpl.fields.content || '', 'Auftrag', ctx);
     const editorEl = document.getElementById(editorId);
     const quillContainer = editorEl?.querySelector('.ql-editor');
-    if (quillContainer) {
+    const q = quillContainer && window.Quill.find(editorEl);
+    if (q) {
       if (isRichText(content)) {
-        quillContainer.innerHTML = sanitizeRichHtml(content);
+        setQuillHtml(q, content);
       } else {
-        quillContainer.innerHTML = `<p>${escapeHtml(content)}</p>`;
+        setQuillHtml(q, `<p>${escapeHtml(content)}</p>`);
       }
       const hidden = document.querySelector(`#modalBox form[data-order-form] input[name="${fieldName}"]`);
       if (hidden) hidden.value = quillContainer.innerHTML;
@@ -28739,7 +28754,7 @@ async function showOrderItemInlineForm(orderId, itemId) {
       const initial = hidden?.value || '';
       if (initial) {
         if (isRichText(initial)) {
-          q.root.innerHTML = sanitizeRichHtml(initial);
+          setQuillHtml(q, initial);
         } else {
           q.setText(initial);
         }
@@ -29920,11 +29935,12 @@ async function applyPurchaseBundle(bundleId, opts = {}) {
       const editorEl = document.getElementById(editorId);
       if (editorEl) {
         const quillContainer = editorEl.querySelector('.ql-editor');
-        if (quillContainer) {
+        const q = quillContainer && window.Quill.find(editorEl);
+        if (q) {
           if (isRichText(content)) {
-            quillContainer.innerHTML = sanitizeRichHtml(content);
+            setQuillHtml(q, content);
           } else {
-            quillContainer.innerHTML = `<p>${escapeHtml(content)}</p>`;
+            setQuillHtml(q, `<p>${escapeHtml(content)}</p>`);
           }
           // Hidden-Input syncen
           const hidden = document.querySelector(`#modalBox form[data-purchase-form] input[name="${fieldName}"]`);
@@ -30190,7 +30206,7 @@ async function showPurchaseItemInlineForm(purchaseId, itemId) {
       });
       const initial = hidden?.value || '';
       if (initial) {
-        if (isRichText(initial)) q.root.innerHTML = sanitizeRichHtml(initial);
+        if (isRichText(initial)) setQuillHtml(q, initial);
         else q.setText(initial);
       }
       const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
@@ -30230,7 +30246,7 @@ function onPiArticleChange(value, comboboxId) {
     if (quill) {
       const titleHtml = titleLine ? `<p>${escapeHtml(titleLine)}</p>` : '';
       const bodyHtml  = descRest ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('') : '';
-      quill.root.innerHTML = sanitizeRichHtml(titleHtml + bodyHtml);
+      setQuillHtml(quill, titleHtml + bodyHtml);
       if (descEl) descEl.value = quill.root.innerHTML;
     } else if (descEl) {
       descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
@@ -31189,11 +31205,12 @@ async function applyDeliveryBundle(bundleId, opts = {}) {
     const content = substituteVariables(tpl.fields.content || '', 'Lieferschein', ctx);
     const editorEl = document.getElementById(editorId);
     const quillContainer = editorEl?.querySelector('.ql-editor');
-    if (quillContainer) {
+    const q = quillContainer && window.Quill.find(editorEl);
+    if (q) {
       if (isRichText(content)) {
-        quillContainer.innerHTML = sanitizeRichHtml(content);
+        setQuillHtml(q, content);
       } else {
-        quillContainer.innerHTML = `<p>${escapeHtml(content)}</p>`;
+        setQuillHtml(q, `<p>${escapeHtml(content)}</p>`);
       }
       const hidden = document.querySelector(`#modalBox form[data-delivery-form] input[name="${fieldName}"]`);
       if (hidden) hidden.value = quillContainer.innerHTML;
@@ -31426,7 +31443,7 @@ async function showDeliveryItemInlineForm(deliveryId, itemId) {
       const q = new window.Quill(editorEl, { theme: 'snow', placeholder: 'Position-Beschreibung', modules: { toolbar: quillStandardToolbar() } });
       const initial = hidden?.value || '';
       if (initial) {
-        if (isRichText(initial)) q.root.innerHTML = sanitizeRichHtml(initial);
+        if (isRichText(initial)) setQuillHtml(q, initial);
         else q.setText(initial);
       }
       const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
@@ -31457,7 +31474,7 @@ function onDiArticleChange(value, comboboxId) {
     if (quill) {
       const titleHtml = titleLine ? `<p>${escapeHtml(titleLine)}</p>` : '';
       const bodyHtml  = descRest ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('') : '';
-      quill.root.innerHTML = sanitizeRichHtml(titleHtml + bodyHtml);
+      setQuillHtml(quill, titleHtml + bodyHtml);
       if (descEl) descEl.value = quill.root.innerHTML;
     } else if (descEl) {
       descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
@@ -32469,9 +32486,10 @@ async function applyInvoiceBundle(bundleId, opts = {}) {
     const content = substituteVariables(tpl.fields.content || '', 'Rechnung', ctx);
     const editorEl = document.getElementById(editorId);
     const quillContainer = editorEl?.querySelector('.ql-editor');
-    if (quillContainer) {
-      if (isRichText(content)) quillContainer.innerHTML = sanitizeRichHtml(content);
-      else quillContainer.innerHTML = `<p>${escapeHtml(content)}</p>`;
+    const q = quillContainer && window.Quill.find(editorEl);
+    if (q) {
+      if (isRichText(content)) setQuillHtml(q, content);
+      else setQuillHtml(q, `<p>${escapeHtml(content)}</p>`);
       const hidden = document.querySelector(`#modalBox form[data-invoice-form] input[name="${fieldName}"]`);
       if (hidden) hidden.value = quillContainer.innerHTML;
     }
@@ -32710,7 +32728,7 @@ async function showInvoiceItemInlineForm(invoiceId, itemId) {
       const q = new window.Quill(editorEl, { theme: 'snow', placeholder: 'Position-Beschreibung', modules: { toolbar: quillStandardToolbar() } });
       const initial = hidden?.value || '';
       if (initial) {
-        if (isRichText(initial)) q.root.innerHTML = sanitizeRichHtml(initial);
+        if (isRichText(initial)) setQuillHtml(q, initial);
         else q.setText(initial);
       }
       const sync = () => { if (hidden) hidden.value = q.root.innerHTML; };
@@ -32748,7 +32766,7 @@ function onIiArticleChange(value, comboboxId) {
     if (quill) {
       const titleHtml = titleLine ? `<p>${escapeHtml(titleLine)}</p>` : '';
       const bodyHtml = descRest ? descRest.split('\n').map(l => `<p>${escapeHtml(l) || '<br>'}</p>`).join('') : '';
-      quill.root.innerHTML = sanitizeRichHtml(titleHtml + bodyHtml);
+      setQuillHtml(quill, titleHtml + bodyHtml);
       if (descEl) descEl.value = quill.root.innerHTML;
     } else if (descEl) descEl.value = [titleLine, descRest].filter(Boolean).join('\n');
   }

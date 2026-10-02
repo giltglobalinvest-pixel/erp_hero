@@ -269,6 +269,10 @@ describe('leaving github.io', () => {
 // clipboard.dangerouslyPasteHTML parses in an inert document today; it takes sanitized HTML anyway, so that a Quill
 // upgrade cannot reopen a path. The scanner reads the inline scripts of index.html as code: comments removed, and the
 // text of strings, templates and regex literals blanked, so text in a literal never counts as code.
+// Stored HTML goes into an existing editor only through setQuillHtml (N7): a direct write drops older list markup with
+// its text, so a write into a Quill root or a ql-editor element anywhere else fails, sanitized or not. Inside
+// setQuillHtml, the direct write and clipboard.convert take the sanitizer's output; convert parses HTML like a paste,
+// so every convert call is a sink.
 const RICH_TEXT_TAGS = /p\|br\|strong\|em\|b\|i\|u\|ol\|ul\|li\|h\[1-6\]\|span\|div/g;
 // After one of these words a "/" starts a regex literal too, as in: return /<p\b/i.test(s).
 const REGEX_WORDS = new Set(['return', 'typeof', 'case', 'in', 'of', 'void', 'delete', 'throw', 'new', 'else', 'do', 'yield', 'await']);
@@ -464,21 +468,70 @@ function isSanitizedHtml(code: string, mask: string): boolean {
   return false;
 }
 
-type SinkKind = 'Quill root' | 'editor element' | 'Quill container' | 'paste';
+type SinkKind = 'Quill root' | 'editor element' | 'Quill container' | 'paste' | 'convert';
 interface EditorSink {
   kind: SinkKind;
   line: number;
   sanitized: boolean;
+  /** In the body of setQuillHtml. */
+  inLoader: boolean;
 }
 interface EditorScan {
   constructors: number;
   /** Constructors whose container the scanner found: a const/let/var binding, or an expression. */
   containersResolved: number;
+  /** Declarations function setQuillHtml(…) { … }. */
+  loaders: number;
+  /** Calls of setQuillHtml. */
+  loaderCalls: number;
   sinks: EditorSink[];
 }
 
-// Every write of HTML into a Quill root, an element of class ql-editor, or a Quill container, and every
-// dangerouslyPasteHTML call, in the inline scripts of html.
+const LOADER = 'setQuillHtml';
+// A write into a Quill root or a ql-editor element outside setQuillHtml.
+const isDirect = (s: EditorSink): boolean => !s.inLoader && (s.kind === 'Quill root' || s.kind === 'editor element');
+// What the guard rejects, as "line kind": every sink that takes unsanitized HTML, and every direct write.
+const rejected = (scan: EditorScan): string[] =>
+  scan.sinks.flatMap((s) => (!s.sanitized ? [`${s.line} ${s.kind}`] : isDirect(s) ? [`${s.line} ${s.kind} outside ${LOADER}`] : []));
+
+// The names that the function in [from, to) binds to sanitized HTML (const name = sanitizeRichHtml(…)), when nothing
+// else in it binds or assigns that name: no parameter of it or of a function in it, no other declaration, no
+// assignment.
+function cleanNames(code: string, mask: string, from: number, to: number): Set<string> {
+  const region = mask.slice(from, to);
+  // Parameter lists, catch bindings and destructuring patterns in the function, as text.
+  const patterns: string[] = [];
+  for (const m of region.matchAll(/\bfunction\b\s*[\w$]*\s*\(|\bcatch\s*\(|\b(?:const|let|var)\s*[{[]/g)) {
+    const open = m.index + m[0].length - 1;
+    patterns.push(region.slice(open, closerOf(region, open) + 1));
+  }
+  for (const m of region.matchAll(/=>/g)) {
+    let j = m.index - 1;
+    while (j >= 0 && /\s/.test(region[j]!)) j--;
+    let k = j;
+    if (region[j] === ')') k = openerOf(region, j) - 1;
+    else while (k >= 0 && /[\w$]/.test(region[k]!)) k--;
+    patterns.push(region.slice(k + 1, j + 1));
+  }
+  const names = new Set<string>();
+  for (const m of region.matchAll(/\bconst\s+([\w$]+)\s*=(?!=)/g)) {
+    const start = from + m.index + m[0].length;
+    const end = expressionEnd(mask, start);
+    if (!isSanitizedHtml(code.slice(start, end), mask.slice(start, end))) continue;
+    const name = m[1]!.replace(/\$/g, '\\$');
+    const word = String.raw`(?<![\w$.])${name}(?![\w$])`;
+    const count = (re: string) => [...region.matchAll(new RegExp(re, 'g'))].length;
+    const declarations = count(String.raw`\b(?:const|let|var|function|class)\s+${name}(?![\w$])`);
+    const assignments = count(String.raw`${word}\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])`);
+    const updates = count(String.raw`(?:\+\+|--)\s*${word}|${word}\s*(?:\+\+|--)`);
+    const bound = patterns.some((p) => new RegExp(word).test(p));
+    if (declarations === 1 && assignments === 1 && updates === 0 && !bound) names.add(m[1]!);
+  }
+  return names;
+}
+
+// Every write of HTML into a Quill root, an element of class ql-editor, or a Quill container, every
+// dangerouslyPasteHTML call and every convert call, in the inline scripts of html.
 function scanEditorSinks(html: string): EditorScan {
   const breaks: number[] = [];
   for (let k = html.indexOf('\n'); k >= 0; k = html.indexOf('\n', k + 1)) breaks.push(k);
@@ -492,8 +545,23 @@ function scanEditorSinks(html: string): EditorScan {
     }
     return lo + 1;
   };
-  const result: EditorScan = { constructors: 0, containersResolved: 0, sinks: [] };
+  const result: EditorScan = { constructors: 0, containersResolved: 0, loaders: 0, loaderCalls: 0, sinks: [] };
   for (const { offset, code, mask } of inlineScripts(html)) {
+    // The loader: function setQuillHtml(…) { … }, with the names it binds to sanitized HTML.
+    const loaders: { from: number; to: number; clean: Set<string> }[] = [];
+    for (const m of mask.matchAll(new RegExp(String.raw`\bfunction\s+${LOADER}\s*\(`, 'g'))) {
+      let open = callArguments(mask, m.index + m[0].length - 1).close + 1;
+      while (/\s/.test(mask[open] ?? '')) open++;
+      if (mask[open] !== '{') continue;
+      const to = closerOf(mask, open) + 1;
+      loaders.push({ from: open, to, clean: cleanNames(code, mask, m.index, to) });
+      result.loaders++;
+    }
+    result.loaderCalls += [...mask.matchAll(new RegExp(String.raw`(?<!\bfunction\s+)\b${LOADER}\s*\(`, 'g'))].length;
+    const loaderAt = (at: number) => loaders.find((l) => l.from <= at && at < l.to);
+    // Sanitized HTML: a sanitizer call, '' or escaped text (isSanitizedHtml); in the loader, also a name it binds to one.
+    const safe = ([from, to]: [number, number], at: number): boolean =>
+      isSanitizedHtml(code.slice(from, to), mask.slice(from, to)) || !!loaderAt(at)?.clean.has(code.slice(from, to).trim());
     // Writes: target.innerHTML = …, target.outerHTML = …, target['innerHTML'] = …, target.insertAdjacentHTML(_, …).
     const writes: { at: number; receiver: string; value: [number, number] }[] = [];
     for (const m of mask.matchAll(/\.\s*(?:innerHTML|outerHTML)\s*\+?=(?!=)/g)) {
@@ -562,8 +630,7 @@ function scanEditorSinks(html: string): EditorScan {
     for (const w of writes) {
       const kind = kindOf(w);
       if (!kind) continue;
-      const sanitized = isSanitizedHtml(code.slice(w.value[0], w.value[1]), mask.slice(w.value[0], w.value[1]));
-      result.sinks.push({ kind, line: lineOf(offset + w.at), sanitized });
+      result.sinks.push({ kind, line: lineOf(offset + w.at), sanitized: safe(w.value, w.at), inLoader: !!loaderAt(w.at) });
     }
     // dangerouslyPasteHTML(html[, source]) or dangerouslyPasteHTML(index, html[, source]), also as ['…'](…).
     for (const m of code.matchAll(/\bdangerouslyPasteHTML\b(\s*['"`]\s*\])?\s*\(/g)) {
@@ -572,8 +639,30 @@ function scanEditorSinks(html: string): EditorScan {
       const { args } = callArguments(mask, m.index + m[0].length - 1);
       const second = args[1] ? squash(code.slice(args[1][0], args[1][1])) : '';
       const html = args.length < 2 || /^(['"`])(?:api|user|silent)\1$|\.sources\.[A-Z]+$/.test(second) ? args[0] : args[1];
-      const sanitized = !!html && isSanitizedHtml(code.slice(html[0], html[1]), mask.slice(html[0], html[1]));
-      result.sinks.push({ kind: 'paste', line: lineOf(offset + m.index), sanitized });
+      const sanitized = !!html && safe(html, m.index);
+      result.sinks.push({ kind: 'paste', line: lineOf(offset + m.index), sanitized, inLoader: !!loaderAt(m.index) });
+    }
+    // convert({ html, text }) on any receiver (q.clipboard, getModule('clipboard'), an alias), also as ['convert'](…)
+    // or ?.(…). Its argument must be an object literal whose html properties are all sanitized; any other argument, a
+    // spread or a computed key could carry HTML.
+    for (const m of code.matchAll(/(?:\?\.|\.)\s*convert\s*(?:\?\.\s*)?\(|(?:\?\.\s*)?\[\s*(['"`])convert\1\s*\]\s*(?:\?\.\s*)?\(/g)) {
+      if (mask[m.index] === ' ') continue;
+      const [arg] = callArguments(mask, m.index + m[0].length - 1).args;
+      let sanitized = true;
+      if (arg) {
+        const text = code.slice(arg[0], arg[1]);
+        const open = arg[0] + text.length - text.trimStart().length;
+        sanitized =
+          mask[open] === '{' &&
+          closerOf(mask, open) === arg[0] + text.trimEnd().length - 1 &&
+          callArguments(mask, open).args.every(([from, to]) => {
+            const property = code.slice(from, to);
+            if (/^\s*[\w$]+\s*$/.test(property)) return property.trim() !== 'html' || safe([from, to], m.index);
+            const key = /^\s*(?:([\w$]+)|(['"`])([^'"`]*)\2)\s*:/.exec(property);
+            return !!key && ((key[1] ?? key[3]) !== 'html' || safe([from + key[0].length, to], m.index));
+          });
+      }
+      result.sinks.push({ kind: 'convert', line: lineOf(offset + m.index), sanitized, inLoader: !!loaderAt(m.index) });
     }
   }
   result.sinks.sort((a, b) => a.line - b.line);
@@ -601,8 +690,8 @@ describe('rich text in the editors', () => {
       '<script>',
       'function a(q, el, html) {',
       '  q.root.innerHTML = html; //!Quill root',
-      '  q.root.innerHTML = sanitizeRichHtml(html);',
-      "  q.root.innerHTML = '';",
+      '  q.root.innerHTML = sanitizeRichHtml(html); //!Quill root outside setQuillHtml',
+      "  q.root.innerHTML = ''; //!Quill root outside setQuillHtml",
       '  q.root.outerHTML = richTextToHtml(html) + html; //!Quill root',
       "  window._x.description.root['innerHTML'] += html; //!Quill root",
       '  const r = q.root;',
@@ -612,7 +701,7 @@ describe('rich text in the editors', () => {
       "  ed.insertAdjacentHTML('beforeend', html); //!Quill root",
       "  const box = el?.querySelector('.ql-editor');",
       '  if (isRichText(html)) box.innerHTML = html; //!editor element',
-      '  else box.innerHTML = `<p>${escapeHtml(html)}</p>`;',
+      '  else box.innerHTML = `<p>${escapeHtml(html)}</p>`; //!editor element outside setQuillHtml',
       '  box.innerHTML = `<p>${html}</p>`; //!editor element',
       "  document.querySelector('#x .ql-editor').innerHTML = html; //!editor element",
       '  q.clipboard.dangerouslyPasteHTML(html); //!paste',
@@ -620,9 +709,18 @@ describe('rich text in the editors', () => {
       "  q.clipboard.dangerouslyPasteHTML(sanitizeRichHtml(html), 'api');",
       '  q.clipboard.dangerouslyPasteHTML(0, sanitizeRichHtml(html) + html); //!paste',
       "  q.clipboard['dangerouslyPasteHTML'](0, html, Quill.sources.USER); //!paste",
-      "  const s = 'q.root.innerHTML = html; q.clipboard.dangerouslyPasteHTML(html);';",
+      '  q.clipboard.convert({ html }); //!convert',
+      "  q.setContents(q.clipboard.convert({ html: sanitizeRichHtml(html), text: html }), 'api');",
+      "  q.clipboard['convert']({ text: html });",
+      `  q.getModule('clipboard').convert({ "html": html }); //!convert`,
+      '  q.clipboard?.convert(opts); //!convert',
+      '  q.clipboard.convert?.({ ...opts }); //!convert',
+      '  const safe = sanitizeRichHtml(html);',
+      '  q.clipboard.convert({ html: safe }); //!convert',
+      '  setQuillHtml(q, html);',
+      "  const s = 'q.root.innerHTML = html; q.clipboard.dangerouslyPasteHTML(html); q.clipboard.convert({ html });';",
       '  const t = `q.root.innerHTML = ${JSON.stringify(html)}`;',
-      '  // q.root.innerHTML = html;',
+      '  // q.root.innerHTML = html; q.clipboard.convert({ html });',
       '  /* q.clipboard.dangerouslyPasteHTML(html); */',
       '  const re = /q.root.innerHTML = html/;',
       '  el.innerHTML = html;',
@@ -634,28 +732,53 @@ describe('rich text in the editors', () => {
       "  document.getElementById('d_editor').innerHTML = html; //!Quill container",
       "  new Quill(document.getElementById('d_editor'));",
       '}',
+      'function setQuillHtml(q, html, opts) {',
+      '  const clean = sanitizeRichHtml(html, opts);',
+      '  const raw = html;',
+      "  if (clean.includes('<ul')) q.setContents(q.clipboard.convert({ html: clean }), 'api');",
+      '  else q.root.innerHTML = clean;',
+      '  q.root.innerHTML = sanitizeRichHtml(html);',
+      '  q.root.innerHTML = html; //!Quill root',
+      '  q.root.innerHTML = clean + html; //!Quill root',
+      '  q.clipboard.convert({ html: raw }); //!convert',
+      "  q.clipboard.convert({ 'html': html, text: clean }); //!convert",
+      '}',
+      '</script>',
+      '<script>',
+      'function setQuillHtml(q, html) {',
+      '  const clean = sanitizeRichHtml(html);',
+      '  let later = sanitizeRichHtml(html);',
+      '  q.root.innerHTML = later; //!Quill root',
+      '  [html].forEach((clean) => { q.root.innerHTML = clean; }); //!Quill root',
+      '}',
       '</script>',
     ];
     const expected = sample.flatMap((l, i) => (l.includes('//!') ? [`${i + 1} ${l.split('//!')[1]}`] : []));
     const scan = scanEditorSinks(sample.join('\n'));
-    expect(scan.sinks.filter((s) => !s.sanitized).map((s) => `${s.line} ${s.kind}`)).toEqual(expected);
-    expect([scan.constructors, scan.containersResolved]).toEqual([2, 2]);
+    expect(rejected(scan)).toEqual(expected);
+    expect([scan.constructors, scan.containersResolved, scan.loaders, scan.loaderCalls]).toEqual([2, 2, 2, 1]);
   });
 
   it('the scanner sees the editors of index.html', () => {
     const scan = scanEditorSinks(html);
-    const count = (kind: SinkKind) => scan.sinks.filter((s) => s.kind === kind).length;
+    const count = (kind: SinkKind, inLoader: boolean) => scan.sinks.filter((s) => s.kind === kind && s.inLoader === inLoader).length;
     expect(scan.constructors >= 10).toBe(true);
     expect(scan.containersResolved).toBe(scan.constructors);
-    expect(count('Quill root') >= 11).toBe(true);
-    expect(count('editor element') >= 8).toBe(true);
-    expect(count('paste') >= 6).toBe(true);
+    // One setQuillHtml, with its direct write and its convert call; the editors' 19 loads call it.
+    expect([scan.loaders, count('Quill root', true), count('convert', true)]).toEqual([1, 1, 1]);
+    expect(scan.loaderCalls >= 19).toBe(true);
+    expect(count('paste', false) >= 6).toBe(true);
   });
 
   // Each failure lists only file:line entries.
-  it('every Quill root, ql-editor element, Quill container and paste takes sanitized HTML', () => {
+  it('every Quill root, ql-editor element, Quill container, paste and convert takes sanitized HTML', () => {
     const unsanitized = scanEditorSinks(html).sinks.filter((s) => !s.sanitized);
     expect(unsanitized.map((s) => `index.html:${s.line} ${s.kind}`)).toEqual([]);
+  });
+
+  it('only setQuillHtml writes HTML into a Quill root or a ql-editor element', () => {
+    const direct = scanEditorSinks(html).sinks.filter(isDirect);
+    expect(direct.map((s) => `index.html:${s.line} ${s.kind}`)).toEqual([]);
   });
 
   it('the markup gives every editor container no content of its own', () => {

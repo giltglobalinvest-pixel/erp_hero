@@ -28,7 +28,9 @@ const rich = (label: string): string =>
 // the registered formats); setText makes one <p> per line; insertText adds a paragraph; getSelection is always the
 // end; text-change comes from a MutationObserver on root, with empty deltas. It has only the members index.html uses:
 // root, clipboard, on, setText, getText, getLength, getSelection, setSelection, insertText and focus, and the statics
-// import (an object with a whitelist) and register.
+// import (an object with a whitelist), register and find (a container's instance, as Quill 2.0.2 keeps them). It has
+// no setContents or clipboard.convert: setQuillHtml takes them only for older list markup, <pre> and plain <div>, which
+// no text here has (editor-lists.e2e.ts runs that path with the real Quill).
 const QUILL_JS = 'https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js';
 const QUILL_STUB = String.raw`(() => {
   const inertText = (html) => {
@@ -36,11 +38,14 @@ const QUILL_STUB = String.raw`(() => {
     div.innerHTML = String(html ?? '');
     return div.textContent ?? '';
   };
+  const instances = new WeakMap();
   class Quill {
     static import() { return { whitelist: null }; }
     static register() {}
+    static find(node) { return instances.get(node) ?? null; }
     constructor(container, options = {}) {
       this.container = typeof container === 'string' ? document.querySelector(container) : container;
+      instances.set(this.container, this);
       this.options = options;
       this.handlers = {};
       this.container.classList.add('ql-container', 'ql-snow');
