@@ -3,26 +3,34 @@
 This backend serves `index.html` and `/api/*` from one origin and stores all data in a SQLite
 file on a Railway volume. For the design, see `docs/superpowers/specs/2026-09-25-erp-hero-backend-design.md`.
 
-> Until the frontend switch (next development step) is merged, the old GitHub Pages app stays
-> the one your team uses. The page served by this backend loads, but cannot work yet: its old
-> Airtable/Val.town calls are blocked on purpose by the new security policy.
+> The page served here is the app itself (ERP Hero v6.0). It talks only to this server, under
+> `/api`, and contains no Airtable or Val.town code. Once this version is on `main`, the GitHub
+> Pages copy and the old loader pages send everyone to this address (section 9).
+
+> **Revoke the old keys.** The Airtable token that was embedded in the old `index.html` stays
+> readable in the git history. Revoke it in Airtable, together with the old Airtable write key.
+> Revoke the Val.town API token too, and delete the Val.town proxy (`erpHeroProxy`). The app uses
+> none of them anymore, and the import in section 9 uses its own read-only token. The keys kept in
+> Val.town, such as the Freshsales token, were readable with that API token: replace them as well
+> (section 9, step 8).
 
 ## 1. Create the project from GitHub
 
 1. In the Railway dashboard, click **New Project → Deploy from GitHub repo**.
 2. Pick `giltglobalinvest-pixel/erp_hero`. Railway creates a service and starts a first deploy.
    That first deploy fails until the variables in section 4 are set. That's expected.
-3. Open the service → **Settings → Source** and set the **branch** to the branch with the
-   backend: `claude/confident-pascal-b6b330` until it is merged, then `main`.
+3. Open the service → **Settings → Source** and set the **branch** to `main`.
 4. **Settings → Deploy → Healthcheck Path:** enter `/healthz`. Railway then switches traffic to a
    new deployment only after `/healthz` answers 200.
    Everything else uses Railway's defaults, which match this repo: Railpack detects Node, runs
    `npm run build`, starts with `npm start`, and restarts on failure (up to 10 times).
    > `railway.json` in the repo describes the same settings, but Railway has deprecated these
    > config files: **new services do not read them**, and existing services stop reading them on
-   > 2026-12-01. That is why the healthcheck path must be set here. Railway's replacement is a
-   > `.railway/railway.ts` file applied with `railway config apply` ("Infrastructure as Code" in
-   > Railway's docs). It is not set up in this repo yet.
+   > 2026-12-01. That is why the healthcheck path must be set here. Where the file is still read,
+   > it overrides these settings, so it leaves the start command out on purpose: sections 7 and 9
+   > set a one-time start command here, which the file would otherwise cancel. Railway's
+   > replacement is a `.railway/railway.ts` file applied with `railway config apply`
+   > ("Infrastructure as Code" in Railway's docs). It is not set up in this repo yet.
 5. **Settings → Deploy → Regions:** choose **EU West (Amsterdam)**.
 
 > **When the repository becomes private:** Railway's GitHub app must be allowed to read it.
@@ -67,8 +75,8 @@ FRESHSALES_API_KEY=<key>
   and **store a copy in your password manager**. Without it, the stored Freshdesk/Mailchimp keys
   cannot be decrypted (they would have to be re-entered; login keys are not affected).
 - Do not set `PORT`; Railway injects it.
-- Never paste the Airtable token that is embedded in `index.html`. The backend does not need
-  Airtable at all, except on import day (section 9).
+- Never paste the Airtable token that was embedded in the old `index.html`. The backend does not
+  need Airtable at all, except on import day (section 9).
 
 ## 5. Generate a domain
 
@@ -77,10 +85,15 @@ Open the service → **Settings → Networking → Generate Domain**. Copy the U
 trailing slash), and redeploy. `PUBLIC_ORIGIN` must match the address in the browser, otherwise
 every login and save is rejected as a cross-site request.
 
+The app sends visitors of the old GitHub Pages address and of the loader pages to
+`https://erp-hero-production.up.railway.app`. If your domain is different, change that address in
+`index.html`, `loader.html` and `loader-admin.html` (and in `test/e2e/pwa.e2e.ts`) before the
+cutover.
+
 ## 6. Check the deployment
 
 - `https://<domain>/healthz` → `{"ok":true}`
-- `https://<domain>/` → the ERP Hero page. Until the frontend switch, the login cannot work yet.
+- `https://<domain>/` → the login page, with "ERP Hero v6.0" below the form.
 - The deploy logs show one JSON line per request, never bodies, cookies or keys.
 
 ## 7. Create the first admin (before the import)
@@ -94,11 +107,83 @@ every login and save is rejected as a cross-site request.
 
 3. The command prints the new login key once. Store it safely.
 
-Use this admin to smoke-test the deployment. The import in section 9 replaces all users with the users from Airtable.
+`railway ssh` needs an SSH key registered with your Railway account; the CLI offers to register one
+the first time. Without SSH, use a one-time start command instead: set **Settings → Deploy → Custom
+Start Command** to `npm run user:create -- --name "Patrizio" --admin && npm start`, deploy, and
+read the key in that deployment's logs. Then switch back right away, because every start of that
+deployment creates another admin, and the service restarts after a crash
+(`restartPolicyType: ON_FAILURE` in `railway.json`), which runs the one-time command again:
 
-## 8. Smoke test with real services (needs a logged-in session)
+1. Set the start command back to `npm start`.
+2. Apply that staged change with **Deploy**. This creates a new deployment with the current
+   settings.
+3. Never use **Redeploy** or **Restart** on the one-time-command deployment, and never roll back
+   to it. These reuse that deployment's start command, so each of them creates another admin and
+   prints its key into the logs.
 
-After the frontend switch, or with a REST client and the session cookie:
+Then check the new deployment's log: it must show no further `Benutzer angelegt:` line. If one
+appears, that deployment still runs the one-time command, so apply the change with **Deploy** as
+above. Then deactivate each extra admin, so that only one stays active: log in, open
+**Administration → Benutzer** and click **Deaktivieren** (the crossed-out person icon) in the row
+of an extra "Patrizio". The rows all show the same name. If the app then asks for your login key,
+you deactivated your own user: log in with the key from a newer log line instead. The key stays
+readable in the logs, so give yourself a new one after the first login (section 8, step 6).
+
+Log in with this admin in the browser (section 8). The import in section 9 replaces all users with
+the users from Airtable.
+
+## 8. Smoke test in the browser
+
+1. Open `https://<domain>/` and log in with the key from section 7.
+2. **Administration → Firmen → Firma anlegen:** enter a name and save. This is your first Mandant,
+   and the switcher at the top of the sidebar now shows it. With several Mandanten, pick one there.
+3. **Stammdaten → Kunden → Neuer Kunde:** the form already shows the number `K-1001` (each Mandant
+   starts there). Enter a name and save.
+4. Close the customer, open it again, close it, and reload the page. You are still logged in, and
+   the customer is still there.
+5. **Administration → Benutzer → Benutzer anlegen** creates a user with a login key. Create one
+   test user here, not your colleagues: the import in section 9 brings them with their keys. The
+   form fills in a new key: copy it with **Kopieren** before you save, because it is not shown
+   again.
+6. To replace a key, yours included, open the user, click **Neu**, copy the key and save. Saving a
+   new key does not end open sessions; **Alle Sitzungen abmelden** in the same form does, and on
+   your own user it logs you out as well.
+
+Everything you create in this section goes into the database the service started with.
+Activating the import (section 9, step 5) replaces that database and keeps it only in
+`/data/backup-<timestamp>/`. If you do not import, it stays the real database, and step 5 above
+is how you create your colleagues' logins.
+
+Then check the areas that the automated tests do not cover. Before the import there is no real
+data, so repeat these checks after section 9, step 6. Step 8 there replaces the Anthropic,
+Freshdesk and Freshsales keys: check KI-Angebot, Freshdesk and Freshsales once more after it.
+
+> **Some of these checks write into the live Freshdesk and Freshsales accounts.** A new quote,
+> order, delivery note or invoice sends its customer to Freshdesk as a company, and to Freshsales
+> as an account once the Freshsales subdomain is saved; so does linking or creating a customer
+> from a ticket. A KI-Angebot adds a private note with a link to the new quote to its ticket, and
+> every AI summary is saved in its ticket as a private note, so the attachment-proxy check leaves
+> one too. These entries stay when the database is replaced. Before the import, use a test ticket
+> and a test customer whose name no real company has, for example `ERP-Hero-Test-<date>`: when no
+> name matches exactly, the sync can take over the first search hit, a real company. Afterwards,
+> check in Freshdesk and Freshsales that the company, the account and the notes are the ones the
+> test created, then delete them.
+
+- **PDF:** open a quote and create its PDF.
+- **Quotes:** create an article first (**Stammdaten → Artikel**), then a quote with that article
+  as an item, then change the item's quantity.
+- **KI-Angebot:** start one from a Freshdesk ticket (uses `ANTHROPIC_API_KEY`).
+- **Freshdesk:** open a ticket in the app. This needs a Freshdesk key: your own, entered under
+  Administration → Benutzer ("Freshdesk API-Keys"), or the server's fallback `FRESHDESK_API_KEY`.
+- **Attachment proxy:** open a ticket with an image attachment and use an AI summary that needs
+  the image. If the server answers `403 Domain nicht erlaubt: <host>`, add that host to
+  `ATTACHMENT_PROXY_ALLOW` (for example `ATTACHMENT_PROXY_ALLOW=<host>,…plus the defaults`) and
+  tell the developer, so the default list gets updated.
+- **Freshsales, Mailchimp:** under **Administration → Einstellungen**, save the Freshsales
+  subdomain (this turns the Freshsales sync on) and use Mailchimp "Verbindung testen". Then open
+  a customer and click **Erstmals syncen** in its Freshsales section.
+
+The API also works from a REST client with the session cookie:
 
 > **REST clients must send `Origin`.** Every `POST`, `PUT`, `PATCH` and `DELETE`, including the login
 > `POST /api/auth`, must carry `Origin: https://<domain>` (exactly `PUBLIC_ORIGIN`); otherwise the
@@ -111,21 +196,22 @@ After the frontend switch, or with a REST client and the session cookie:
 > curl -b jar.txt https://<domain>/api/me
 > ```
 
-- **Freshdesk:** open a ticket in the app. Check that `GET /api/freshdesk/api/v2/tickets/<id>` works.
-- **Attachment proxy:** open a ticket with an image attachment and use an AI summary that needs
-  the image. If the server answers `403 Domain nicht erlaubt: <host>`, add that host to
-  `ATTACHMENT_PROXY_ALLOW` (for example `ATTACHMENT_PROXY_ALLOW=<host>,…plus the defaults`) and
-  tell the developer, so the default list gets updated.
-- **Anthropic, Freshsales, Mailchimp:** use one feature each ("KI-Angebot", Freshsales sync,
-  Mailchimp "Verbindung testen").
+## 9. Cutover from Airtable
 
-## 9. Cutover from Airtable (after the frontend switch is merged)
+The app is already switched: it talks only to this server, and the loader pages redirect here.
+The cutover moves the data and retires the old setup.
 
-1. Tell everyone to stop using the old app, and wait until nobody is editing anymore.
+1. Tell everyone to stop using the old app, and wait until nobody is editing anymore. Then revoke
+   the old Airtable keys, if not done yet (see the note at the top): the old app can then no
+   longer write to Airtable, and the import uses its own token.
 2. In Airtable, create a **new read-only token** with scopes `data.records:read` and
    `schema.bases:read` on the App base and the Master base.
 3. Set the import variables on the service (`AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`,
    `AIRTABLE_MASTER_BASE_ID`, `ERP_PROJECT_ID=p_1778057282571`). This redeploys.
+   Take each base ID from the base's URL in Airtable: it is the `app…` part of
+   `https://airtable.com/app…/…` (`index.html` no longer holds the IDs).
+   - `AIRTABLE_BASE_ID`: the App base, which holds the ERP tables (Customer, Quote, Order, …);
+   - `AIRTABLE_MASTER_BASE_ID`: the Master base, which holds the `Keys` table.
 4. Run `railway ssh`, then:
 
    ```
@@ -140,7 +226,7 @@ After the frontend switch, or with a REST client and the session cookie:
    - review duplicate document numbers, links to missing records, and calculated Airtable fields
      (copied as fixed values);
    - users listed under "Mehrere Benutzer mit demselben Login-Key" share one login key, and only the
-     oldest of them can log in. Give each of them a separate key in step 8.
+     oldest of them can log in. Give each of them a separate key in step 6.
 5. Activate the import. The old database is kept in `/data/backup-<timestamp>/`.
 
    ```
@@ -153,27 +239,85 @@ After the frontend switch, or with a REST client and the session cookie:
    rolled back, run `railway ssh`, read `/data/activation-failed`, move the entries listed there back
    in the order listed, as described in that file, delete the file, and restart again. The service
    then runs on the previous database; run `db:activate` again if you still want the import.
-6. Everyone logs in at the new address with their existing login key (replaced in step 8).
-7. Remove the four import variables again, and delete the read-only Airtable token.
-8. **Rotate every key the old setup exposed.** The old `index.html` is public, including in the git history:
-   - revoke the Airtable token embedded in `index.html` and the old Airtable write key;
-   - create a new Anthropic key (update `ANTHROPIC_API_KEY`);
-   - have each user regenerate their Freshdesk API key, then enter it again under Admin → Benutzer;
-   - rotate Mailchimp keys;
-   - revoke the Val.town API token and delete the Val.town proxy (`erpHeroProxy`);
-   - **give every user a new login key.** The imported keys were readable through the Airtable
-     token in `index.html`, and the old proxy sent them to every logged-in user. As admin, generate
-     a new key for each user, yourself included, under Admin → Benutzer
-     (`PATCH /api/admin/users/<id>/secrets` with `{"generate_api_key": true}`), then end that
-     user's sessions (`POST /api/sessions/revoke-user` with `{"user_id": "<id>"}`). Hand each new
-     key over in person or by phone. From a REST client, both calls need the session cookie and the
-     `Origin: https://<domain>` header (see section 8), for example:
 
-     ```
-     curl -b jar.txt -X PATCH -H "Origin: https://<domain>" -H "Content-Type: application/json" \
-       -d '{"generate_api_key":true}' https://<domain>/api/admin/users/<id>/secrets
-     ```
+   The service refuses to start while that file exists, and Railway stops restarting it after 10
+   failed starts, so `railway ssh` may find no running service. Then run a placeholder instead of
+   the app for one deploy (this path has not been tried on Railway yet):
+   1. Set **Settings → Deploy → Custom Start Command** to
+      `node -e "require('http').createServer((q, s) => s.end()).listen(process.env.PORT)"` and
+      deploy. The placeholder only answers the health check.
+   2. Run `railway ssh`, move the entries back as `/data/activation-failed` describes, and delete
+      the file.
+   3. Right away, set the start command back to `npm start`, and apply that staged change with
+      **Deploy**. This creates a new deployment with the current settings. While the placeholder
+      runs, every visitor gets a blank page, and a crash restart (`restartPolicyType: ON_FAILURE`
+      in `railway.json`) starts the placeholder again. Never use **Redeploy** or **Restart** on
+      the placeholder deployment, and never roll back to it: these reuse its start command and
+      bring back the blank placeholder page. Then check that `https://<domain>/` shows the login
+      page, not a blank page.
+6. Log in at the new address with the existing login key of a user who is an admin in Airtable,
+   and check the data. The import replaced the admin from section 7. If no imported user is an
+   admin, create one first as in section 7, with `npm run user:create -- --name "<name>" --admin`.
+   Then give every user a new login key before your colleagues start working here. The imported
+   keys were readable through the Airtable token in the old `index.html`, and the old proxy sent
+   them to every logged-in user, so until they are replaced anyone who read them can log in here,
+   including with an admin's key. As that admin, open each user under Administration → Benutzer:
+   click **Neu**, copy the key and save, then open the user again and click
+   **Alle Sitzungen abmelden**. Do your own account last, because that logs you out; log in again
+   with your new key. Hand each new key over in person or by phone. A REST client does the same
+   with `PATCH /api/admin/users/<id>/secrets` and `{"generate_api_key": true}`, then
+   `POST /api/sessions/revoke-user` and `{"user_id": "<id>"}`. `<id>` is the user's `id` from
+   `GET /api/data/User`, and the PATCH response carries the new key once, as `api_key`. Both calls
+   need the session cookie and the `Origin: https://<domain>` header (see section 8), for example:
+
+   ```
+   curl -b jar.txt -X PATCH -H "Origin: https://<domain>" -H "Content-Type: application/json" \
+     -d '{"generate_api_key":true}' https://<domain>/api/admin/users/<id>/secrets
+   ```
+
+   Old bookmarks of the GitHub Pages address and of the loader pages lead here too. An app that
+   was added to the home screen from the old address opens the new address; remove it and add it
+   again from the new address.
+7. Remove the four import variables again, and delete the read-only Airtable token.
+8. **Rotate the other keys the old setup exposed.** The old `index.html` is public, including in the git history:
+   - revoke the Airtable token that was embedded in the old `index.html`, and the old Airtable
+     write key, if not done yet (see the note at the top);
+   - create a new Anthropic key (update `ANTHROPIC_API_KEY`);
+   - have each user regenerate their Freshdesk API key, then enter it again under
+     Administration → Benutzer;
+   - replace the keys that were kept in Val.town, because the old Val.town API token could read
+     them: create a new Freshsales API key (update `FRESHSALES_API_KEY`), and a new Freshdesk key
+     if the server's `FRESHDESK_API_KEY` came from there. The environment variables of the
+     Val.town account list them all;
+   - create a new Mailchimp API key for each Mandant and enter it under
+     Administration → Einstellungen;
+   - revoke the Val.town API token and delete the Val.town proxy (`erpHeroProxy`), if not done
+     yet (see the note at the top).
 9. Keep the Airtable bases untouched as an archive.
+10. GitHub Pages is no longer needed. Leave it on until nobody uses the old address anymore, so old
+    bookmarks still redirect, then turn it off in GitHub under **Settings → Pages**.
+
+## 10. Known limitations after the switch
+
+The app computes and saves its own totals, line totals and document numbers, so no core flow
+depends on an Airtable formula. These smaller gaps remain:
+
+- **Calculated Airtable fields are frozen by the import.** Formula, lookup and rollup values are
+  copied as fixed values and never recalculated. `import-report.json` lists them per table under
+  `computedFields`; read that list after the import (section 9, step 4).
+- **Manufacturer in the quote item's article picker.** The picker shows the old text field
+  `manufacturer`, which the app no longer writes, so new articles show only their article number
+  there. The article list itself uses the linked manufacturer and category.
+- **Archived Mandanten in a Freshdesk ticket's contact dialog.** Its Mandant list hides companies
+  by the Airtable field `archived`, but the app archives a company by setting its status to
+  "archiviert". A company archived in the app still appears in that list.
+- **Custom field types.** The AI quote assistant uses a custom field's Airtable field `field_type`
+  as a hint. The app does not edit that field, so custom fields created in the app give no hint.
+- **Every record is loaded.** Lists now load all records of a table instead of the first 100, so
+  large tables can take longer to open.
+- **A document number taken meanwhile.** If a colleague saves the same number first, the record is
+  saved with the next free number, and a warning says so. Text that was generated before saving
+  still shows the first number.
 
 ## Local development
 

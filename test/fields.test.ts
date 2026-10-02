@@ -16,32 +16,38 @@ const rec = (id: string, fields: Record<string, unknown>): AirtableRecord => ({ 
 
 describe('prepareWriteFields', () => {
   it('splits values into set and clear using Airtable empty-value rules', () => {
-    const r = prepareWriteFields({ name: 'A', zero: 0, zeroStr: '0', empty: '', no: false, none: null, list: [], links: ['recX'] });
+    const r = prepareWriteFields({ name: 'A', zero: 0, zeroStr: '0', empty: '', no: false, none: null, list: [], links: ['recX'] }, 'Customer');
     expect(r.set).toEqual({ name: 'A', zero: 0, zeroStr: '0', links: ['recX'] });
     expect(r.clear.sort()).toEqual(['empty', 'list', 'no', 'none']);
   });
 
   it('silently ignores lock and derived fields', () => {
-    const r = prepareWriteFields({ lock_user_id: 'recU', lock_until: 'x', has_mailchimp_key: true, name: 'B' });
+    const r = prepareWriteFields({ lock_user_id: 'recU', lock_until: 'x', has_mailchimp_key: true, name: 'B' }, 'Customer');
     expect(r.set).toEqual({ name: 'B' });
     expect(r.clear).toEqual([]);
   });
 
   it('rejects secret fields', () => {
     for (const name of ['api_key', 'freshdesk_api_key', 'freshdesk_keys_json', 'mailchimp_api_key', 'refresh_token', 'password']) {
-      expect(() => prepareWriteFields({ [name]: 'x' })).toThrow(/Geheime Felder/);
+      expect(() => prepareWriteFields({ [name]: 'x' }, 'Customer')).toThrow(/Geheime Felder/);
     }
   });
 
   it('does not treat token counters as secrets', () => {
     expect(isSecretField('input_tokens')).toBe(false);
     expect(isSecretField('cache_read_input_tokens')).toBe(false);
-    expect(prepareWriteFields({ input_tokens: 10, output_tokens: 5 }).set).toEqual({ input_tokens: 10, output_tokens: 5 });
+    expect(prepareWriteFields({ input_tokens: 10, output_tokens: 5 }, 'AiUsageLog').set).toEqual({ input_tokens: 10, output_tokens: 5 });
+  });
+
+  it('keeps number fields numeric, only in the tables that define them', () => {
+    expect(prepareWriteFields({ pos: '2', qty: 1.5, unit: '12' }, 'OrderItem').set).toEqual({ pos: 2, qty: 1.5, unit: '12' });
+    expect(() => prepareWriteFields({ pos: 'erste' }, 'OrderItem')).toThrow('pos: Zahl erwartet');
+    expect(prepareWriteFields({ pos: 'erste', qty: 'viel' }, 'Article').set).toEqual({ pos: 'erste', qty: 'viel' });
   });
 
   it('rejects non-objects and dangerous keys', () => {
-    expect(() => prepareWriteFields(['a'])).toThrow(/fields muss ein Objekt sein/);
-    expect(() => prepareWriteFields(JSON.parse('{"__proto__": {"x": 1}}'))).toThrow(/Ungültiger Feldname/);
+    expect(() => prepareWriteFields(['a'], 'Customer')).toThrow(/fields muss ein Objekt sein/);
+    expect(() => prepareWriteFields(JSON.parse('{"__proto__": {"x": 1}}'), 'Customer')).toThrow(/Ungültiger Feldname/);
   });
 
   it('strips secret fields from stored data', () => {

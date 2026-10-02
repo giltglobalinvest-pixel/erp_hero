@@ -16,5 +16,5 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["server", "test", "vitest.config.ts"]
+  "include": ["server", "test", "vitest.config.ts", "vitest.e2e.config.ts"]
 }

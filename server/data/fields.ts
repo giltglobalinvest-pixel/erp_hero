@@ -1,6 +1,7 @@
 import { isPlainObject } from '../http/body.js';
 import type { AirtableRecord } from '../types.js';
 import { ApiError } from '../util/errors.js';
+import { isNumericField, type TableName } from './tables.js';
 
 /** Secret fields that may exist in Airtable data; never stored in records, never returned. */
 export const SECRET_FIELD_NAMES: ReadonlySet<string> = new Set([
@@ -33,8 +34,21 @@ export interface WriteFields {
   clear: string[];
 }
 
+// A plain decimal written as text, e.g. '12', ' -3.5 ' or '0.19': no exponent, no comma, no hex.
+const PLAIN_DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+/** A number field takes a finite number or a plain decimal as text (stored as a number). */
+function numericValue(name: string, value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && PLAIN_DECIMAL.test(value.trim())) {
+    const n = Number(value.trim());
+    if (Number.isFinite(n)) return n;
+  }
+  throw new ApiError('INVALID_REQUEST', `${name}: Zahl erwartet`);
+}
+
 /** Validates a client `fields` object for a create/update. */
-export function prepareWriteFields(input: unknown): WriteFields {
+export function prepareWriteFields(input: unknown, table: TableName): WriteFields {
   if (!isPlainObject(input)) throw new ApiError('INVALID_REQUEST', 'fields muss ein Objekt sein');
   const set: [string, unknown][] = [];
   const clear: string[] = [];
@@ -44,7 +58,10 @@ export function prepareWriteFields(input: unknown): WriteFields {
     }
     if (LOCK_FIELDS.has(name) || DERIVED_FIELDS.has(name)) continue;
     if (isSecretField(name)) throw new ApiError('INVALID_REQUEST', `Geheime Felder nur über Admin-Funktion (${name})`);
-    if (isEmptyValue(value)) clear.push(name);
+    if (isNumericField(table, name)) {
+      if (value === null || value === '') clear.push(name);
+      else set.push([name, numericValue(name, value)]);
+    } else if (isEmptyValue(value)) clear.push(name);
     else set.push([name, value]);
   }
   return { set: Object.fromEntries(set), clear };
